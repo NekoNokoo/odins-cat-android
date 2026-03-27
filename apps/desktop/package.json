@@ -1,0 +1,27 @@
+{
+  "name": "@whitelist/desktop",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build --bundles app && zsh ./scripts/build-dmg.sh"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.10.1",
+    "@whitelist/contracts": "file:../../packages/contracts",
+    "@whitelist/ui": "file:../../packages/ui",
+    "next": "16.2.1",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.1",
+    "@types/node": "22.10.1",
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.2",
+    "typescript": "5.7.2"
+  }
+}

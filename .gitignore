@@ -1,0 +1,10 @@
+.next
+out
+node_modules
+dist
+build
+coverage
+.DS_Store
+bin
+*.log
+target

@@ -1,0 +1,15 @@
+{
+  "name": "@whitelist/ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./CircleMeter": "./src/CircleMeter.tsx",
+    "./SectionCard": "./src/SectionCard.tsx",
+    "./StageList": "./src/StageList.tsx"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0"
+  }
+}
+

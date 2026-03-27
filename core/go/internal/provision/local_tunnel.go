@@ -1,0 +1,891 @@
+package provision
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+)
+
+const ownerProfileRemotePath = whitelistInvitePath
+const fixedLocalSOCKSPort = 58371
+
+type ownerProfile struct {
+	Name            string `json:"name"`
+	Transport       string `json:"transport"`
+	ServerHost      string `json:"serverHost"`
+	VKTurnProxyPort int    `json:"vkTurnProxyPort"`
+	EndpointPort    int    `json:"endpointPort,omitempty"`
+	WireGuard       struct {
+		ServerPublicKey  string `json:"serverPublicKey"`
+		ClientPrivateKey string `json:"clientPrivateKey"`
+		ClientPublicKey  string `json:"clientPublicKey"`
+		Address          string `json:"address"`
+		MTU              int    `json:"mtu"`
+	} `json:"wireguard"`
+}
+
+type OwnerProfileResponse struct {
+	Exists          bool   `json:"exists"`
+	Name            string `json:"name,omitempty"`
+	Transport       string `json:"transport,omitempty"`
+	ServerHost      string `json:"serverHost,omitempty"`
+	VKTurnProxyPort int    `json:"vkTurnProxyPort,omitempty"`
+	EndpointPort    int    `json:"endpointPort,omitempty"`
+	LocalPath       string `json:"localPath,omitempty"`
+	RawJSON         string `json:"rawJson,omitempty"`
+	WireGuard       struct {
+		ServerPublicKey  string `json:"serverPublicKey"`
+		ClientPrivateKey string `json:"clientPrivateKey"`
+		ClientPublicKey  string `json:"clientPublicKey"`
+		Address          string `json:"address"`
+		MTU              int    `json:"mtu"`
+	} `json:"wireguard,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+type LocalTunnelState struct {
+	Status        string                 `json:"status"`
+	SOCKSAddress  string                 `json:"socksAddress,omitempty"`
+	BridgeAddress string                 `json:"bridgeAddress,omitempty"`
+	VKLink        string                 `json:"vkLink,omitempty"`
+	ServerHost    string                 `json:"serverHost,omitempty"`
+	Transport     string                 `json:"transport,omitempty"`
+	Error         string                 `json:"error,omitempty"`
+	CooldownUntil string                 `json:"cooldownUntil,omitempty"`
+	CooldownSecs  int                    `json:"cooldownRemainingSeconds,omitempty"`
+	LogTail       []string               `json:"logTail,omitempty"`
+	LastTest      *LocalTunnelTestResult `json:"lastTest,omitempty"`
+}
+
+type LocalTunnelTestResult struct {
+	OK        bool   `json:"ok"`
+	Status    string `json:"status"`
+	URL       string `json:"url"`
+	Output    string `json:"output,omitempty"`
+	Error     string `json:"error,omitempty"`
+	CheckedAt string `json:"checkedAt,omitempty"`
+}
+
+type localTunnelManager struct {
+	mu     sync.Mutex
+	state  LocalTunnelState
+	cancel context.CancelFunc
+	cmds   []*exec.Cmd
+	files  []*os.File
+	logs   []string
+}
+
+var tunnelManager = &localTunnelManager{
+	state: LocalTunnelState{Status: "idle"},
+}
+
+const vkRateLimitCooldown = 15 * time.Minute
+
+func StartLocalTunnel(req Request, vkLink string) LocalTunnelState {
+	tunnelManager.mu.Lock()
+	defer tunnelManager.mu.Unlock()
+
+	if req.Server.Transport == TransportVKTurnProxyXray && tunnelManager.cooldownActiveLocked() {
+		tunnelManager.state.Status = "failed"
+		tunnelManager.state.VKLink = vkLink
+		tunnelManager.state.ServerHost = req.Server.Host
+		tunnelManager.state.Error = tunnelManager.cooldownMessageLocked()
+		state := tunnelManager.snapshotLocked()
+		return state
+	}
+
+	tunnelManager.stopLocked()
+	tunnelManager.cleanupOrphanedClientsLocked()
+	tunnelManager.state = LocalTunnelState{
+		Status:     "starting",
+		VKLink:     vkLink,
+		ServerHost: req.Server.Host,
+		Transport:  string(req.Server.Transport),
+	}
+	tunnelManager.logs = nil
+
+	ctx, cancel := context.WithCancel(context.Background())
+	tunnelManager.cancel = cancel
+
+	go tunnelManager.run(ctx, req, vkLink)
+
+	return tunnelManager.state
+}
+
+func StopLocalTunnel() LocalTunnelState {
+	tunnelManager.mu.Lock()
+	tunnelManager.stopLocked()
+	tunnelManager.cleanupOrphanedClientsLocked()
+	tunnelManager.setStateLocked("stopped", "")
+	state := tunnelManager.state
+	tunnelManager.mu.Unlock()
+	_ = DisableSystemProxy()
+	return state
+}
+
+func GetLocalTunnelState() LocalTunnelState {
+	tunnelManager.mu.Lock()
+	defer tunnelManager.mu.Unlock()
+	if tunnelManager.cooldownActiveLocked() && tunnelManager.state.Error == "" {
+		tunnelManager.state.Error = tunnelManager.cooldownMessageLocked()
+	}
+	if tunnelManager.state.Status == "running" && tunnelManager.state.SOCKSAddress != "" && !isSOCKSReady(tunnelManager.state.SOCKSAddress) {
+		tunnelManager.setStateLocked("failed", "local SOCKS tunnel is not accepting connections")
+		tunnelManager.logs = append(tunnelManager.logs, tunnelManager.state.Error)
+		tunnelManager.trimLogsLocked()
+	}
+	return tunnelManager.snapshotLocked()
+}
+
+func TestLocalTunnel(url string) LocalTunnelState {
+	tunnelManager.mu.Lock()
+	if url == "" {
+		url = "https://example.com"
+	}
+	if tunnelManager.state.Status != "running" || tunnelManager.state.SOCKSAddress == "" {
+		state := tunnelManager.state
+		state.LastTest = &LocalTunnelTestResult{
+			OK:        false,
+			Status:    "failed",
+			URL:       url,
+			Error:     "local tunnel is not running",
+			CheckedAt: time.Now().UTC().Format(time.RFC3339),
+		}
+		tunnelManager.state = state
+		state.LogTail = append([]string(nil), tunnelManager.logs...)
+		tunnelManager.mu.Unlock()
+		return state
+	}
+
+	socksAddress := tunnelManager.state.SOCKSAddress
+	tunnelManager.state.LastTest = &LocalTunnelTestResult{
+		OK:        false,
+		Status:    "running",
+		URL:       url,
+		CheckedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	state := tunnelManager.state
+	state.LogTail = append([]string(nil), tunnelManager.logs...)
+	tunnelManager.mu.Unlock()
+
+	cmd := exec.Command("curl",
+		"--connect-timeout", "8",
+		"--max-time", "20",
+		"--socks5-hostname", socksAddress,
+		"-I",
+		url,
+	)
+	output, err := cmd.CombinedOutput()
+
+	tunnelManager.mu.Lock()
+	defer tunnelManager.mu.Unlock()
+
+	result := &LocalTunnelTestResult{
+		OK:        err == nil,
+		Status:    "passed",
+		URL:       url,
+		Output:    strings.TrimSpace(string(output)),
+		CheckedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err != nil {
+		result.OK = false
+		result.Status = "failed"
+		result.Error = err.Error()
+	}
+	tunnelManager.state.LastTest = result
+	if result.OK {
+		tunnelManager.logs = append(tunnelManager.logs, "Tunnel test passed for "+url)
+	} else {
+		tunnelManager.logs = append(tunnelManager.logs, "Tunnel test failed for "+url+": "+result.Error)
+	}
+	tunnelManager.trimLogsLocked()
+
+	state = tunnelManager.state
+	state.LogTail = append([]string(nil), tunnelManager.logs...)
+	return state
+}
+
+func GetLocalOwnerProfile(host string) OwnerProfileResponse {
+	if strings.TrimSpace(host) == "" {
+		return OwnerProfileResponse{
+			Exists: false,
+			Error:  "host is required",
+		}
+	}
+
+	targetPath, err := localProfilePath(host)
+	if err != nil {
+		return OwnerProfileResponse{
+			Exists: false,
+			Error:  err.Error(),
+		}
+	}
+
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return OwnerProfileResponse{
+				Exists:    false,
+				LocalPath: targetPath,
+			}
+		}
+		return OwnerProfileResponse{
+			Exists:    false,
+			LocalPath: targetPath,
+			Error:     err.Error(),
+		}
+	}
+
+	var profile ownerProfile
+	if err := json.Unmarshal(data, &profile); err != nil {
+		return OwnerProfileResponse{
+			Exists:    false,
+			LocalPath: targetPath,
+			Error:     fmt.Sprintf("parse local owner profile: %v", err),
+		}
+	}
+
+	resp := OwnerProfileResponse{
+		Exists:          true,
+		Name:            profile.Name,
+		Transport:       profile.Transport,
+		ServerHost:      profile.ServerHost,
+		VKTurnProxyPort: profile.VKTurnProxyPort,
+		EndpointPort:    effectiveOwnerEndpointPort(profile),
+		LocalPath:       targetPath,
+		RawJSON:         string(data),
+	}
+	resp.WireGuard.ServerPublicKey = profile.WireGuard.ServerPublicKey
+	resp.WireGuard.ClientPrivateKey = profile.WireGuard.ClientPrivateKey
+	resp.WireGuard.ClientPublicKey = profile.WireGuard.ClientPublicKey
+	resp.WireGuard.Address = profile.WireGuard.Address
+	resp.WireGuard.MTU = profile.WireGuard.MTU
+	return resp
+}
+
+func (m *localTunnelManager) run(ctx context.Context, req Request, vkLink string) {
+	profile, err := loadOwnerProfile(req)
+	if err != nil {
+		m.fail(err)
+		return
+	}
+
+	socksPort, err := reserveFixedPort("tcp", fixedLocalSOCKSPort)
+	if err != nil {
+		m.fail(err)
+		return
+	}
+
+	xrayBinary, err := ensureLocalXrayBinary()
+	if err != nil {
+		m.fail(err)
+		return
+	}
+	endpointPort := effectiveOwnerEndpointPort(profile)
+	if endpointPort == 0 {
+		m.fail(fmt.Errorf("owner profile endpointPort is required"))
+		return
+	}
+
+	bridgePort := 0
+	if profile.Transport == string(TransportVKTurnProxyXray) {
+		bridgePort, err = freePort("udp")
+		if err != nil {
+			m.fail(err)
+			return
+		}
+	}
+
+	xrayConfigPath, err := writeLocalXrayConfig(profile, socksPort, bridgePort, endpointPort)
+	if err != nil {
+		m.fail(err)
+		return
+	}
+
+	xrayCmd := exec.CommandContext(
+		ctx,
+		xrayBinary,
+		"run",
+		"-config", xrayConfigPath,
+	)
+
+	xrayLog, _ := createLogFile("xray-client")
+	var xrayLogPath string
+	if xrayLog != nil {
+		xrayLogPath = xrayLog.Name()
+		xrayCmd.Stdout = xrayLog
+		xrayCmd.Stderr = xrayLog
+	}
+
+	var vkCmd *exec.Cmd
+	var vkLog *os.File
+	var vkLogPath string
+	if profile.Transport == string(TransportVKTurnProxyXray) {
+		vkBinary, err := ensureLocalVKClientBinary()
+		if err != nil {
+			m.fail(err)
+			return
+		}
+		vkCmd = exec.CommandContext(
+			ctx,
+			vkBinary,
+			"-peer", fmt.Sprintf("%s:%d", profile.ServerHost, endpointPort),
+			"-vk-link", vkLink,
+			"-listen", fmt.Sprintf("127.0.0.1:%d", bridgePort),
+		)
+		vkLog, _ = createLogFile("vk-turn-proxy-client")
+		if vkLog != nil {
+			vkLogPath = vkLog.Name()
+			vkCmd.Stdout = vkLog
+			vkCmd.Stderr = vkLog
+		}
+		if err := vkCmd.Start(); err != nil {
+			m.fail(fmt.Errorf("start vk-turn-proxy client: %w", err))
+			return
+		}
+	}
+	if err := xrayCmd.Start(); err != nil {
+		if vkCmd != nil && vkCmd.Process != nil {
+			_ = vkCmd.Process.Kill()
+		}
+		m.fail(fmt.Errorf("start xray client: %w", err))
+		return
+	}
+
+	vkExit := make(chan error, 1)
+	xrayExit := make(chan error, 1)
+	if vkCmd != nil {
+		go func() {
+			vkExit <- vkCmd.Wait()
+		}()
+	}
+	go func() {
+		xrayExit <- xrayCmd.Wait()
+	}()
+
+	socksAddress := fmt.Sprintf("127.0.0.1:%d", socksPort)
+	if err := waitForSOCKSReady(ctx, socksAddress, 5*time.Second, xrayExit, xrayLogPath, m); err != nil {
+		if ctx.Err() == nil {
+			m.fail(err)
+		}
+		return
+	}
+	select {
+	case err := <-vkExit:
+		if vkCmd != nil && ctx.Err() == nil {
+			m.fail(m.describeProcessExit("vk-turn-proxy client", err, vkLogPath))
+		}
+		return
+	default:
+	}
+
+	m.mu.Lock()
+	if vkCmd != nil {
+		m.cmds = []*exec.Cmd{vkCmd, xrayCmd}
+	} else {
+		m.cmds = []*exec.Cmd{xrayCmd}
+	}
+	m.files = compactFiles(vkLog, xrayLog)
+	m.state = LocalTunnelState{
+		Status:        "running",
+		SOCKSAddress:  socksAddress,
+		BridgeAddress: "",
+		VKLink:        vkLink,
+		ServerHost:    profile.ServerHost,
+		Transport:     profile.Transport,
+		LastTest: &LocalTunnelTestResult{
+			OK:     false,
+			Status: "idle",
+			URL:    "https://example.com",
+		},
+	}
+	m.logs = append(m.logs, "Local tunnel started")
+	m.mu.Unlock()
+
+	if vkCmd != nil {
+		go func() {
+			err := <-vkExit
+			if ctx.Err() == nil {
+				m.fail(m.describeProcessExit("vk-turn-proxy client", err, vkLogPath))
+			}
+		}()
+	}
+
+	go func() {
+		err := <-xrayExit
+		if ctx.Err() == nil {
+			m.fail(m.describeProcessExit("xray client", err, xrayLogPath))
+		}
+	}()
+}
+
+func loadOwnerProfile(req Request) (ownerProfile, error) {
+	var profile ownerProfile
+
+	localPath, err := localProfilePath(req.Server.Host)
+	if err == nil {
+		if data, readErr := os.ReadFile(localPath); readErr == nil {
+			if unmarshalErr := json.Unmarshal(data, &profile); unmarshalErr == nil {
+				if ownerProfileMatchesRequest(profile, req.Server.Transport) {
+					return profile, nil
+				}
+			}
+		}
+	}
+
+	client, err := connectSSH(req)
+	if err != nil {
+		return profile, err
+	}
+	defer client.Close()
+
+	profileText, err := runRemote(client, "cat "+quoteShell(ownerProfileRemotePath))
+	if err != nil {
+		return profile, err
+	}
+
+	if err := json.Unmarshal([]byte(profileText), &profile); err != nil {
+		return profile, fmt.Errorf("parse owner profile: %w", err)
+	}
+	if err := saveLocalOwnerProfile(req.Server.Host, []byte(profileText)); err != nil {
+		return profile, err
+	}
+	return profile, nil
+}
+
+func ownerProfileMatchesRequest(profile ownerProfile, transport Transport) bool {
+	if profile.Transport != string(transport) {
+		return false
+	}
+	switch transport {
+	case TransportXray:
+		return effectiveOwnerEndpointPort(profile) > 0
+	case TransportVKTurnProxyXray:
+		return profile.VKTurnProxyPort > 0
+	default:
+		return false
+	}
+}
+
+func (m *localTunnelManager) fail(err error) {
+	m.mu.Lock()
+	m.stopLocked()
+	m.setStateLocked("failed", err.Error())
+	if isVKRateLimitError(err) {
+		until := time.Now().UTC().Add(vkRateLimitCooldown)
+		m.state.CooldownUntil = until.Format(time.RFC3339)
+		m.state.CooldownSecs = int(time.Until(until).Seconds())
+		m.state.Error = m.cooldownMessageLocked()
+	}
+	m.logs = append(m.logs, err.Error())
+	m.trimLogsLocked()
+	m.mu.Unlock()
+	_ = DisableSystemProxy()
+}
+
+func (m *localTunnelManager) stopLocked() {
+	if m.cancel != nil {
+		m.cancel()
+		m.cancel = nil
+	}
+	for _, cmd := range m.cmds {
+		if cmd != nil && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	}
+	m.cmds = nil
+	for _, file := range m.files {
+		if file != nil {
+			_ = file.Close()
+		}
+	}
+	m.files = nil
+}
+
+func (m *localTunnelManager) cleanupOrphanedClientsLocked() {
+	cacheDir, err := appCacheDir()
+	if err != nil {
+		return
+	}
+	pattern := filepath.Join(cacheDir, "bin", "xray-darwin-arm64") + " run -config " + filepath.Join(cacheDir, "config", "xray-client-")
+	_ = killMatchingProcesses(pattern, false)
+	time.Sleep(150 * time.Millisecond)
+	_ = killMatchingProcesses(pattern, true)
+}
+
+func (m *localTunnelManager) setStateLocked(status, errText string) {
+	m.state.Status = status
+	m.state.SOCKSAddress = ""
+	m.state.BridgeAddress = ""
+	m.state.Error = errText
+	m.state.LastTest = nil
+}
+
+func (m *localTunnelManager) trimLogsLocked() {
+	if len(m.logs) > 20 {
+		m.logs = append([]string(nil), m.logs[len(m.logs)-20:]...)
+	}
+}
+
+func freePort(network string) (int, error) {
+	switch network {
+	case "udp":
+		addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+		if err != nil {
+			return 0, err
+		}
+		conn, err := net.ListenUDP("udp", addr)
+		if err != nil {
+			return 0, err
+		}
+		defer conn.Close()
+		return conn.LocalAddr().(*net.UDPAddr).Port, nil
+	default:
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return 0, err
+		}
+		defer l.Close()
+		return l.Addr().(*net.TCPAddr).Port, nil
+	}
+}
+
+func reserveFixedPort(network string, port int) (int, error) {
+	switch network {
+	case "udp":
+		addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			return 0, err
+		}
+		conn, err := net.ListenUDP("udp", addr)
+		if err != nil {
+			return 0, fmt.Errorf("local UDP port %d is busy", port)
+		}
+		defer conn.Close()
+		return port, nil
+	default:
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			return 0, fmt.Errorf("local SOCKS port %d is busy", port)
+		}
+		defer l.Close()
+		return port, nil
+	}
+}
+
+func waitForSOCKSReady(
+	ctx context.Context,
+	socksAddress string,
+	timeout time.Duration,
+	xrayExit <-chan error,
+	xrayLogPath string,
+	manager *localTunnelManager,
+) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-xrayExit:
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return manager.describeProcessExit("xray client", err, xrayLogPath)
+		default:
+		}
+
+		if isSOCKSReady(socksAddress) {
+			return nil
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return fmt.Errorf("local SOCKS listener did not become ready on %s", socksAddress)
+}
+
+func isSOCKSReady(socksAddress string) bool {
+	conn, err := net.DialTimeout("tcp", socksAddress, 250*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func killMatchingProcesses(pattern string, force bool) error {
+	args := []string{"-f"}
+	if force {
+		args = append(args, "-9")
+	}
+	args = append(args, pattern)
+	cmd := exec.Command("pkill", args...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		text := strings.TrimSpace(string(output))
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 && text == "" {
+			return nil
+		}
+		return fmt.Errorf("pkill %q: %w: %s", pattern, err, text)
+	}
+	return nil
+}
+
+func ensureLocalVKClientBinary() (string, error) {
+	cacheDir, err := appCacheDir()
+	if err != nil {
+		return "", err
+	}
+	targetDir := filepath.Join(cacheDir, "bin")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return "", err
+	}
+	targetPath := filepath.Join(targetDir, "vk-turn-proxy-client-darwin-arm64")
+	if info, err := os.Stat(targetPath); err == nil && time.Since(info.ModTime()) < 12*time.Hour {
+		return targetPath, nil
+	}
+
+	goPathDir := filepath.Join(targetDir, "gopath-client")
+	if err := os.MkdirAll(goPathDir, 0o755); err != nil {
+		return "", err
+	}
+	cmd := exec.Command(resolveGoBinary(), "install", "github.com/cacggghp/vk-turn-proxy/client@latest")
+	cmd.Env = append(os.Environ(), "GOPATH="+goPathDir, "GOOS=darwin", "GOARCH=arm64", "CGO_ENABLED=0")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("go install vk-turn-proxy client: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	installedPath := filepath.Join(goPathDir, "bin", "client")
+	data, err := os.ReadFile(installedPath)
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(targetPath, data, 0o755); err != nil {
+		return "", err
+	}
+	return targetPath, nil
+}
+
+func resolveGoBinary() string {
+	preferred := "/Users/vladislav/.local/opt/go/bin/go"
+	if _, err := os.Stat(preferred); err == nil {
+		return preferred
+	}
+	return "go"
+}
+
+func ensureLocalXrayBinary() (string, error) {
+	cacheDir, err := appCacheDir()
+	if err != nil {
+		return "", err
+	}
+	targetDir := filepath.Join(cacheDir, "bin")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return "", err
+	}
+	targetPath := filepath.Join(targetDir, "xray-darwin-arm64")
+	if _, err := os.Stat(targetPath); err == nil {
+		return targetPath, nil
+	}
+
+	tmpDir, err := os.MkdirTemp("", "odin-one-xray-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	zipPath := filepath.Join(tmpDir, "xray.zip")
+	curlCmd := exec.Command("curl", "-fsSLo", zipPath, "https://github.com/XTLS/Xray-core/releases/download/v25.8.3/Xray-macos-arm64-v8a.zip")
+	if output, err := curlCmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("download xray: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	unzipCmd := exec.Command("unzip", "-oq", zipPath, "xray", "-d", tmpDir)
+	if output, err := unzipCmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("unzip xray: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	data, err := os.ReadFile(filepath.Join(tmpDir, "xray"))
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(targetPath, data, 0o755); err != nil {
+		return "", err
+	}
+	return targetPath, nil
+}
+
+func writeLocalXrayConfig(profile ownerProfile, socksPort, bridgePort, endpointPort int) (string, error) {
+	cacheDir, err := appCacheDir()
+	if err != nil {
+		return "", err
+	}
+	configDir := filepath.Join(cacheDir, "config")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		return "", err
+	}
+	configPath := filepath.Join(configDir, fmt.Sprintf("xray-client-%d.json", socksPort))
+	endpoint := fmt.Sprintf("%s:%d", profile.ServerHost, endpointPort)
+	if profile.Transport == string(TransportVKTurnProxyXray) {
+		endpoint = fmt.Sprintf("127.0.0.1:%d", bridgePort)
+	}
+	config := fmt.Sprintf(`{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": %d,
+      "protocol": "socks",
+      "settings": {
+        "udp": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "wireguard",
+      "settings": {
+        "secretKey": %q,
+        "address": [%q],
+        "peers": [
+          {
+            "endpoint": %q,
+            "publicKey": %q
+          }
+        ],
+        "mtu": %d,
+        "reserved": [0, 0, 0]
+      }
+    }
+  ]
+}
+`, socksPort, profile.WireGuard.ClientPrivateKey, profile.WireGuard.Address, endpoint, profile.WireGuard.ServerPublicKey, profile.WireGuard.MTU)
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		return "", err
+	}
+	return configPath, nil
+}
+
+func effectiveOwnerEndpointPort(profile ownerProfile) int {
+	if profile.EndpointPort > 0 {
+		return profile.EndpointPort
+	}
+	return profile.VKTurnProxyPort
+}
+
+func createLogFile(prefix string) (*os.File, error) {
+	cacheDir, err := appCacheDir()
+	if err != nil {
+		return nil, err
+	}
+	logDir := filepath.Join(cacheDir, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(filepath.Join(logDir, prefix+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+}
+
+func (m *localTunnelManager) describeProcessExit(name string, err error, logPath string) error {
+	if logPath != "" {
+		logTail := readRecentLogLines(logPath, 30)
+		if diagnostic := diagnoseVKLog(logTail); diagnostic != "" {
+			m.mu.Lock()
+			m.logs = append(m.logs, diagnostic)
+			m.trimLogsLocked()
+			m.mu.Unlock()
+			return fmt.Errorf("%s: %s", name, diagnostic)
+		}
+	}
+	return fmt.Errorf("%s exited: %w", name, err)
+}
+
+func (m *localTunnelManager) cooldownActiveLocked() bool {
+	if m.state.CooldownUntil == "" {
+		return false
+	}
+	until, err := time.Parse(time.RFC3339, m.state.CooldownUntil)
+	if err != nil {
+		m.state.CooldownUntil = ""
+		m.state.CooldownSecs = 0
+		return false
+	}
+	remaining := int(time.Until(until).Seconds())
+	if remaining <= 0 {
+		m.state.CooldownUntil = ""
+		m.state.CooldownSecs = 0
+		return false
+	}
+	m.state.CooldownSecs = remaining
+	return true
+}
+
+func (m *localTunnelManager) cooldownMessageLocked() string {
+	if !m.cooldownActiveLocked() {
+		return ""
+	}
+	minutes := (m.state.CooldownSecs + 59) / 60
+	return fmt.Sprintf("VK rate limit is active. Wait about %d min, use a fresh VK call link, then retry once.", minutes)
+}
+
+func (m *localTunnelManager) snapshotLocked() LocalTunnelState {
+	if m.cooldownActiveLocked() && m.state.Error != "" && isVKRateLimitMessage(m.state.Error) {
+		m.state.Error = m.cooldownMessageLocked()
+	}
+	state := m.state
+	state.LogTail = append([]string(nil), m.logs...)
+	return state
+}
+
+func isVKRateLimitError(err error) bool {
+	return err != nil && isVKRateLimitMessage(err.Error())
+}
+
+func isVKRateLimitMessage(message string) bool {
+	normalized := strings.ToLower(message)
+	return strings.Contains(normalized, "vk rate limit")
+}
+
+func diagnoseVKLog(lines []string) string {
+	joined := strings.ToLower(strings.Join(lines, "\n"))
+	switch {
+	case strings.Contains(joined, "rate limit reached"), strings.Contains(joined, "error_code:29"):
+		return "VK rate limit reached. Wait 10-15 minutes, use a fresh VK call link, and retry with a single SOCKS request first."
+	case strings.Contains(joined, "get turn creds error"):
+		return "VK TURN credential request failed. Retry later with a fresh VK call link."
+	default:
+		return ""
+	}
+}
+
+func readRecentLogLines(path string, limit int) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			filtered = append(filtered, line)
+		}
+	}
+	if len(filtered) > limit {
+		filtered = filtered[len(filtered)-limit:]
+	}
+	return filtered
+}
+
+func compactFiles(files ...*os.File) []*os.File {
+	result := files[:0]
+	for _, file := range files {
+		if file != nil {
+			result = append(result, file)
+		}
+	}
+	return slices.Clone(result)
+}
