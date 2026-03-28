@@ -2,9 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_PATH="$ROOT_DIR/src-tauri/target/release/bundle/macos/Odin One.app"
+APP_PATH="$ROOT_DIR/src-tauri/target/release/bundle/macos/Odin One VK.app"
 DMG_DIR="$ROOT_DIR/src-tauri/target/release/bundle/dmg"
-DMG_PATH="$DMG_DIR/Odin One_0.1.0_aarch64.dmg"
+DMG_PATH="$DMG_DIR/Odin One VK_0.1.0_aarch64.dmg"
 STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/odin-one-dmg.XXXXXX")"
 
 cleanup() {
@@ -15,11 +15,11 @@ trap cleanup EXIT
 mkdir -p "$DMG_DIR"
 rm -f "$DMG_PATH"
 
-cp -R "$APP_PATH" "$STAGING_DIR/Odin One.app"
+cp -R "$APP_PATH" "$STAGING_DIR/Odin One VK.app"
 ln -s /Applications "$STAGING_DIR/Applications"
 
 hdiutil create \
-  -volname "Odin One" \
+  -volname "Odin One VK" \
   -srcfolder "$STAGING_DIR" \
   -ov \
   -format UDZO \

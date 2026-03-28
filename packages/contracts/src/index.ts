@@ -1,6 +1,20 @@
 export type AuthMethod = "password" | "private-key";
 export type TransportMode = "vk-turn-proxy+xray" | "xray";
+export type TunnelEngine = "xray" | "sing-box";
+export type TunnelProtocol = "direct-wireguard" | "vless-reality";
 export type StageStatus = "queued" | "current" | "done" | "failed";
+export type ProtocolPackStatus = "active" | "staged";
+
+export interface ProtocolPackEntry {
+  id: string;
+  label: string;
+  status: ProtocolPackStatus;
+  engine: string;
+  scheme: string;
+  network: string;
+  port: number;
+  notes?: string;
+}
 
 export interface ServerDraft {
   host: string;
@@ -8,6 +22,8 @@ export interface ServerDraft {
   username: string;
   authMethod: AuthMethod;
   transport: TransportMode;
+  engine?: TunnelEngine;
+  protocol?: TunnelProtocol;
 }
 
 export interface DeployStage {
@@ -66,11 +82,14 @@ export interface OwnerAccessProfile {
   exists: boolean;
   name?: string;
   transport?: string;
+  activeProtocol?: string;
   serverHost?: string;
   vkTurnProxyPort?: number;
   endpointPort?: number;
   localPath?: string;
   rawJson?: string;
+  protocolPack?: ProtocolPackEntry[];
+  stagedFallbacks?: Record<string, unknown>;
   wireguard?: {
     serverPublicKey: string;
     clientPrivateKey: string;
@@ -95,10 +114,19 @@ export interface DeploymentState {
   deploymentId: string;
   serverHost: string;
   transport: string;
+  engine?: TunnelEngine;
+  protocol?: TunnelProtocol;
   status: "queued" | "running" | "done" | "failed";
   steps: DeployStage[];
   turnPort?: number;
   wireGuardPort?: number;
+  healthChecks?: Array<{
+    key: string;
+    label: string;
+    ok: boolean;
+    detail: string;
+  }>;
+  protocolPack?: ProtocolPackEntry[];
   error?: string;
 }
 
@@ -119,6 +147,7 @@ export interface ValidationResponse {
     detail: string;
   }>;
   warnings: string[];
+  protocolPack?: ProtocolPackEntry[];
   error?: string;
 }
 
@@ -135,6 +164,8 @@ export interface LocalTunnelState {
   vkLink?: string;
   serverHost?: string;
   transport?: string;
+  engine?: TunnelEngine;
+  protocol?: TunnelProtocol;
   error?: string;
   cooldownUntil?: string;
   cooldownRemainingSeconds?: number;

@@ -9,17 +9,21 @@ import (
 )
 
 const (
-	whitelistRoot             = "/opt/whitelist"
-	whitelistBinDir           = whitelistRoot + "/bin"
-	whitelistConfigDir        = whitelistRoot + "/config"
-	whitelistProfilesDir      = whitelistRoot + "/profiles"
-	whitelistGuestProfilesDir = whitelistProfilesDir + "/guests"
-	whitelistXrayConfigPath   = whitelistConfigDir + "/xray-server.json"
-	whitelistInvitePath       = whitelistProfilesDir + "/owner-profile.json"
-	whitelistXrayBinaryPath   = whitelistBinDir + "/xray"
-	whitelistProxyBinaryPath  = whitelistBinDir + "/vk-turn-proxy-server"
-	whitelistXrayServicePath  = "/etc/systemd/system/whitelist-xray.service"
-	whitelistProxyServicePath = "/etc/systemd/system/whitelist-vk-turn-proxy.service"
+	whitelistRoot              = "/opt/whitelist"
+	whitelistBinDir            = whitelistRoot + "/bin"
+	whitelistConfigDir         = whitelistRoot + "/config"
+	whitelistProfilesDir       = whitelistRoot + "/profiles"
+	whitelistGuestProfilesDir  = whitelistProfilesDir + "/guests"
+	whitelistXrayConfigPath    = whitelistConfigDir + "/xray-server.json"
+	whitelistRealityConfigPath = whitelistConfigDir + "/xray-reality-server.json"
+	whitelistFallbacksPath     = whitelistConfigDir + "/fallbacks-staged.json"
+	whitelistProtocolPackPath  = whitelistConfigDir + "/protocol-pack.json"
+	whitelistInvitePath        = whitelistProfilesDir + "/owner-profile.json"
+	whitelistXrayBinaryPath    = whitelistBinDir + "/xray"
+	whitelistSingBoxBinaryPath = whitelistBinDir + "/sing-box"
+	whitelistProxyBinaryPath   = whitelistBinDir + "/vk-turn-proxy-server"
+	whitelistXrayServicePath   = "/etc/systemd/system/whitelist-xray.service"
+	whitelistProxyServicePath  = "/etc/systemd/system/whitelist-vk-turn-proxy.service"
 )
 
 type xrayWireGuardPeer struct {
@@ -27,11 +31,18 @@ type xrayWireGuardPeer struct {
 	AllowedIPs []string
 }
 
-func renderXrayConfig(serverPrivateKey string, peers []xrayWireGuardPeer, port int) string {
-	return renderXrayConfigWithListen(serverPrivateKey, peers, "127.0.0.1", port)
+type xrayRealityInbound struct {
+	Port       int
+	UUID       string
+	PrivateKey string
+	ShortID    string
 }
 
-func renderXrayConfigWithListen(serverPrivateKey string, peers []xrayWireGuardPeer, listenHost string, port int) string {
+func renderXrayConfig(serverPrivateKey string, peers []xrayWireGuardPeer, port int) string {
+	return renderXrayConfigWithListen(serverPrivateKey, peers, "127.0.0.1", port, nil)
+}
+
+func renderXrayConfigWithListen(serverPrivateKey string, peers []xrayWireGuardPeer, listenHost string, port int, reality *xrayRealityInbound) string {
 	peerBlocks := make([]string, 0, len(peers))
 	for _, peer := range peers {
 		allowedIPs := make([]string, 0, len(peer.AllowedIPs))
@@ -46,12 +57,7 @@ func renderXrayConfigWithListen(serverPrivateKey string, peers []xrayWireGuardPe
           }`, peer.PublicKey, strings.Join(allowedIPs, ",\n")))
 	}
 
-	return fmt.Sprintf(`{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    {
+	inbounds := []string{fmt.Sprintf(`    {
       "tag": "wg-in",
       "protocol": "wireguard",
       "listen": %q,
@@ -63,7 +69,56 @@ func renderXrayConfigWithListen(serverPrivateKey string, peers []xrayWireGuardPe
 %s
         ]
       }
-    }
+    }`, listenHost, port, serverPrivateKey, strings.Join(peerBlocks, ",\n"))}
+
+	if reality != nil {
+		inbounds = append(inbounds, fmt.Sprintf(`    {
+      "tag": "reality-in",
+      "listen": "0.0.0.0",
+      "port": %d,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "flow": "xtls-rprx-vision",
+            "id": %q
+          }
+        ],
+        "decryption": "none"
+      },
+      "sniffing": {
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ],
+        "enabled": true
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "dest": %q,
+          "privateKey": %q,
+          "serverNames": [
+            %q
+          ],
+          "shortIds": [
+            %q
+          ],
+          "show": false,
+          "xver": 0
+        }
+      }
+    }`, reality.Port, reality.UUID, realityDestination, reality.PrivateKey, realityServerName, reality.ShortID))
+	}
+
+	return fmt.Sprintf(`{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+%s
   ],
   "outbounds": [
     {
@@ -74,18 +129,20 @@ func renderXrayConfigWithListen(serverPrivateKey string, peers []xrayWireGuardPe
     }
   ]
 }
-`, listenHost, port, serverPrivateKey, strings.Join(peerBlocks, ",\n"))
+`, strings.Join(inbounds, ",\n"))
 }
 
-func renderAccessProfile(role, id, name, host string, transport Transport, endpointPort int, serverPublicKey, clientPrivateKey, clientPublicKey, address string) (string, error) {
+func renderAccessProfile(role, id, name, host string, transport Transport, endpointPort int, serverPublicKey, clientPrivateKey, clientPublicKey, address string, stagedFallbacks map[string]any) (string, error) {
 	profile := map[string]any{
-		"id":           id,
-		"role":         role,
-		"name":         name,
-		"transport":    transport,
-		"serverHost":   host,
-		"endpointPort": endpointPort,
-		"createdAt":    nowRFC3339(),
+		"id":             id,
+		"role":           role,
+		"name":           name,
+		"transport":      transport,
+		"serverHost":     host,
+		"endpointPort":   endpointPort,
+		"createdAt":      nowRFC3339(),
+		"activeProtocol": activeProtocolID(transport),
+		"protocolPack":   buildProtocolPack(transport, endpointPort),
 		"wireguard": map[string]any{
 			"serverPublicKey":  serverPublicKey,
 			"clientPrivateKey": clientPrivateKey,
@@ -93,6 +150,9 @@ func renderAccessProfile(role, id, name, host string, transport Transport, endpo
 			"address":          address,
 			"mtu":              1280,
 		},
+	}
+	if len(stagedFallbacks) > 0 {
+		profile["stagedFallbacks"] = stagedFallbacks
 	}
 	if transport == TransportVKTurnProxyXray {
 		profile["vkTurnProxyPort"] = endpointPort

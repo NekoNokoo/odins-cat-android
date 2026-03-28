@@ -1,9 +1,17 @@
+import path from "node:path";
+
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  typedRoutes: true,
   output: "export",
   assetPrefix: "./",
+  turbopack: {
+    root: path.join(__dirname, "../..")
+  },
+  experimental: {
+    webpackBuildWorker: false,
+    workerThreads: false
+  },
   typescript: {
     ignoreBuildErrors: true
   }

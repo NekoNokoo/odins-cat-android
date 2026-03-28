@@ -13,16 +13,19 @@ import type {
 } from "@whitelist/contracts";
 import { SectionCard } from "@whitelist/ui/SectionCard";
 import { StageList } from "@whitelist/ui/StageList";
+import { ConnectScreenHero } from "@whitelist/ui/ConnectScreenHero";
 import { useI18n } from "./i18n";
 
-const apiBaseUrl = process.env.NEXT_PUBLIC_CORE_API_URL ?? "http://127.0.0.1:8088";
+const apiBaseUrl = process.env.NEXT_PUBLIC_CORE_API_URL ?? "http://127.0.0.1:18088";
 
 const initialDraft: ServerDraft = {
   host: "",
   port: 22,
   username: "root",
   authMethod: "password",
-  transport: "vk-turn-proxy+xray"
+  transport: "vk-turn-proxy+xray",
+  engine: "xray",
+  protocol: "vless-reality"
 };
 
 type WorkspaceTab = "server" | "access" | "tunnel";
@@ -33,6 +36,7 @@ type PendingAction =
   | "validate"
   | "deploy"
   | "startTunnel"
+  | "startReality"
   | "stopTunnel"
   | "refreshTunnel"
   | "runTest"
@@ -41,10 +45,16 @@ type PendingAction =
   | "disableSystemProxy"
   | null;
 
-const storageKey = "odin-one-control-center";
+const storageKey = "odin-one-vk-control-center-v2";
 
 const normalizeTransport = (transport: string | undefined): ServerDraft["transport"] =>
   transport === "xray" || transport === "vk-turn-proxy+xray" ? transport : initialDraft.transport;
+
+const normalizeEngine = (engine: string | undefined): NonNullable<ServerDraft["engine"]> =>
+  engine === "sing-box" || engine === "xray" ? engine : "xray";
+
+const normalizeProtocol = (protocol: string | undefined): NonNullable<ServerDraft["protocol"]> =>
+  protocol === "vless-reality" || protocol === "direct-wireguard" ? protocol : "vless-reality";
 
 type PersistedState = {
   activeTab: WorkspaceTab;
@@ -54,6 +64,14 @@ type PersistedState = {
   vkLink: string;
   validation: ValidationResponse | null;
 };
+
+type CoreHealthState = {
+  service: string;
+  status: string;
+};
+
+const formatProtocolEntry = (entry: NonNullable<OwnerAccessProfile["protocolPack"]>[number]) =>
+  `${entry.label} / ${entry.scheme} / ${entry.network.toUpperCase()} ${entry.port}`;
 
 export function ControlCenter() {
   const { locale, t } = useI18n();
@@ -74,6 +92,7 @@ export function ControlCenter() {
   const [importShareCode, setImportShareCode] = useState("");
   const [importedProfile, setImportedProfile] = useState<InviteProfile | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [coreHealth, setCoreHealth] = useState<CoreHealthState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [isPending, startTransition] = useTransition();
@@ -107,7 +126,8 @@ export function ControlCenter() {
       "runtime-prep": "Подготовка окружения",
       "install-binaries": draft.transport === "xray" ? "Установка xray" : "Установка бинарников",
       "configure-services": "Настройка сервисов",
-      "service-start": "Запуск сервисов"
+      "service-start": "Запуск сервисов",
+      "egress-check": "Проверка исходящего трафика"
     };
     const descriptionMap: Record<string, string> = {
       "ssh-check": "Проверяет учётные данные, удалённую ОС и текущее состояние сервера.",
@@ -120,7 +140,8 @@ export function ControlCenter() {
         : "Генерирует ключи, пишет конфиги xray и Odin One и ставит systemd unit-файлы.",
       "service-start": draft.transport === "xray"
         ? "Запускает xray на публичном UDP порту и проверяет его состояние."
-        : "Запускает xray и vk-turn-proxy на изолированных портах и проверяет их состояние."
+        : "Запускает xray и vk-turn-proxy на изолированных портах и проверяет их состояние.",
+      "egress-check": "Проверяет DNS, HTTP и HTTPS egress на сервере после запуска сервисов."
     };
 
     return {
@@ -141,7 +162,11 @@ export function ControlCenter() {
       "remote-user": "Удалённый пользователь",
       "os-release": "Операционная система",
       "sudo-presence": "Наличие sudo",
-      "docker-presence": "Наличие Docker"
+      "docker-presence": "Наличие Docker",
+      "curl-presence": "Наличие curl",
+      "dns-resolution": "DNS резолвинг",
+      "remote-http-egress": "Исходящий HTTP с сервера",
+      "remote-https-egress": "Исходящий HTTPS с сервера"
     };
 
     return map[key] ?? fallback;
@@ -183,6 +208,67 @@ export function ControlCenter() {
     : vpnModeActive
       ? t("disableVpn")
       : t("enableVpn");
+  const currentHost = localTunnel?.serverHost || draft.host || "—";
+  const currentTransport = draft.transport === "vk-turn-proxy+xray" ? t("transportVK") : t("transportDirect");
+  const currentEngine = localTunnel?.engine ?? deployment?.engine ?? draft.engine ?? "xray";
+  const currentProtocol = localTunnel?.protocol ?? deployment?.protocol ?? draft.protocol ?? "direct-wireguard";
+  const deploymentHealthLabel = deployment?.healthChecks?.length
+    ? deployment.healthChecks.every((check) => check.ok)
+      ? t("remoteEgressReady")
+      : t("remoteEgressBlocked")
+    : t("tunnelStatusIdle");
+  const tunnelHealthLabel = localTunnel?.lastTest
+    ? localTunnel.lastTest.status === "passed"
+      ? t("ready")
+      : localTunnel.lastTest.status === "failed"
+        ? t("fail")
+        : localTunnel.lastTest.status === "running"
+          ? t("testing")
+          : t("tunnelStatusIdle")
+    : t("tunnelStatusIdle");
+  const primaryStatusBadge = vpnModeActive ? t("ready") : tunnelStatusLabel || t("tunnelStatusIdle");
+  const primaryStatusText = vpnModeActive
+    ? t("vpnEnabled")
+    : localTunnel?.status === "running"
+      ? t("lastTestIdle")
+      : t("vpnDisabled");
+  const coreRuntimeLabel = coreHealth?.status === "ok" ? t("runtimeHealthy") : t("runtimeUnavailable");
+  const profileCacheLabel = draft.host
+    ? ownerProfile?.exists
+      ? t("profileCacheReady")
+      : t("profileCacheMissing")
+    : t("profileCacheUnknown");
+  const deployModeLabel = requiresVKLink ? t("deployModeVk") : t("deployModeDirect");
+  const safetyPostureLabel = systemProxyActive ? t("safetySystemProxyOn") : t("safetyLocalhostOnly");
+  const runtimeLogTail = localTunnel?.logTail ?? [];
+  const operatorSummary = [
+    coreHealth?.status === "ok" ? t("runtimeHealthy") : t("runtimeUnavailable"),
+    ownerProfile?.exists ? t("profileCacheReady") : t("profileCacheMissing"),
+    localTunnel?.status === "running" ? tunnelStatusLabel : primaryStatusBadge,
+    deploymentHealthLabel
+  ].join(" / ");
+  const recoveryHint = !validation?.ok
+    ? t("recoveryHintValidate")
+    : requiresVKLink && !vkLink
+      ? t("recoveryHintVkLink")
+      : cooldownMinutes > 0
+        ? t("recoveryHintCooldown")
+        : localTunnel?.status === "running"
+          ? t("recoveryHintSystemProxy")
+          : importedProfile?.localPath
+            ? t("recoveryHintImport")
+            : ownerProfile?.exists
+              ? t("recoveryHintOwnerProfile")
+              : t("recoveryHintGeneric");
+  const currentProtocolPack = ownerProfile?.protocolPack ?? deployment?.protocolPack ?? validation?.protocolPack ?? [];
+  const activeProtocolEntry = currentProtocolPack.find((entry) => entry.status === "active") ?? currentProtocolPack[0];
+  const stagedProtocolEntries = currentProtocolPack.filter((entry) => entry.status !== "active");
+  const protocolPackSummary = activeProtocolEntry
+    ? `${activeProtocolEntry.label} / ${activeProtocolEntry.scheme} / ${activeProtocolEntry.network.toUpperCase()} ${activeProtocolEntry.port}`
+    : t("diagnosticsEmpty");
+  const stagedFallbackSummary = stagedProtocolEntries.length > 0
+    ? stagedProtocolEntries.map((entry) => formatProtocolEntry(entry)).join("\n")
+    : t("diagnosticsEmpty");
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -204,12 +290,19 @@ export function ControlCenter() {
         setActiveAccessTab(parsed.activeAccessTab);
       }
       if (parsed.draft) {
+        const normalizedTransportValue = normalizeTransport(parsed.draft.transport);
+        const normalizedProtocolValue = normalizeProtocol(parsed.draft.protocol);
         setDraft({
           host: parsed.draft.host ?? initialDraft.host,
           port: parsed.draft.port ?? initialDraft.port,
           username: parsed.draft.username ?? initialDraft.username,
           authMethod: parsed.draft.authMethod ?? initialDraft.authMethod,
-          transport: normalizeTransport(parsed.draft.transport)
+          transport: normalizedTransportValue,
+          engine: normalizeEngine(parsed.draft.engine),
+          protocol:
+            normalizedTransportValue === "xray" && normalizedProtocolValue === "direct-wireguard"
+              ? "vless-reality"
+              : normalizedProtocolValue
         });
         if (parsed.draft.host) {
           void fetchOwnerProfile(parsed.draft.host);
@@ -228,6 +321,7 @@ export function ControlCenter() {
       window.localStorage.removeItem(storageKey);
     }
 
+    void fetchCoreHealth();
     void fetchSystemProxyStatus();
     pollLocalTunnel(true);
   }, []);
@@ -338,6 +432,18 @@ export function ControlCenter() {
     });
   };
 
+  const fetchCoreHealth = async () => {
+    try {
+      const res = await fetch(`${apiBaseUrl}/healthz`);
+      const data = (await res.json()) as CoreHealthState;
+      setCoreHealth(data);
+      return data;
+    } catch {
+      setCoreHealth(null);
+      return null;
+    }
+  };
+
   const fetchOwnerProfile = async (host: string) => {
     if (!host) {
       return;
@@ -382,6 +488,25 @@ export function ControlCenter() {
     }
   };
 
+  const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+  const waitForRunningTunnel = async (attempts = 8, delayMs = 900) => {
+    let tunnelData = await pollLocalTunnel(true);
+    if (tunnelData?.status === "running" && tunnelData.socksAddress) {
+      return tunnelData;
+    }
+
+    for (let i = 0; i < attempts; i += 1) {
+      await sleep(delayMs);
+      tunnelData = await pollLocalTunnel(true);
+      if (tunnelData?.status === "running" && tunnelData.socksAddress) {
+        return tunnelData;
+      }
+    }
+
+    return tunnelData;
+  };
+
   const runCurrentTunnelTest = async () => {
     const res = await fetch(`${apiBaseUrl}/api/local-tunnel/test`, {
       method: "POST",
@@ -398,6 +523,23 @@ export function ControlCenter() {
       setError(data.lastTest?.error ?? data.error ?? t("tunnelTestFailed"));
     }
     return data;
+  };
+
+  const runCurrentTunnelTestWithRetry = async (retries = 3, delayMs = 1500) => {
+    let result = await runCurrentTunnelTest();
+    if (result.lastTest?.ok) {
+      return result;
+    }
+
+    for (let i = 0; i < retries; i += 1) {
+      await sleep(delayMs);
+      result = await runCurrentTunnelTest();
+      if (result.lastTest?.ok) {
+        return result;
+      }
+    }
+
+    return result;
   };
 
   const fetchSystemProxyStatus = async () => {
@@ -426,12 +568,22 @@ export function ControlCenter() {
     return fetchSystemProxyStatus();
   };
 
+  const handleRefreshOverview = () => {
+    startTransition(async () => {
+      await Promise.all([
+        fetchCoreHealth(),
+        draft.host ? fetchOwnerProfile(draft.host) : Promise.resolve(),
+        pollLocalTunnel(true)
+      ]);
+    });
+  };
+
   const handleStartTunnel = () => {
     setError(null);
     setPendingAction("startTunnel");
     startTransition(async () => {
       try {
-        const res = await fetch(`${apiBaseUrl}/api/local-tunnel/start`, {
+        const res = await fetch(`${apiBaseUrl}/api/local-tunnel/start-reality`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json"
@@ -449,9 +601,9 @@ export function ControlCenter() {
           setError(data.error ?? t("tunnelStartFailed"));
           return;
         }
-        const tunnelData = await pollLocalTunnel();
+        const tunnelData = await waitForRunningTunnel();
         if (tunnelData?.status === "running" && tunnelData.socksAddress) {
-          await runCurrentTunnelTest();
+          await runCurrentTunnelTestWithRetry();
         }
       } catch (requestError) {
         const message = requestError instanceof Error ? requestError.message : t("unknownError");
@@ -478,14 +630,61 @@ export function ControlCenter() {
     });
   };
 
+  const handleStartRealityTunnel = () => {
+    setError(null);
+    setPendingAction("startReality");
+    startTransition(async () => {
+      try {
+        const realityDraft: ServerDraft = {
+          ...draft,
+          transport: "xray",
+          engine: "xray",
+          protocol: "vless-reality"
+        };
+        setDraft(realityDraft);
+
+        const res = await fetch(`${apiBaseUrl}/api/local-tunnel/start`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            server: realityDraft,
+            secret,
+            vkLink: ""
+          })
+        });
+        const data = (await res.json()) as LocalTunnelState;
+        setLocalTunnel(data);
+        void fetchSystemProxyStatus();
+        if (!res.ok) {
+          setError(data.error ?? t("tunnelStartFailed"));
+          return;
+        }
+        const tunnelData = await waitForRunningTunnel();
+        if (tunnelData?.status === "running" && tunnelData.socksAddress) {
+          const testedTunnel = await runCurrentTunnelTestWithRetry(3, 1500);
+          if (!testedTunnel.lastTest?.ok) {
+            setError(testedTunnel.lastTest?.error ?? testedTunnel.error ?? t("tunnelTestFailed"));
+          }
+        }
+      } catch (requestError) {
+        const message = requestError instanceof Error ? requestError.message : t("unknownError");
+        setError(message);
+      } finally {
+        setPendingAction(null);
+      }
+    });
+  };
+
   const handleRefreshTunnelStatus = () => {
     setError(null);
     setPendingAction("refreshTunnel");
     startTransition(async () => {
       try {
-        const tunnelData = await pollLocalTunnel(true);
+        const tunnelData = await waitForRunningTunnel(2, 600);
         if (tunnelData?.status === "running" && tunnelData.socksAddress) {
-          await runCurrentTunnelTest();
+          await runCurrentTunnelTestWithRetry(1, 1000);
         }
       } finally {
         setPendingAction(null);
@@ -584,15 +783,7 @@ export function ControlCenter() {
             return;
           }
 
-          for (let i = 0; i < 6; i += 1) {
-            await new Promise((resolve) => window.setTimeout(resolve, 900));
-            const statusRes = await fetch(`${apiBaseUrl}/api/local-tunnel/status`);
-            tunnelData = (await statusRes.json()) as LocalTunnelState;
-            setLocalTunnel(tunnelData);
-            if (tunnelData.status === "running" && tunnelData.socksAddress) {
-              break;
-            }
-          }
+          tunnelData = await waitForRunningTunnel(8, 900);
         }
 
         if (!tunnelData || tunnelData.status !== "running" || !tunnelData.socksAddress) {
@@ -600,7 +791,7 @@ export function ControlCenter() {
           return;
         }
 
-        const testedTunnel = await runCurrentTunnelTest();
+        const testedTunnel = await runCurrentTunnelTestWithRetry(3, 1500);
         if (!testedTunnel.lastTest?.ok) {
           setError(testedTunnel.lastTest?.error ?? testedTunnel.error ?? t("tunnelTestFailed"));
           return;
@@ -764,6 +955,75 @@ export function ControlCenter() {
 
   return (
     <>
+      <ConnectScreenHero
+        eyebrow={t("vpnMode")}
+        title="Odin One VK"
+        description={primaryStatusText}
+        facts={[
+          { label: t("status"), value: primaryStatusBadge },
+          { label: t("transport"), value: currentTransport },
+          { label: t("activeProtocol"), value: currentProtocol === "vless-reality" ? t("protocolReality") : t("protocolWireGuard") },
+          { label: t("host"), value: currentHost },
+          { label: t("socksProxy"), value: localTunnel?.socksAddress ?? "—" },
+          {
+            label: t("systemProxy"),
+            value: systemProxyActive ? t("systemProxyEnabled") : t("systemProxyDisabled")
+          },
+          { label: t("lastTest"), value: tunnelHealthLabel }
+        ]}
+        buttonLabel={vpnButtonLabel}
+        buttonActive={vpnModeActive}
+        buttonBusy={vpnButtonBusy}
+        buttonDisabled={
+          isPending ||
+          (!vpnModeActive && (!validation?.ok || (requiresVKLink && (!vkLink || cooldownMinutes > 0))))
+        }
+        onButtonClick={vpnModeActive ? handleDisableVPN : handleEnableVPN}
+        error={error}
+      />
+
+      <SectionCard eyebrow={t("controlPlane")} title={t("runtimeOverview")}>
+        <p className="empty-state">{t("runtimeOverviewText")}</p>
+
+        <div className="control-plane-grid">
+          <div className="field">
+            <span>{t("coreRuntime")}</span>
+            <strong>{coreRuntimeLabel}</strong>
+            <p>{coreHealth?.service ?? "whitelist-mvpd"}</p>
+          </div>
+
+          <div className="field">
+            <span>{t("profileCache")}</span>
+            <strong>{profileCacheLabel}</strong>
+            <p>{draft.host || "—"}</p>
+          </div>
+
+          <div className="field">
+            <span>{t("deployMode")}</span>
+            <strong>{deployModeLabel}</strong>
+            <p>{currentTransport}</p>
+          </div>
+
+          <div className="field">
+            <span>{t("safetyPosture")}</span>
+            <strong>{safetyPostureLabel}</strong>
+            <p>{localTunnel?.socksAddress ?? "—"}</p>
+          </div>
+
+          <div className="field field-span">
+            <span>{t("protocolPack")}</span>
+            <strong>{activeProtocolEntry ? protocolPackSummary : t("diagnosticsEmpty")}</strong>
+            <p>{activeProtocolEntry ? t("fallbackReady") : t("diagnosticsEmpty")}</p>
+          </div>
+        </div>
+
+        <div className="inline-actions">
+          <button className="ghost" type="button" onClick={handleRefreshOverview} disabled={isPending}>
+            {t("refreshOverview")}
+          </button>
+        </div>
+      </SectionCard>
+
       <div className="workspace-tabs" role="tablist" aria-label="Workspace sections">
         <button
           className={activeTab === "server" ? "workspace-tab is-active" : "workspace-tab"}
@@ -842,7 +1102,9 @@ export function ControlCenter() {
               onChange={(event) =>
                 setDraft((current) => ({
                   ...current,
-                  transport: event.target.value as ServerDraft["transport"]
+                  transport: event.target.value as ServerDraft["transport"],
+                  engine: event.target.value === "xray" ? current.engine ?? "xray" : "xray",
+                  protocol: event.target.value === "xray" ? current.protocol ?? "vless-reality" : "direct-wireguard"
                 }))
               }
             >
@@ -850,6 +1112,43 @@ export function ControlCenter() {
               <option value="xray">{t("transportDirect")}</option>
             </select>
           </label>
+
+          {!requiresVKLink ? (
+            <label className="input-field input-span">
+              <span>{t("protocolMode")}</span>
+              <select
+                value={draft.protocol ?? "direct-wireguard"}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    protocol: event.target.value as NonNullable<ServerDraft["protocol"]>,
+                    engine: event.target.value === "vless-reality" ? "xray" : current.engine ?? "xray"
+                  }))
+                }
+              >
+                <option value="direct-wireguard">{t("protocolWireGuard")}</option>
+                <option value="vless-reality">{t("protocolReality")}</option>
+              </select>
+            </label>
+          ) : null}
+
+          {!requiresVKLink ? (
+            <label className="input-field input-span">
+              <span>{t("engineStack")}</span>
+              <select
+                value={draft.engine ?? "xray"}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    engine: event.target.value as NonNullable<ServerDraft["engine"]>
+                  }))
+                }
+              >
+                <option value="xray">{t("engineXray")}</option>
+                {draft.protocol !== "vless-reality" ? <option value="sing-box">{t("engineSingBox")}</option> : null}
+              </select>
+            </label>
+          ) : null}
 
           <label className="input-field input-span">
             <span>{draft.authMethod === "password" ? t("password") : t("privateKey")}</span>
@@ -917,33 +1216,6 @@ export function ControlCenter() {
       <SectionCard eyebrow={t("macTest")} title={t("isolatedTunnel")}>
         <p className="empty-state">{requiresVKLink ? t("tunnelIntro") : t("directTunnelIntro")}</p>
 
-        <div className="vpn-hero">
-          <div className="vpn-hero__copy">
-            <strong>{t("vpnMode")}</strong>
-            <p>{t("vpnModeText")}</p>
-            <p>{vpnModeActive ? t("vpnEnabled") : t("vpnDisabled")}</p>
-          </div>
-          <button
-            className={[
-              "vpn-orb",
-              vpnModeActive ? "is-active" : "",
-              vpnButtonBusy ? "is-busy" : ""
-            ].filter(Boolean).join(" ")}
-            onClick={vpnModeActive ? handleDisableVPN : handleEnableVPN}
-            disabled={
-              isPending ||
-              (!vpnModeActive &&
-                (!validation?.ok || (requiresVKLink && (!vkLink || cooldownMinutes > 0))))
-            }
-            type="button"
-          >
-            <span className="vpn-orb__ring" />
-            <span className="vpn-orb__core">
-              <span className="vpn-orb__label">{vpnButtonLabel}</span>
-            </span>
-          </button>
-        </div>
-
         <div className="inline-actions">
           <button
             className={`primary ${isBusy("startTunnel") ? "button-busy" : ""}`}
@@ -952,6 +1224,15 @@ export function ControlCenter() {
           >
             {isBusy("startTunnel") ? t("startingTunnel") : t("startTunnel")}
           </button>
+          {!requiresVKLink ? (
+            <button
+              className={`ghost ${isBusy("startReality") ? "button-busy" : ""}`}
+              onClick={handleStartRealityTunnel}
+              disabled={isPending || !validation?.ok}
+            >
+              {isBusy("startReality") ? t("startingTunnel") : t("startRealityTunnel")}
+            </button>
+          ) : null}
           <button className={`ghost ${isBusy("stopTunnel") ? "button-busy" : ""}`} onClick={handleStopTunnel} disabled={isPending}>
             {isBusy("stopTunnel") ? t("stoppingTunnel") : t("stopTunnel")}
           </button>
@@ -1089,6 +1370,41 @@ export function ControlCenter() {
                 <p>{t("safeModeText")}</p>
               </div>
             ) : null}
+
+            <div className="command-card">
+              <strong>{t("runtimeLog")}</strong>
+              <p>{t("runtimeLogText")}</p>
+              <textarea
+                readOnly
+                value={runtimeLogTail.length > 0 ? runtimeLogTail.join("\n") : t("diagnosticsEmpty")}
+              />
+            </div>
+
+            <div className="check-list">
+              <div className="check-row">
+                <div>
+                  <strong>{t("activeEndpoint")}</strong>
+                  <p>{ownerProfile?.serverHost ? `${ownerProfile.serverHost}:${endpointPort || "—"}` : currentHost}</p>
+                </div>
+                <span className="pill pill-off">{t("endpoint")}</span>
+              </div>
+
+              <div className="check-row">
+                <div>
+                  <strong>{t("tunnelEngine")}</strong>
+                  <p>{currentEngine} / {currentTransport}</p>
+                </div>
+                <span className="pill pill-off">{t("transport")}</span>
+              </div>
+
+              <div className="check-row">
+                <div>
+                  <strong>{t("activeProtocol")}</strong>
+                  <p>{currentProtocol === "vless-reality" ? t("protocolReality") : t("protocolWireGuard")}</p>
+                </div>
+                <span className="pill pill-off">{t("protocolPack")}</span>
+              </div>
+            </div>
           </div>
         ) : null}
       </SectionCard>
@@ -1151,6 +1467,16 @@ export function ControlCenter() {
                     </div>
                     <span className="pill pill-off">{t("owner")}</span>
                   </div>
+
+                  {ownerProfile.protocolPack?.length ? (
+                    <div className="command-card">
+                      <strong>{t("protocolPack")}</strong>
+                      <p>
+                        {t("activeProtocol")}: {activeProtocolEntry ? formatProtocolEntry(activeProtocolEntry) : "—"}
+                      </p>
+                      <textarea readOnly value={stagedFallbackSummary} />
+                    </div>
+                  ) : null}
 
                   {ownerProfile.localPath ? (
                     <div className="command-card">
@@ -1326,6 +1652,113 @@ export function ControlCenter() {
       </SectionCard>
       ) : null}
 
+      <SectionCard eyebrow={t("desktopDiagnostics")} title={t("diagnosticsCenter")}>
+        <p className="empty-state">{t("diagnosticsCenterText")}</p>
+
+        <div className="control-plane-grid">
+          <div className="command-card">
+            <strong>{t("operatorNotes")}</strong>
+            <p>{t("operatorNotesText")}</p>
+            <textarea readOnly value={operatorSummary} />
+          </div>
+
+          <div className="command-card">
+            <strong>{t("runtimeLog")}</strong>
+            <p>{t("runtimeLogText")}</p>
+            <textarea
+              readOnly
+              value={runtimeLogTail.length > 0 ? runtimeLogTail.join("\n") : t("diagnosticsEmpty")}
+            />
+          </div>
+        </div>
+      </SectionCard>
+
+      <SectionCard eyebrow={t("recentSession")} title={t("sessionSnapshot")}>
+        <p className="empty-state">{t("sessionSnapshotText")}</p>
+
+        <div className="control-plane-grid">
+          <div className="check-list">
+            <div className="check-row">
+              <div>
+                <strong>{t("validation")}</strong>
+                <p>{validation?.ok ? t("checkOk") : t("checkFail")}</p>
+              </div>
+              <span className={validation?.ok ? "pill pill-ok" : "pill pill-off"}>
+                {validation?.ok ? t("ready") : t("validation")}
+              </span>
+            </div>
+
+            <div className="check-row">
+              <div>
+                <strong>{t("provisioning")}</strong>
+                <p>{deployment ? `${deployment.deploymentId} / ${deploymentStatusLabel}` : t("provisioningEmpty")}</p>
+              </div>
+              <span className={deployment?.status === "done" ? "pill pill-ok" : "pill pill-off"}>
+                {deploymentStatusLabel || t("tunnelStatusIdle")}
+              </span>
+            </div>
+
+            <div className="check-row">
+              <div>
+                <strong>{t("remoteEgressHealth")}</strong>
+                <p>{deployment?.healthChecks?.length ? deploymentHealthLabel : t("diagnosticsEmpty")}</p>
+              </div>
+              <span
+                className={
+                  deployment?.healthChecks?.length && deployment.healthChecks.every((check) => check.ok)
+                    ? "pill pill-ok"
+                    : "pill pill-off"
+                }
+              >
+                {deploymentHealthLabel}
+              </span>
+            </div>
+
+            <div className="check-row">
+              <div>
+                <strong>{t("protocolPack")}</strong>
+                <p>{activeProtocolEntry ? protocolPackSummary : t("diagnosticsEmpty")}</p>
+              </div>
+              <span className={stagedProtocolEntries.length > 0 ? "pill pill-ok" : "pill pill-off"}>
+                {stagedProtocolEntries.length > 0 ? t("fallbackReady") : t("diagnosticsEmpty")}
+              </span>
+            </div>
+
+            <div className="check-row">
+              <div>
+                <strong>{t("ownerProfile")}</strong>
+                <p>{ownerProfile?.exists ? ownerProfile.localPath ?? ownerProfile.name ?? "owner" : t("noOwnerProfile")}</p>
+              </div>
+              <span className={ownerProfile?.exists ? "pill pill-ok" : "pill pill-off"}>
+                {ownerProfile?.exists ? t("saved") : t("fail")}
+              </span>
+            </div>
+
+            <div className="check-row">
+              <div>
+                <strong>{t("importedProfile")}</strong>
+                <p>{importedProfile?.localPath ?? importedProfile?.name ?? t("importProfileIntro")}</p>
+              </div>
+              <span className={importedProfile?.localPath ? "pill pill-ok" : "pill pill-off"}>
+                {importedProfile?.localPath ? t("imported") : t("local")}
+              </span>
+            </div>
+          </div>
+
+          <div className="command-card">
+            <strong>{t("recoveryHints")}</strong>
+            <p>{t("recoveryHintsText")}</p>
+            <textarea readOnly value={recoveryHint} />
+          </div>
+
+          <div className="command-card">
+            <strong>{t("stagedFallbacks")}</strong>
+            <p>{t("protocolPack")}</p>
+            <textarea readOnly value={stagedFallbackSummary} />
+          </div>
+        </div>
+      </SectionCard>
+
       {showDeploymentOverlay && plan.length > 0 ? (
         <div className="deployment-overlay" role="dialog" aria-modal="true" aria-label={t("deploymentDetails")}>
           <div className="deployment-overlay__backdrop" onClick={() => setShowDeploymentOverlay(false)} />
@@ -1341,6 +1774,22 @@ export function ControlCenter() {
             </div>
 
             <StageList stages={plan.map(translateStage)} statusLabels={stageStatusLabels} />
+
+            {deployment?.healthChecks?.length ? (
+              <div className="check-list" style={{ marginTop: 18 }}>
+                {deployment.healthChecks.map((check) => (
+                  <div className="check-row" key={check.key}>
+                    <div>
+                      <strong>{translateCheckLabel(check.key, check.label)}</strong>
+                      <p>{translateCheckDetail(check.detail)}</p>
+                    </div>
+                    <span className={check.ok ? "pill pill-ok" : "pill pill-off"}>
+                      {check.ok ? t("checkOk") : t("checkFail")}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}

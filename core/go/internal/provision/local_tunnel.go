@@ -15,14 +15,18 @@ import (
 )
 
 const ownerProfileRemotePath = whitelistInvitePath
-const fixedLocalSOCKSPort = 58371
+const preferredLocalSOCKSPort = 58371
+const singBoxReleaseVersion = "1.12.22"
 
 type ownerProfile struct {
-	Name            string `json:"name"`
-	Transport       string `json:"transport"`
-	ServerHost      string `json:"serverHost"`
-	VKTurnProxyPort int    `json:"vkTurnProxyPort"`
-	EndpointPort    int    `json:"endpointPort,omitempty"`
+	Name            string              `json:"name"`
+	Transport       string              `json:"transport"`
+	ActiveProtocol  string              `json:"activeProtocol,omitempty"`
+	ServerHost      string              `json:"serverHost"`
+	VKTurnProxyPort int                 `json:"vkTurnProxyPort"`
+	EndpointPort    int                 `json:"endpointPort,omitempty"`
+	ProtocolPack    []ProtocolPackEntry `json:"protocolPack,omitempty"`
+	StagedFallbacks map[string]any      `json:"stagedFallbacks,omitempty"`
 	WireGuard       struct {
 		ServerPublicKey  string `json:"serverPublicKey"`
 		ClientPrivateKey string `json:"clientPrivateKey"`
@@ -33,14 +37,17 @@ type ownerProfile struct {
 }
 
 type OwnerProfileResponse struct {
-	Exists          bool   `json:"exists"`
-	Name            string `json:"name,omitempty"`
-	Transport       string `json:"transport,omitempty"`
-	ServerHost      string `json:"serverHost,omitempty"`
-	VKTurnProxyPort int    `json:"vkTurnProxyPort,omitempty"`
-	EndpointPort    int    `json:"endpointPort,omitempty"`
-	LocalPath       string `json:"localPath,omitempty"`
-	RawJSON         string `json:"rawJson,omitempty"`
+	Exists          bool                `json:"exists"`
+	Name            string              `json:"name,omitempty"`
+	Transport       string              `json:"transport,omitempty"`
+	ActiveProtocol  string              `json:"activeProtocol,omitempty"`
+	ServerHost      string              `json:"serverHost,omitempty"`
+	VKTurnProxyPort int                 `json:"vkTurnProxyPort,omitempty"`
+	EndpointPort    int                 `json:"endpointPort,omitempty"`
+	LocalPath       string              `json:"localPath,omitempty"`
+	RawJSON         string              `json:"rawJson,omitempty"`
+	ProtocolPack    []ProtocolPackEntry `json:"protocolPack,omitempty"`
+	StagedFallbacks map[string]any      `json:"stagedFallbacks,omitempty"`
 	WireGuard       struct {
 		ServerPublicKey  string `json:"serverPublicKey"`
 		ClientPrivateKey string `json:"clientPrivateKey"`
@@ -58,6 +65,8 @@ type LocalTunnelState struct {
 	VKLink        string                 `json:"vkLink,omitempty"`
 	ServerHost    string                 `json:"serverHost,omitempty"`
 	Transport     string                 `json:"transport,omitempty"`
+	Engine        string                 `json:"engine,omitempty"`
+	Protocol      string                 `json:"protocol,omitempty"`
 	Error         string                 `json:"error,omitempty"`
 	CooldownUntil string                 `json:"cooldownUntil,omitempty"`
 	CooldownSecs  int                    `json:"cooldownRemainingSeconds,omitempty"`
@@ -109,6 +118,8 @@ func StartLocalTunnel(req Request, vkLink string) LocalTunnelState {
 		VKLink:     vkLink,
 		ServerHost: req.Server.Host,
 		Transport:  string(req.Server.Transport),
+		Engine:     string(normalizedEngine(req.Server.Engine)),
+		Protocol:   string(normalizedProtocol(req.Server.Transport, req.Server.Protocol)),
 	}
 	tunnelManager.logs = nil
 
@@ -176,30 +187,10 @@ func TestLocalTunnel(url string) LocalTunnelState {
 	state.LogTail = append([]string(nil), tunnelManager.logs...)
 	tunnelManager.mu.Unlock()
 
-	cmd := exec.Command("curl",
-		"--connect-timeout", "8",
-		"--max-time", "20",
-		"--socks5-hostname", socksAddress,
-		"-I",
-		url,
-	)
-	output, err := cmd.CombinedOutput()
-
 	tunnelManager.mu.Lock()
 	defer tunnelManager.mu.Unlock()
 
-	result := &LocalTunnelTestResult{
-		OK:        err == nil,
-		Status:    "passed",
-		URL:       url,
-		Output:    strings.TrimSpace(string(output)),
-		CheckedAt: time.Now().UTC().Format(time.RFC3339),
-	}
-	if err != nil {
-		result.OK = false
-		result.Status = "failed"
-		result.Error = err.Error()
-	}
+	result := runSOCKSProbe(socksAddress, url, 8, 20)
 	tunnelManager.state.LastTest = result
 	if result.OK {
 		tunnelManager.logs = append(tunnelManager.logs, "Tunnel test passed for "+url)
@@ -257,11 +248,14 @@ func GetLocalOwnerProfile(host string) OwnerProfileResponse {
 		Exists:          true,
 		Name:            profile.Name,
 		Transport:       profile.Transport,
+		ActiveProtocol:  profile.ActiveProtocol,
 		ServerHost:      profile.ServerHost,
 		VKTurnProxyPort: profile.VKTurnProxyPort,
 		EndpointPort:    effectiveOwnerEndpointPort(profile),
 		LocalPath:       targetPath,
 		RawJSON:         string(data),
+		ProtocolPack:    slices.Clone(profile.ProtocolPack),
+		StagedFallbacks: profile.StagedFallbacks,
 	}
 	resp.WireGuard.ServerPublicKey = profile.WireGuard.ServerPublicKey
 	resp.WireGuard.ClientPrivateKey = profile.WireGuard.ClientPrivateKey
@@ -278,17 +272,12 @@ func (m *localTunnelManager) run(ctx context.Context, req Request, vkLink string
 		return
 	}
 
-	socksPort, err := reserveFixedPort("tcp", fixedLocalSOCKSPort)
+	socksPort, usingFallbackSOCKSPort, err := reserveLocalSOCKSPort()
 	if err != nil {
 		m.fail(err)
 		return
 	}
 
-	xrayBinary, err := ensureLocalXrayBinary()
-	if err != nil {
-		m.fail(err)
-		return
-	}
 	endpointPort := effectiveOwnerEndpointPort(profile)
 	if endpointPort == 0 {
 		m.fail(fmt.Errorf("owner profile endpointPort is required"))
@@ -304,26 +293,28 @@ func (m *localTunnelManager) run(ctx context.Context, req Request, vkLink string
 		}
 	}
 
-	xrayConfigPath, err := writeLocalXrayConfig(profile, socksPort, bridgePort, endpointPort)
+	engine := normalizedEngine(req.Server.Engine)
+	protocol := normalizedProtocol(req.Server.Transport, req.Server.Protocol)
+	if profile.Transport == string(TransportVKTurnProxyXray) {
+		engine = EngineXray
+		protocol = ProtocolDirectWireGuard
+	}
+
+	clientBinary, clientConfigPath, clientCmd, clientLog, clientLogPath, err := buildLocalTunnelClient(
+		ctx,
+		engine,
+		protocol,
+		profile,
+		socksPort,
+		bridgePort,
+		endpointPort,
+	)
 	if err != nil {
 		m.fail(err)
 		return
 	}
-
-	xrayCmd := exec.CommandContext(
-		ctx,
-		xrayBinary,
-		"run",
-		"-config", xrayConfigPath,
-	)
-
-	xrayLog, _ := createLogFile("xray-client")
-	var xrayLogPath string
-	if xrayLog != nil {
-		xrayLogPath = xrayLog.Name()
-		xrayCmd.Stdout = xrayLog
-		xrayCmd.Stderr = xrayLog
-	}
+	_ = clientBinary
+	_ = clientConfigPath
 
 	var vkCmd *exec.Cmd
 	var vkLog *os.File
@@ -352,27 +343,27 @@ func (m *localTunnelManager) run(ctx context.Context, req Request, vkLink string
 			return
 		}
 	}
-	if err := xrayCmd.Start(); err != nil {
+	if err := clientCmd.Start(); err != nil {
 		if vkCmd != nil && vkCmd.Process != nil {
 			_ = vkCmd.Process.Kill()
 		}
-		m.fail(fmt.Errorf("start xray client: %w", err))
+		m.fail(fmt.Errorf("start %s client: %w", engine, err))
 		return
 	}
 
 	vkExit := make(chan error, 1)
-	xrayExit := make(chan error, 1)
+	clientExit := make(chan error, 1)
 	if vkCmd != nil {
 		go func() {
 			vkExit <- vkCmd.Wait()
 		}()
 	}
 	go func() {
-		xrayExit <- xrayCmd.Wait()
+		clientExit <- clientCmd.Wait()
 	}()
 
 	socksAddress := fmt.Sprintf("127.0.0.1:%d", socksPort)
-	if err := waitForSOCKSReady(ctx, socksAddress, 5*time.Second, xrayExit, xrayLogPath, m); err != nil {
+	if err := waitForSOCKSReady(ctx, socksAddress, 5*time.Second, clientExit, clientLogPath, m); err != nil {
 		if ctx.Err() == nil {
 			m.fail(err)
 		}
@@ -389,11 +380,11 @@ func (m *localTunnelManager) run(ctx context.Context, req Request, vkLink string
 
 	m.mu.Lock()
 	if vkCmd != nil {
-		m.cmds = []*exec.Cmd{vkCmd, xrayCmd}
+		m.cmds = []*exec.Cmd{vkCmd, clientCmd}
 	} else {
-		m.cmds = []*exec.Cmd{xrayCmd}
+		m.cmds = []*exec.Cmd{clientCmd}
 	}
-	m.files = compactFiles(vkLog, xrayLog)
+	m.files = compactFiles(vkLog, clientLog)
 	m.state = LocalTunnelState{
 		Status:        "running",
 		SOCKSAddress:  socksAddress,
@@ -401,14 +392,23 @@ func (m *localTunnelManager) run(ctx context.Context, req Request, vkLink string
 		VKLink:        vkLink,
 		ServerHost:    profile.ServerHost,
 		Transport:     profile.Transport,
+		Engine:        string(normalizedEngine(req.Server.Engine)),
+		Protocol:      string(protocol),
 		LastTest: &LocalTunnelTestResult{
 			OK:     false,
 			Status: "idle",
-			URL:    "https://example.com",
+			URL:    defaultProbeHTTPSURL,
 		},
+	}
+	if usingFallbackSOCKSPort {
+		m.logs = append(m.logs, fmt.Sprintf("Preferred local SOCKS port %d was busy, using %s", preferredLocalSOCKSPort, socksAddress))
 	}
 	m.logs = append(m.logs, "Local tunnel started")
 	m.mu.Unlock()
+
+	if profile.Transport == string(TransportXray) {
+		go m.runDirectHealthProbe(ctx, socksAddress)
+	}
 
 	if vkCmd != nil {
 		go func() {
@@ -420,11 +420,78 @@ func (m *localTunnelManager) run(ctx context.Context, req Request, vkLink string
 	}
 
 	go func() {
-		err := <-xrayExit
+		err := <-clientExit
 		if ctx.Err() == nil {
-			m.fail(m.describeProcessExit("xray client", err, xrayLogPath))
+			m.fail(m.describeProcessExit(string(engine)+" client", err, clientLogPath))
 		}
 	}()
+}
+
+func buildLocalTunnelClient(
+	ctx context.Context,
+	engine CoreEngine,
+	protocol TunnelProtocol,
+	profile ownerProfile,
+	socksPort, bridgePort, endpointPort int,
+) (string, string, *exec.Cmd, *os.File, string, error) {
+	if protocol == ProtocolVLESSReality {
+		binaryPath, err := ensureLocalXrayBinary()
+		if err != nil {
+			return "", "", nil, nil, "", err
+		}
+		configPath, err := writeLocalRealityXrayConfig(profile, socksPort)
+		if err != nil {
+			return "", "", nil, nil, "", err
+		}
+		cmd := exec.CommandContext(ctx, binaryPath, "run", "-config", configPath)
+		logFile, _ := createLogFile("xray-reality-client")
+		logPath := ""
+		if logFile != nil {
+			logPath = logFile.Name()
+			cmd.Stdout = logFile
+			cmd.Stderr = logFile
+		}
+		return binaryPath, configPath, cmd, logFile, logPath, nil
+	}
+	switch engine {
+	case EngineSingBox:
+		binaryPath, err := ensureLocalSingBoxBinary()
+		if err != nil {
+			return "", "", nil, nil, "", err
+		}
+		configPath, err := writeLocalSingBoxConfig(profile, socksPort, bridgePort, endpointPort)
+		if err != nil {
+			return "", "", nil, nil, "", err
+		}
+		cmd := exec.CommandContext(ctx, binaryPath, "run", "-c", configPath)
+		cmd.Env = append(os.Environ(), "ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true")
+		logFile, _ := createLogFile("sing-box-client")
+		logPath := ""
+		if logFile != nil {
+			logPath = logFile.Name()
+			cmd.Stdout = logFile
+			cmd.Stderr = logFile
+		}
+		return binaryPath, configPath, cmd, logFile, logPath, nil
+	default:
+		binaryPath, err := ensureLocalXrayBinary()
+		if err != nil {
+			return "", "", nil, nil, "", err
+		}
+		configPath, err := writeLocalXrayConfig(profile, socksPort, bridgePort, endpointPort)
+		if err != nil {
+			return "", "", nil, nil, "", err
+		}
+		cmd := exec.CommandContext(ctx, binaryPath, "run", "-config", configPath)
+		logFile, _ := createLogFile("xray-client")
+		logPath := ""
+		if logFile != nil {
+			logPath = logFile.Name()
+			cmd.Stdout = logFile
+			cmd.Stderr = logFile
+		}
+		return binaryPath, configPath, cmd, logFile, logPath, nil
+	}
 }
 
 func loadOwnerProfile(req Request) (ownerProfile, error) {
@@ -459,6 +526,32 @@ func loadOwnerProfile(req Request) (ownerProfile, error) {
 		return profile, err
 	}
 	return profile, nil
+}
+
+func EnsureRealityOwnerProfile(req Request) error {
+	req.Server.Transport = TransportXray
+	req.Server.Engine = EngineXray
+	req.Server.Protocol = ProtocolVLESSReality
+
+	profile, err := loadOwnerProfile(req)
+	if err == nil {
+		if _, realityErr := readRealityFallback(profile); realityErr == nil {
+			return nil
+		}
+	}
+
+	if err := executeDeployment("", req); err != nil {
+		return err
+	}
+
+	profile, err = loadOwnerProfile(req)
+	if err != nil {
+		return err
+	}
+	if _, err := readRealityFallback(profile); err != nil {
+		return err
+	}
+	return nil
 }
 
 func ownerProfileMatchesRequest(profile ownerProfile, transport Transport) bool {
@@ -521,6 +614,36 @@ func (m *localTunnelManager) cleanupOrphanedClientsLocked() {
 	_ = killMatchingProcesses(pattern, true)
 }
 
+func (m *localTunnelManager) runDirectHealthProbe(ctx context.Context, socksAddress string) {
+	m.mu.Lock()
+	if m.state.Status != "running" || m.state.SOCKSAddress != socksAddress {
+		m.mu.Unlock()
+		return
+	}
+	m.state.LastTest = &LocalTunnelTestResult{
+		OK:        false,
+		Status:    "running",
+		URL:       defaultProbeHTTPSURL,
+		CheckedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	m.mu.Unlock()
+
+	result := runSOCKSProbe(socksAddress, defaultProbeHTTPSURL, 5, 12)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ctx.Err() != nil || m.state.Status != "running" || m.state.SOCKSAddress != socksAddress {
+		return
+	}
+	m.state.LastTest = result
+	if result.OK {
+		m.logs = append(m.logs, "Direct egress probe passed for "+result.URL)
+	} else {
+		m.logs = append(m.logs, "Direct egress probe failed for "+result.URL+": "+result.Error)
+	}
+	m.trimLogsLocked()
+}
+
 func (m *localTunnelManager) setStateLocked(status, errText string) {
 	m.state.Status = status
 	m.state.SOCKSAddress = ""
@@ -558,6 +681,18 @@ func freePort(network string) (int, error) {
 	}
 }
 
+func reserveLocalSOCKSPort() (int, bool, error) {
+	port, err := reserveFixedPort("tcp", preferredLocalSOCKSPort)
+	if err == nil {
+		return port, false, nil
+	}
+	fallbackPort, fallbackErr := freePort("tcp")
+	if fallbackErr != nil {
+		return 0, false, fmt.Errorf("preferred local SOCKS port %d is busy and no fallback port is available", preferredLocalSOCKSPort)
+	}
+	return fallbackPort, true, nil
+}
+
 func reserveFixedPort(network string, port int) (int, error) {
 	switch network {
 	case "udp":
@@ -585,8 +720,8 @@ func waitForSOCKSReady(
 	ctx context.Context,
 	socksAddress string,
 	timeout time.Duration,
-	xrayExit <-chan error,
-	xrayLogPath string,
+	clientExit <-chan error,
+	clientLogPath string,
 	manager *localTunnelManager,
 ) error {
 	deadline := time.Now().Add(timeout)
@@ -594,11 +729,11 @@ func waitForSOCKSReady(
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case err := <-xrayExit:
+		case err := <-clientExit:
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return manager.describeProcessExit("xray client", err, xrayLogPath)
+			return manager.describeProcessExit("local tunnel client", err, clientLogPath)
 		default:
 		}
 
@@ -717,6 +852,51 @@ func ensureLocalXrayBinary() (string, error) {
 	return targetPath, nil
 }
 
+func ensureLocalSingBoxBinary() (string, error) {
+	cacheDir, err := appCacheDir()
+	if err != nil {
+		return "", err
+	}
+	targetDir := filepath.Join(cacheDir, "bin")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return "", err
+	}
+	targetPath := filepath.Join(targetDir, "sing-box-darwin-arm64")
+	if _, err := os.Stat(targetPath); err == nil {
+		return targetPath, nil
+	}
+
+	tmpDir, err := os.MkdirTemp("", "odin-one-sing-box-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	archivePath := filepath.Join(tmpDir, "sing-box.tar.gz")
+	archiveURL := fmt.Sprintf(
+		"https://github.com/SagerNet/sing-box/releases/download/v%s/sing-box-%s-darwin-arm64.tar.gz",
+		singBoxReleaseVersion,
+		singBoxReleaseVersion,
+	)
+	curlCmd := exec.Command("curl", "-fsSLo", archivePath, archiveURL)
+	if output, err := curlCmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("download sing-box: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	tarCmd := exec.Command("tar", "-xzf", archivePath, "-C", tmpDir)
+	if output, err := tarCmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("extract sing-box: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	binaryPath := filepath.Join(tmpDir, "sing-box-"+singBoxReleaseVersion+"-darwin-arm64", "sing-box")
+	data, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(targetPath, data, 0o755); err != nil {
+		return "", err
+	}
+	return targetPath, nil
+}
+
 func writeLocalXrayConfig(profile ownerProfile, socksPort, bridgePort, endpointPort int) (string, error) {
 	cacheDir, err := appCacheDir()
 	if err != nil {
@@ -768,6 +948,168 @@ func writeLocalXrayConfig(profile ownerProfile, socksPort, bridgePort, endpointP
 		return "", err
 	}
 	return configPath, nil
+}
+
+func writeLocalSingBoxConfig(profile ownerProfile, socksPort, bridgePort, endpointPort int) (string, error) {
+	cacheDir, err := appCacheDir()
+	if err != nil {
+		return "", err
+	}
+	configDir := filepath.Join(cacheDir, "config")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		return "", err
+	}
+	configPath := filepath.Join(configDir, fmt.Sprintf("sing-box-client-%d.json", socksPort))
+	endpoint := profile.ServerHost
+	if profile.Transport == string(TransportVKTurnProxyXray) {
+		endpoint = "127.0.0.1"
+	}
+	config := fmt.Sprintf(`{
+  "log": {
+    "level": "warn"
+  },
+  "inbounds": [
+    {
+      "type": "socks",
+      "tag": "socks-in",
+      "listen": "127.0.0.1",
+      "listen_port": %d
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "wireguard",
+      "tag": "wg-out",
+      "server": %q,
+      "server_port": %d,
+      "local_address": [%q],
+      "private_key": %q,
+      "peer_public_key": %q,
+      "mtu": %d
+    }
+  ],
+  "route": {
+    "final": "wg-out",
+    "auto_detect_interface": true
+  }
+}
+`, socksPort, endpoint, endpointPort, profile.WireGuard.Address, profile.WireGuard.ClientPrivateKey, profile.WireGuard.ServerPublicKey, profile.WireGuard.MTU)
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		return "", err
+	}
+	return configPath, nil
+}
+
+func writeLocalRealityXrayConfig(profile ownerProfile, socksPort int) (string, error) {
+	cacheDir, err := appCacheDir()
+	if err != nil {
+		return "", err
+	}
+	configDir := filepath.Join(cacheDir, "config")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		return "", err
+	}
+	reality, err := readRealityFallback(profile)
+	if err != nil {
+		return "", err
+	}
+	configPath := filepath.Join(configDir, fmt.Sprintf("xray-reality-client-%d.json", socksPort))
+	config := fmt.Sprintf(`{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": %d,
+      "protocol": "socks",
+      "settings": {
+        "udp": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": %q,
+            "port": %d,
+            "users": [
+              {
+                "id": %q,
+                "encryption": "none",
+                "flow": %q
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "serverName": %q,
+          "fingerprint": "chrome",
+          "publicKey": %q,
+          "shortId": %q,
+          "spiderX": "/"
+        }
+      }
+    }
+  ]
+}
+`, socksPort, profile.ServerHost, reality.Port, reality.UUID, reality.Flow, reality.ServerName, reality.PublicKey, reality.ShortID)
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		return "", err
+	}
+	return configPath, nil
+}
+
+type realityFallback struct {
+	Port       int
+	ServerName string
+	PublicKey  string
+	ShortID    string
+	UUID       string
+	Flow       string
+}
+
+func readRealityFallback(profile ownerProfile) (realityFallback, error) {
+	raw, ok := profile.StagedFallbacks["vlessReality"]
+	if !ok {
+		return realityFallback{}, fmt.Errorf("staged VLESS + REALITY config is not available in the owner profile")
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return realityFallback{}, fmt.Errorf("marshal staged reality config: %w", err)
+	}
+	var parsed struct {
+		Port       int    `json:"port"`
+		ServerName string `json:"serverName"`
+		PublicKey  string `json:"publicKey"`
+		ShortID    string `json:"shortId"`
+		UUID       string `json:"uuid"`
+		Flow       string `json:"flow"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return realityFallback{}, fmt.Errorf("parse staged reality config: %w", err)
+	}
+	if parsed.Port <= 0 || parsed.ServerName == "" || parsed.PublicKey == "" || parsed.ShortID == "" || parsed.UUID == "" {
+		return realityFallback{}, fmt.Errorf("staged VLESS + REALITY config is incomplete")
+	}
+	if parsed.Flow == "" {
+		parsed.Flow = "xtls-rprx-vision"
+	}
+	return realityFallback{
+		Port:       parsed.Port,
+		ServerName: parsed.ServerName,
+		PublicKey:  parsed.PublicKey,
+		ShortID:    parsed.ShortID,
+		UUID:       parsed.UUID,
+		Flow:       parsed.Flow,
+	}, nil
 }
 
 func effectiveOwnerEndpointPort(profile ownerProfile) int {

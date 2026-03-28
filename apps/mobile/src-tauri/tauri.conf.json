@@ -1,0 +1,35 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Odin One Mobile",
+  "version": "0.1.0",
+  "identifier": "com.odinone.mobile",
+  "build": {
+    "beforeDevCommand": "zsh ./scripts/android-env.sh npm run dev -w @whitelist/mobile",
+    "beforeBuildCommand": "zsh ./scripts/android-env.sh npm run build -w @whitelist/mobile",
+    "devUrl": "http://127.0.0.1:3001",
+    "frontendDist": "../out"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Odin One Mobile",
+        "width": 420,
+        "height": 920,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Utility",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.png"
+    ]
+  }
+}

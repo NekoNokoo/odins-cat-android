@@ -1,0 +1,42 @@
+.mobile-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.mobile-stack .workspace-tabs {
+  margin-bottom: 2px;
+}
+
+.mobile-form-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.mobile-note-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.mobile-status-grid {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.mobile-note-grid .command-card textarea {
+  min-height: 88px;
+}
+
+@media (min-width: 760px) {
+  .mobile-form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mobile-form-grid .mobile-span {
+    grid-column: 1 / -1;
+  }
+
+  .mobile-note-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

@@ -11,6 +11,8 @@ use std::{
 
 use tauri::{AppHandle, Manager, RunEvent};
 
+const BACKEND_ADDR: &str = "127.0.0.1:18088";
+
 #[derive(Clone, Default)]
 struct BackendState {
     child: Arc<Mutex<Option<Child>>>,
@@ -48,6 +50,7 @@ fn ensure_backend_running(app: &AppHandle) -> tauri::Result<()> {
     let binary_path = resolve_mvpd_path(resource_dir);
 
     let child = Command::new(&binary_path)
+        .env("MVPD_ADDR", BACKEND_ADDR)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .stdin(Stdio::null())
@@ -89,7 +92,7 @@ fn resolve_mvpd_path(resource_dir: PathBuf) -> PathBuf {
 }
 
 fn backend_is_ready() -> bool {
-    TcpStream::connect("127.0.0.1:8088").is_ok()
+    TcpStream::connect(BACKEND_ADDR).is_ok()
 }
 
 fn shutdown_backend(state: &BackendState) {

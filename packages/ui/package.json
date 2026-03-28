@@ -4,12 +4,15 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./AppShell": "./src/AppShell.tsx",
     "./CircleMeter": "./src/CircleMeter.tsx",
+    "./ConnectScreenHero": "./src/ConnectScreenHero.tsx",
+    "./OdinI18n": "./src/OdinI18n.tsx",
     "./SectionCard": "./src/SectionCard.tsx",
-    "./StageList": "./src/StageList.tsx"
+    "./StageList": "./src/StageList.tsx",
+    "./odin-one-theme.css": "./src/odin-one-theme.css"
   },
   "peerDependencies": {
     "react": "^19.0.0"
   }
 }
-

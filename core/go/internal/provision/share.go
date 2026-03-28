@@ -460,7 +460,7 @@ func syncRemoteXrayConfig(client *ssh.Client, owner inviteProfile, xrayState rem
 	if owner.Transport == string(TransportXray) {
 		listenHost = "0.0.0.0"
 	}
-	config := renderXrayConfigWithListen(xrayState.SecretKey, peers, listenHost, xrayState.WireGuardPort)
+	config := renderXrayConfigWithListen(xrayState.SecretKey, peers, listenHost, xrayState.WireGuardPort, nil)
 	if err := uploadFile(client, whitelistXrayConfigPath, []byte(config), "0644"); err != nil {
 		return err
 	}

@@ -15,13 +15,14 @@ type Check struct {
 }
 
 type ValidationResponse struct {
-	OK         bool     `json:"ok"`
-	Host       string   `json:"host"`
-	User       string   `json:"user"`
-	AuthMethod string   `json:"authMethod"`
-	Checks     []Check  `json:"checks"`
-	Warnings   []string `json:"warnings"`
-	Error      string   `json:"error,omitempty"`
+	OK           bool                `json:"ok"`
+	Host         string              `json:"host"`
+	User         string              `json:"user"`
+	AuthMethod   string              `json:"authMethod"`
+	Checks       []Check             `json:"checks"`
+	Warnings     []string            `json:"warnings"`
+	ProtocolPack []ProtocolPackEntry `json:"protocolPack,omitempty"`
+	Error        string              `json:"error,omitempty"`
 }
 
 func Validate(req Request) ValidationResponse {
@@ -31,7 +32,9 @@ func Validate(req Request) ValidationResponse {
 		AuthMethod: string(req.Server.AuthMethod),
 		Warnings: []string{
 			"MVP validation currently uses insecure host key acceptance and should be hardened before production use.",
+			"Odin One keeps the current localhost-first data path while staging a future protocol pack for Russia-friendly TCP and UDP fallbacks.",
 		},
+		ProtocolPack: buildProtocolPack(req.Server.Transport, 0),
 	}
 
 	if req.Server.Host == "" || req.Server.Username == "" || req.Secret == "" {
@@ -94,9 +97,15 @@ func Validate(req Request) ValidationResponse {
 	}
 	resp.Checks = append([]Check{portOpen}, resp.Checks...)
 
-	resp.OK = allOK
+	egressChecks, egressOK := runRemoteEgressChecks(client)
+	resp.Checks = append(resp.Checks, egressChecks...)
+
+	resp.OK = allOK && egressOK
 	if !allOK && resp.Error == "" {
 		resp.Error = "one or more validation checks failed"
+	}
+	if !egressOK && resp.Error == "" {
+		resp.Error = "remote egress checks failed"
 	}
 
 	return resp

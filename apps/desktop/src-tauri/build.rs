@@ -21,6 +21,11 @@ fn build_mvpd() -> Result<(), String> {
 
     fs::create_dir_all(&bin_dir).map_err(|err| err.to_string())?;
 
+    if should_reuse_prebuilt_mvpd(&output_path, &go_root) {
+        ensure_executable(&output_path)?;
+        return Ok(());
+    }
+
     let go_binary = resolve_go_binary();
     let output = Command::new(&go_binary)
         .arg("build")
@@ -38,6 +43,18 @@ fn build_mvpd() -> Result<(), String> {
         ));
     }
 
+    ensure_executable(&output_path)?;
+
+    Ok(())
+}
+
+fn should_reuse_prebuilt_mvpd(output_path: &Path, go_root: &Path) -> bool {
+    output_path.exists()
+        && (env::var("ODIN_ONE_USE_PREBUILT_MVPD").ok().as_deref() == Some("1")
+            || !go_root.exists())
+}
+
+fn ensure_executable(output_path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

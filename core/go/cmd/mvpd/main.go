@@ -129,6 +129,44 @@ func main() {
 		writeJSON(w, http.StatusOK, provision.StopLocalTunnel())
 	})
 
+	mux.HandleFunc("/api/local-tunnel/start-reality", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+
+		var payload struct {
+			Server provision.Server `json:"server"`
+			Secret string           `json:"secret"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+
+		payload.Server.Transport = provision.TransportXray
+		payload.Server.Engine = provision.EngineXray
+		payload.Server.Protocol = provision.ProtocolVLESSReality
+
+		if err := provision.EnsureRealityOwnerProfile(provision.Request{
+			Server: payload.Server,
+			Secret: payload.Secret,
+		}); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+
+		resp := provision.StartLocalTunnel(provision.Request{
+			Server: payload.Server,
+			Secret: payload.Secret,
+		}, "")
+		status := http.StatusAccepted
+		if resp.CooldownSecs > 0 {
+			status = http.StatusTooManyRequests
+		}
+		writeJSON(w, status, resp)
+	})
+
 	mux.HandleFunc("/api/local-tunnel/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})

@@ -18,17 +18,22 @@ const (
 	whitelistWireGuardPortStart = 51820
 	whitelistWireGuardPortEnd   = 51920
 	xrayReleaseURL              = "https://github.com/XTLS/Xray-core/releases/download/v25.8.3/Xray-linux-64.zip"
+	singBoxLinuxReleaseURL      = "https://github.com/SagerNet/sing-box/releases/download/v1.12.22/sing-box-1.12.22-linux-amd64.tar.gz"
 )
 
 type Deployment struct {
-	DeploymentID  string `json:"deploymentId"`
-	ServerHost    string `json:"serverHost"`
-	Transport     string `json:"transport"`
-	Status        string `json:"status"`
-	Steps         []Step `json:"steps"`
-	TurnPort      int    `json:"turnPort,omitempty"`
-	WireGuardPort int    `json:"wireGuardPort,omitempty"`
-	Error         string `json:"error,omitempty"`
+	DeploymentID  string              `json:"deploymentId"`
+	ServerHost    string              `json:"serverHost"`
+	Transport     string              `json:"transport"`
+	Engine        string              `json:"engine,omitempty"`
+	Protocol      string              `json:"protocol,omitempty"`
+	Status        string              `json:"status"`
+	Steps         []Step              `json:"steps"`
+	TurnPort      int                 `json:"turnPort,omitempty"`
+	WireGuardPort int                 `json:"wireGuardPort,omitempty"`
+	HealthChecks  []Check             `json:"healthChecks,omitempty"`
+	ProtocolPack  []ProtocolPackEntry `json:"protocolPack,omitempty"`
+	Error         string              `json:"error,omitempty"`
 }
 
 type deploymentStore struct {
@@ -54,8 +59,11 @@ func StartDeployment(req Request) Deployment {
 		DeploymentID: id,
 		ServerHost:   req.Server.Host,
 		Transport:    string(req.Server.Transport),
+		Engine:       string(normalizedEngine(req.Server.Engine)),
+		Protocol:     string(normalizedProtocol(req.Server.Transport, req.Server.Protocol)),
 		Status:       "running",
 		Steps:        steps,
+		ProtocolPack: buildProtocolPack(req.Server.Transport, 0),
 	}
 
 	store.mu.Lock()
@@ -107,6 +115,12 @@ func BuildPlan(req Request) Response {
 			Status:      StatusQueued,
 			Description: "Start the selected Odin One services and verify their health.",
 		},
+		{
+			ID:          "egress-check",
+			Label:       "Egress health",
+			Status:      StatusQueued,
+			Description: "Verify that the server can resolve DNS and complete outbound HTTP and HTTPS probes.",
+		},
 	}
 
 	warnings := []string{
@@ -118,12 +132,14 @@ func BuildPlan(req Request) Response {
 	} else if req.Server.Transport == TransportXray {
 		warnings = append(warnings, "Direct xray mode publishes a WireGuard-compatible UDP port on the server and does not depend on VK for connectivity.")
 	}
+	warnings = append(warnings, "Protocol pack staging is enabled: Odin One keeps the current active data path, while preparing Russia-friendly fallback protocols for later rollout without Apple Network Extension entitlements.")
 
 	return Response{
-		ServerHost: req.Server.Host,
-		Transport:  string(req.Server.Transport),
-		Steps:      steps,
-		Warnings:   warnings,
+		ServerHost:   req.Server.Host,
+		Transport:    string(req.Server.Transport),
+		Steps:        steps,
+		Warnings:     warnings,
+		ProtocolPack: buildProtocolPack(req.Server.Transport, 0),
 	}
 }
 
@@ -175,6 +191,15 @@ func executeDeployment(id string, req Request) error {
 		}
 	}
 	setDeploymentPorts(id, turnPort, wireGuardPort)
+	setDeploymentProtocolPack(id, buildProtocolPack(req.Server.Transport, endpointPortForProtocolPack(req.Server.Transport, turnPort, wireGuardPort)))
+
+	realityPort := realityFallbackPort
+	if req.Server.Transport == TransportXray {
+		realityPort, err = findRemotePreferredTCPPort(client, realityFallbackPort, realityFallbackMinPort, realityFallbackMaxPort)
+		if err != nil {
+			return err
+		}
+	}
 
 	if req.Server.Transport == TransportVKTurnProxyXray {
 		vkBinary, err := ensureVKTurnProxyBinary()
@@ -189,6 +214,13 @@ func executeDeployment(id string, req Request) error {
 		"tmp=$(mktemp -d) && cd \"$tmp\" && curl -fsSLo xray.zip %s && unzip -oq xray.zip xray && install -m 0755 xray %s && rm -rf \"$tmp\"",
 		quoteShell(xrayReleaseURL),
 		quoteShell(whitelistXrayBinaryPath),
+	)); err != nil {
+		return err
+	}
+	if _, err := runRemote(client, fmt.Sprintf(
+		"tmp=$(mktemp -d) && cd \"$tmp\" && curl -fsSLo sing-box.tar.gz %s && tar -xzf sing-box.tar.gz && install -m 0755 sing-box-*/sing-box %s && rm -rf \"$tmp\"",
+		quoteShell(singBoxLinuxReleaseURL),
+		quoteShell(whitelistSingBoxBinaryPath),
 	)); err != nil {
 		return err
 	}
@@ -215,12 +247,54 @@ func executeDeployment(id string, req Request) error {
 			PublicKey:  clientKeys.Public,
 			AllowedIPs: []string{"10.66.66.2/32"},
 		},
-	}, listenHost, wireGuardPort)
+	}, listenHost, wireGuardPort, nil)
+	realityKeys, err := generateX25519KeyPair()
+	if err != nil {
+		return err
+	}
+	realityUUID, err := generateProtocolUUID()
+	if err != nil {
+		return err
+	}
+	realityShortID, err := generateRealityShortID()
+	if err != nil {
+		return err
+	}
+	realityConfig, err := renderRealityServerConfig(realityPort, realityUUID, realityKeys.Private, realityShortID)
+	if err != nil {
+		return err
+	}
+	var realityInbound *xrayRealityInbound
+	if req.Server.Transport == TransportXray {
+		realityInbound = &xrayRealityInbound{
+			Port:       realityPort,
+			UUID:       realityUUID,
+			PrivateKey: realityKeys.Private,
+			ShortID:    realityShortID,
+		}
+	}
+	xrayConfig = renderXrayConfigWithListen(serverKeys.Private, []xrayWireGuardPeer{
+		{
+			PublicKey:  clientKeys.Public,
+			AllowedIPs: []string{"10.66.66.2/32"},
+		},
+	}, listenHost, wireGuardPort, realityInbound)
 	if err := uploadFile(client, whitelistXrayConfigPath, []byte(xrayConfig), "0644"); err != nil {
 		return err
 	}
+	if err := uploadFile(client, whitelistRealityConfigPath, []byte(realityConfig), "0644"); err != nil {
+		return err
+	}
+	fallbackManifest, err := renderStagedFallbackManifest(req.Server.Host, realityPort)
+	if err != nil {
+		return err
+	}
+	if err := uploadFile(client, whitelistFallbacksPath, []byte(fallbackManifest), "0644"); err != nil {
+		return err
+	}
 
-	inviteProfile, err := renderAccessProfile("owner", "owner", "Odin One Owner Node", req.Server.Host, req.Server.Transport, endpointPort, serverKeys.Public, clientKeys.Private, clientKeys.Public, "10.66.66.2/32")
+	stagedFallbacks := buildStagedFallbacks(realityPort, realityKeys.Public, realityShortID, realityUUID, req.Server.Transport == TransportXray)
+	inviteProfile, err := renderAccessProfile("owner", "owner", "Odin One Owner Node", req.Server.Host, req.Server.Transport, endpointPort, serverKeys.Public, clientKeys.Private, clientKeys.Public, "10.66.66.2/32", stagedFallbacks)
 	if err != nil {
 		return err
 	}
@@ -228,6 +302,13 @@ func executeDeployment(id string, req Request) error {
 		return err
 	}
 	if err := saveLocalOwnerProfile(req.Server.Host, []byte(inviteProfile)); err != nil {
+		return err
+	}
+	protocolPackManifest, err := renderProtocolPackManifest(req.Server.Host, req.Server.Transport, endpointPort)
+	if err != nil {
+		return err
+	}
+	if err := uploadFile(client, whitelistProtocolPackPath, []byte(protocolPackManifest), "0644"); err != nil {
 		return err
 	}
 
@@ -262,13 +343,20 @@ func executeDeployment(id string, req Request) error {
 		if _, err := runRemote(client, "systemctl daemon-reload && systemctl disable --now whitelist-vk-turn-proxy.service >/dev/null 2>&1 || true && systemctl enable whitelist-xray.service && systemctl restart whitelist-xray.service && sleep 2"); err != nil {
 			return err
 		}
-		if _, err := runRemote(client, fmt.Sprintf("systemctl is-active whitelist-xray.service && ss -lun | grep ':%d'", wireGuardPort)); err != nil {
+		if _, err := runRemote(client, fmt.Sprintf("systemctl is-active whitelist-xray.service && ss -lun | grep ':%d' && ss -ltn | grep ':%d'", wireGuardPort, realityPort)); err != nil {
 			return err
 		}
 	default:
 		return fmt.Errorf("unsupported transport %q", req.Server.Transport)
 	}
 	completeStep(id, 4)
+
+	healthChecks, healthOK := runRemoteEgressChecks(client)
+	setDeploymentHealthChecks(id, healthChecks)
+	if !healthOK {
+		return fmt.Errorf("remote egress health checks failed")
+	}
+	completeStep(id, 5)
 
 	return nil
 }
@@ -356,6 +444,37 @@ func setDeploymentPorts(id string, turnPort, wireGuardPort int) {
 	store.items[id] = deployment
 }
 
+func setDeploymentHealthChecks(id string, healthChecks []Check) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	deployment, ok := store.items[id]
+	if !ok {
+		return
+	}
+	deployment.HealthChecks = healthChecks
+	store.items[id] = deployment
+}
+
+func setDeploymentProtocolPack(id string, protocolPack []ProtocolPackEntry) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	deployment, ok := store.items[id]
+	if !ok {
+		return
+	}
+	deployment.ProtocolPack = protocolPack
+	store.items[id] = deployment
+}
+
+func endpointPortForProtocolPack(transport Transport, turnPort, wireGuardPort int) int {
+	if transport == TransportVKTurnProxyXray {
+		return turnPort
+	}
+	return wireGuardPort
+}
+
 func findRemoteFreeUDPPort(client *ssh.Client, start, end int) (int, error) {
 	for port := start; port <= end; port++ {
 		cmd := fmt.Sprintf("if ss -H -lun | awk '{print $5}' | grep -Eq '(^|\\]|:)%d$'; then exit 1; fi", port)
@@ -364,6 +483,21 @@ func findRemoteFreeUDPPort(client *ssh.Client, start, end int) (int, error) {
 		}
 	}
 	return 0, fmt.Errorf("no free UDP port found in range %d-%d", start, end)
+}
+
+func findRemotePreferredTCPPort(client *ssh.Client, preferred, start, end int) (int, error) {
+	if preferred > 0 {
+		if _, err := runRemote(client, fmt.Sprintf("if ss -H -ltn | awk '{print $4}' | grep -Eq '(^|\\]|:)%d$'; then exit 1; fi", preferred)); err == nil {
+			return preferred, nil
+		}
+	}
+	for port := start; port <= end; port++ {
+		cmd := fmt.Sprintf("if ss -H -ltn | awk '{print $4}' | grep -Eq '(^|\\]|:)%d$'; then exit 1; fi", port)
+		if _, err := runRemote(client, cmd); err == nil {
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("no free TCP port found in range %d-%d", start, end)
 }
 
 func failDeployment(id string, err error) {

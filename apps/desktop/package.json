@@ -6,8 +6,12 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build --bundles app && zsh ./scripts/build-dmg.sh"
+    "egress:test": "zsh ./scripts/direct-egress-check.sh",
+    "reality:test": "zsh ./scripts/reality-console-check.sh",
+    "network:diag": "zsh ./scripts/direct-path-diagnostics.sh",
+    "repeat:test": "zsh ./scripts/direct-repeat-check.sh",
+    "tauri:dev": "zsh ./scripts/desktop-env.sh npx tauri dev",
+    "tauri:build": "zsh ./scripts/desktop-env.sh npx tauri build --bundles app && zsh ./scripts/build-dmg.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",
