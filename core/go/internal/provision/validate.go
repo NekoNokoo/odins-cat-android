@@ -34,7 +34,7 @@ func Validate(req Request) ValidationResponse {
 			"MVP validation currently uses insecure host key acceptance and should be hardened before production use.",
 			"Odin One keeps the current localhost-first data path while staging a future protocol pack for Russia-friendly TCP and UDP fallbacks.",
 		},
-		ProtocolPack: buildProtocolPack(req.Server.Transport, 0),
+		ProtocolPack: buildProtocolPack(req.Server.Transport, 0, 0),
 	}
 
 	if req.Server.Host == "" || req.Server.Username == "" || req.Secret == "" {

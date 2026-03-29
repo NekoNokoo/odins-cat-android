@@ -118,7 +118,7 @@ func StartLocalTunnel(req Request, vkLink string) LocalTunnelState {
 		VKLink:     vkLink,
 		ServerHost: req.Server.Host,
 		Transport:  string(req.Server.Transport),
-		Engine:     string(normalizedEngine(req.Server.Engine)),
+		Engine:     string(resolvedEngine(req.Server.Engine, req.Server.Transport, req.Server.Protocol)),
 		Protocol:   string(normalizedProtocol(req.Server.Transport, req.Server.Protocol)),
 	}
 	tunnelManager.logs = nil
@@ -293,7 +293,7 @@ func (m *localTunnelManager) run(ctx context.Context, req Request, vkLink string
 		}
 	}
 
-	engine := normalizedEngine(req.Server.Engine)
+	engine := resolvedEngine(req.Server.Engine, req.Server.Transport, req.Server.Protocol)
 	protocol := normalizedProtocol(req.Server.Transport, req.Server.Protocol)
 	if profile.Transport == string(TransportVKTurnProxyXray) {
 		engine = EngineXray
@@ -392,7 +392,7 @@ func (m *localTunnelManager) run(ctx context.Context, req Request, vkLink string
 		VKLink:        vkLink,
 		ServerHost:    profile.ServerHost,
 		Transport:     profile.Transport,
-		Engine:        string(normalizedEngine(req.Server.Engine)),
+		Engine:        string(engine),
 		Protocol:      string(protocol),
 		LastTest: &LocalTunnelTestResult{
 			OK:     false,
@@ -431,16 +431,16 @@ func buildLocalTunnelClient(
 	socksPort, bridgePort, endpointPort int,
 ) (string, string, *exec.Cmd, *os.File, string, error) {
 	if protocol == ProtocolVLESSReality {
-		binaryPath, err := ensureLocalXrayBinary()
+		binaryPath, err := ensureLocalSingBoxBinary()
 		if err != nil {
 			return "", "", nil, nil, "", err
 		}
-		configPath, err := writeLocalRealityXrayConfig(profile, socksPort)
+		configPath, err := writeLocalRealitySingBoxConfig(profile, socksPort)
 		if err != nil {
 			return "", "", nil, nil, "", err
 		}
-		cmd := exec.CommandContext(ctx, binaryPath, "run", "-config", configPath)
-		logFile, _ := createLogFile("xray-reality-client")
+		cmd := exec.CommandContext(ctx, binaryPath, "run", "-c", configPath)
+		logFile, _ := createLogFile("sing-box-reality-client")
 		logPath := ""
 		if logFile != nil {
 			logPath = logFile.Name()
@@ -492,13 +492,18 @@ func buildLocalTunnelClient(
 
 func loadOwnerProfile(req Request) (ownerProfile, error) {
 	var profile ownerProfile
+	expectedProtocol := normalizedProtocol(req.Server.Transport, req.Server.Protocol)
+	cachedOwnerFound := false
 
 	localPath, err := localProfilePath(req.Server.Host)
 	if err == nil {
 		if data, readErr := os.ReadFile(localPath); readErr == nil {
 			if unmarshalErr := json.Unmarshal(data, &profile); unmarshalErr == nil {
 				if ownerProfileMatchesRequest(profile, req.Server.Transport) {
-					return profile, nil
+					cachedOwnerFound = true
+					if ownerProfileSupportsProtocol(profile, req.Server.Transport, expectedProtocol) {
+						return profile, nil
+					}
 				}
 			}
 		}
@@ -506,9 +511,13 @@ func loadOwnerProfile(req Request) (ownerProfile, error) {
 
 	if req.Secret == "" {
 		importedProfile, importedErr := loadImportedProfile(req.Server.Host, req.Server.Transport)
-		if importedErr == nil && ownerProfileMatchesRequest(importedProfile, req.Server.Transport) {
+		if importedErr == nil && ownerProfileSupportsProtocol(importedProfile, req.Server.Transport, expectedProtocol) {
 			return importedProfile, nil
 		}
+		if cachedOwnerFound {
+			return profile, nil
+		}
+		return profile, fmt.Errorf("no usable imported access key found for %s on %s", expectedProtocol, req.Server.Host)
 	}
 
 	client, err := connectSSH(req)
@@ -542,23 +551,41 @@ func loadImportedProfile(host string, transport Transport) (ownerProfile, error)
 	profile = ownerProfile{
 		Name:            invite.Name,
 		Transport:       invite.Transport,
-		ActiveProtocol:  string(ProtocolDirectWireGuard),
 		ServerHost:      invite.ServerHost,
 		VKTurnProxyPort: invite.VKTurnProxyPort,
 		EndpointPort:    effectiveInviteEndpointPort(invite),
 	}
-	profile.WireGuard.ServerPublicKey = invite.WireGuard.ServerPublicKey
-	profile.WireGuard.ClientPrivateKey = invite.WireGuard.ClientPrivateKey
-	profile.WireGuard.ClientPublicKey = invite.WireGuard.ClientPublicKey
-	profile.WireGuard.Address = invite.WireGuard.Address
-	profile.WireGuard.MTU = invite.WireGuard.MTU
+
+	switch normalizedInviteProtocol(invite) {
+	case string(ProtocolVLESSReality):
+		profile.ActiveProtocol = string(ProtocolVLESSReality)
+		profile.StagedFallbacks = map[string]any{
+			"vlessReality": map[string]any{
+				"port":        invite.VLESSReality.Port,
+				"serverName":  invite.VLESSReality.ServerName,
+				"publicKey":   invite.VLESSReality.PublicKey,
+				"shortId":     invite.VLESSReality.ShortID,
+				"uuid":        invite.VLESSReality.UUID,
+				"flow":        invite.VLESSReality.Flow,
+				"description": "Imported VLESS + REALITY guest access profile.",
+				"status":      "ready",
+			},
+		}
+	default:
+		profile.ActiveProtocol = string(ProtocolDirectWireGuard)
+		profile.WireGuard.ServerPublicKey = invite.WireGuard.ServerPublicKey
+		profile.WireGuard.ClientPrivateKey = invite.WireGuard.ClientPrivateKey
+		profile.WireGuard.ClientPublicKey = invite.WireGuard.ClientPublicKey
+		profile.WireGuard.Address = invite.WireGuard.Address
+		profile.WireGuard.MTU = invite.WireGuard.MTU
+	}
 
 	return profile, nil
 }
 
 func EnsureRealityOwnerProfile(req Request) error {
 	req.Server.Transport = TransportXray
-	req.Server.Engine = EngineXray
+	req.Server.Engine = EngineSingBox
 	req.Server.Protocol = ProtocolVLESSReality
 
 	profile, err := loadOwnerProfile(req)
@@ -593,6 +620,22 @@ func ownerProfileMatchesRequest(profile ownerProfile, transport Transport) bool 
 		return profile.VKTurnProxyPort > 0
 	default:
 		return false
+	}
+}
+
+func ownerProfileSupportsProtocol(profile ownerProfile, transport Transport, protocol TunnelProtocol) bool {
+	if !ownerProfileMatchesRequest(profile, transport) {
+		return false
+	}
+
+	switch normalizedProtocol(transport, protocol) {
+	case ProtocolVLESSReality:
+		_, err := readRealityFallback(profile)
+		return err == nil
+	default:
+		return strings.TrimSpace(profile.WireGuard.ServerPublicKey) != "" &&
+			strings.TrimSpace(profile.WireGuard.ClientPrivateKey) != "" &&
+			strings.TrimSpace(profile.WireGuard.Address) != ""
 	}
 }
 
@@ -636,10 +679,19 @@ func (m *localTunnelManager) cleanupOrphanedClientsLocked() {
 	if err != nil {
 		return
 	}
-	pattern := filepath.Join(cacheDir, "bin", "xray-darwin-arm64") + " run -config " + filepath.Join(cacheDir, "config", "xray-client-")
-	_ = killMatchingProcesses(pattern, false)
+	patterns := []string{
+		filepath.Join(cacheDir, "bin", "xray-darwin-arm64") + " run -config " + filepath.Join(cacheDir, "config", "xray-client-"),
+		filepath.Join(cacheDir, "bin", "xray-darwin-arm64") + " run -config " + filepath.Join(cacheDir, "config", "xray-reality-client-"),
+		filepath.Join(cacheDir, "bin", "sing-box-darwin-arm64") + " run -c " + filepath.Join(cacheDir, "config", "sing-box-client-"),
+		filepath.Join(cacheDir, "bin", "sing-box-darwin-arm64") + " run -c " + filepath.Join(cacheDir, "config", "sing-box-reality-client-"),
+	}
+	for _, pattern := range patterns {
+		_ = killMatchingProcesses(pattern, false)
+	}
 	time.Sleep(150 * time.Millisecond)
-	_ = killMatchingProcesses(pattern, true)
+	for _, pattern := range patterns {
+		_ = killMatchingProcesses(pattern, true)
+	}
 }
 
 func (m *localTunnelManager) runDirectHealthProbe(ctx context.Context, socksAddress string) {
@@ -1089,6 +1141,68 @@ func writeLocalRealityXrayConfig(profile ownerProfile, socksPort int) (string, e
       }
     }
   ]
+}
+`, socksPort, profile.ServerHost, reality.Port, reality.UUID, reality.Flow, reality.ServerName, reality.PublicKey, reality.ShortID)
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		return "", err
+	}
+	return configPath, nil
+}
+
+func writeLocalRealitySingBoxConfig(profile ownerProfile, socksPort int) (string, error) {
+	cacheDir, err := appCacheDir()
+	if err != nil {
+		return "", err
+	}
+	configDir := filepath.Join(cacheDir, "config")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		return "", err
+	}
+	reality, err := readRealityFallback(profile)
+	if err != nil {
+		return "", err
+	}
+	configPath := filepath.Join(configDir, fmt.Sprintf("sing-box-reality-client-%d.json", socksPort))
+	config := fmt.Sprintf(`{
+  "log": {
+    "level": "warn"
+  },
+  "inbounds": [
+    {
+      "type": "socks",
+      "tag": "socks-in",
+      "listen": "127.0.0.1",
+      "listen_port": %d
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-out",
+      "server": %q,
+      "server_port": %d,
+      "uuid": %q,
+      "flow": %q,
+      "network": "tcp",
+      "tls": {
+        "enabled": true,
+        "server_name": %q,
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": %q,
+          "short_id": %q
+        }
+      }
+    }
+  ],
+  "route": {
+    "final": "vless-out",
+    "auto_detect_interface": true
+  }
 }
 `, socksPort, profile.ServerHost, reality.Port, reality.UUID, reality.Flow, reality.ServerName, reality.PublicKey, reality.ShortID)
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {

@@ -33,17 +33,27 @@ export interface DeployStage {
   description: string;
 }
 
+export interface InviteRealityProfile {
+  port: number;
+  serverName: string;
+  publicKey: string;
+  shortId: string;
+  uuid: string;
+  flow?: string;
+}
+
 export interface InviteProfile {
   id?: string;
   role: "owner" | "guest";
   name: string;
-  protocol: "wireguard";
+  protocol: "wireguard" | "vless-reality";
   transport: string;
   serverHost: string;
   vkTurnProxyPort: number;
   endpointPort?: number;
   endpoint: string;
   fingerprint: string;
+  vlessReality?: InviteRealityProfile;
   shareCode: string;
   rawJson: string;
   localPath?: string;

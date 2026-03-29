@@ -39,6 +39,15 @@ type inviteProfile struct {
 		Address          string `json:"address"`
 		MTU              int    `json:"mtu"`
 	} `json:"wireguard"`
+	VLESSReality struct {
+		Port       int    `json:"port"`
+		ServerName string `json:"serverName"`
+		PublicKey  string `json:"publicKey"`
+		ShortID    string `json:"shortId"`
+		UUID       string `json:"uuid"`
+		Flow       string `json:"flow"`
+	} `json:"vlessReality,omitempty"`
+	StagedFallbacks map[string]any `json:"stagedFallbacks,omitempty"`
 }
 
 type InviteProfileResponse struct {
@@ -52,21 +61,29 @@ type InviteProfileResponse struct {
 	EndpointPort    int    `json:"endpointPort,omitempty"`
 	Endpoint        string `json:"endpoint"`
 	Fingerprint     string `json:"fingerprint"`
-	ShareCode       string `json:"shareCode"`
-	RawJSON         string `json:"rawJson"`
-	LocalPath       string `json:"localPath,omitempty"`
-	ImportedAt      string `json:"importedAt,omitempty"`
-	CreatedAt       string `json:"createdAt,omitempty"`
-	RevokedAt       string `json:"revokedAt,omitempty"`
-	Status          string `json:"status,omitempty"`
-	Error           string `json:"error,omitempty"`
+	VLESSReality    struct {
+		Port       int    `json:"port"`
+		ServerName string `json:"serverName"`
+		PublicKey  string `json:"publicKey"`
+		ShortID    string `json:"shortId"`
+		UUID       string `json:"uuid"`
+		Flow       string `json:"flow"`
+	} `json:"vlessReality,omitempty"`
+	ShareCode  string `json:"shareCode"`
+	RawJSON    string `json:"rawJson"`
+	LocalPath  string `json:"localPath,omitempty"`
+	ImportedAt string `json:"importedAt,omitempty"`
+	CreatedAt  string `json:"createdAt,omitempty"`
+	RevokedAt  string `json:"revokedAt,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 func GenerateGuestInvite(host, name string) InviteProfileResponse {
 	_ = host
 	_ = name
 	return InviteProfileResponse{
-		Error: "guest access keys must be issued remotely so each device gets its own WireGuard identity",
+		Error: "guest access keys must be issued remotely so each device gets its own transport identity",
 	}
 }
 
@@ -110,6 +127,7 @@ func buildInviteResponse(invite inviteProfile, localPath string) InviteProfileRe
 		EndpointPort:    invite.EndpointPort,
 		Endpoint:        invite.Endpoint,
 		Fingerprint:     invite.Fingerprint,
+		VLESSReality:    invite.VLESSReality,
 		ShareCode:       shareCodePrefix + base64.RawURLEncoding.EncodeToString(raw),
 		RawJSON:         string(raw),
 		LocalPath:       localPath,
@@ -138,6 +156,10 @@ func decodeInvite(shareCode string) (inviteProfile, string, error) {
 	if err := json.Unmarshal([]byte(rawText), &invite); err != nil {
 		return invite, "", fmt.Errorf("parse invite profile: %w", err)
 	}
+	invite.Protocol = normalizedInviteProtocol(invite)
+	if invite.VLESSReality.Flow == "" && invite.Protocol == string(ProtocolVLESSReality) {
+		invite.VLESSReality.Flow = "xtls-rprx-vision"
+	}
 	if err := validateInvite(invite); err != nil {
 		return invite, "", err
 	}
@@ -147,6 +169,40 @@ func decodeInvite(shareCode string) (inviteProfile, string, error) {
 		return invite, "", fmt.Errorf("normalize invite profile: %w", err)
 	}
 	return invite, string(normalized), nil
+}
+
+func normalizedInviteProtocol(invite inviteProfile) string {
+	switch strings.TrimSpace(invite.Protocol) {
+	case string(ProtocolVLESSReality), "wireguard":
+		return strings.TrimSpace(invite.Protocol)
+	case string(ProtocolDirectWireGuard):
+		return "wireguard"
+	}
+	if inviteHasReality(invite) {
+		return string(ProtocolVLESSReality)
+	}
+	return "wireguard"
+}
+
+func inviteHasWireGuard(invite inviteProfile) bool {
+	return strings.TrimSpace(invite.WireGuard.ServerPublicKey) != "" &&
+		strings.TrimSpace(invite.WireGuard.ClientPrivateKey) != "" &&
+		strings.TrimSpace(invite.WireGuard.ClientPublicKey) != ""
+}
+
+func inviteHasReality(invite inviteProfile) bool {
+	return invite.VLESSReality.Port > 0 &&
+		strings.TrimSpace(invite.VLESSReality.ServerName) != "" &&
+		strings.TrimSpace(invite.VLESSReality.PublicKey) != "" &&
+		strings.TrimSpace(invite.VLESSReality.ShortID) != "" &&
+		strings.TrimSpace(invite.VLESSReality.UUID) != ""
+}
+
+func inviteIdentityValue(invite inviteProfile) string {
+	if strings.TrimSpace(invite.VLESSReality.UUID) != "" {
+		return invite.VLESSReality.UUID
+	}
+	return invite.WireGuard.ClientPublicKey
 }
 
 func validateInvite(invite inviteProfile) error {
@@ -162,8 +218,17 @@ func validateInvite(invite inviteProfile) error {
 	if strings.TrimSpace(invite.Transport) == "" {
 		return fmt.Errorf("invite profile transport is required")
 	}
-	if strings.TrimSpace(invite.WireGuard.ServerPublicKey) == "" || strings.TrimSpace(invite.WireGuard.ClientPrivateKey) == "" {
-		return fmt.Errorf("invite profile wireguard keys are required")
+	switch normalizedInviteProtocol(invite) {
+	case "wireguard":
+		if strings.TrimSpace(invite.WireGuard.ServerPublicKey) == "" || strings.TrimSpace(invite.WireGuard.ClientPrivateKey) == "" {
+			return fmt.Errorf("invite profile wireguard keys are required")
+		}
+	case string(ProtocolVLESSReality):
+		if !inviteHasReality(invite) {
+			return fmt.Errorf("invite profile VLESS + REALITY settings are required")
+		}
+	default:
+		return fmt.Errorf("invite profile protocol %q is not supported", invite.Protocol)
 	}
 	return nil
 }
@@ -215,12 +280,14 @@ func IssueRemoteGuestProfile(req Request, name string) (InviteProfileResponse, e
 		return InviteProfileResponse{}, err
 	}
 
-	guestKeys, err := generateWireGuardKeyPair()
-	if err != nil {
-		return InviteProfileResponse{}, err
+	if owner.Transport != string(TransportXray) {
+		return InviteProfileResponse{}, fmt.Errorf("VLESS + REALITY guest access keys require the direct xray transport")
+	}
+	if xrayState.Reality.Port <= 0 || strings.TrimSpace(xrayState.Reality.PrivateKey) == "" || strings.TrimSpace(owner.VLESSReality.PublicKey) == "" {
+		return InviteProfileResponse{}, fmt.Errorf("remote VLESS + REALITY inbound is not available for guest access keys")
 	}
 
-	nextAddress, err := nextGuestAddress(owner, guestProfiles)
+	guestUUID, err := generateProtocolUUID()
 	if err != nil {
 		return InviteProfileResponse{}, err
 	}
@@ -230,20 +297,17 @@ func IssueRemoteGuestProfile(req Request, name string) (InviteProfileResponse, e
 		ID:              guestID,
 		Role:            "guest",
 		Name:            defaultInviteName(name),
-		Protocol:        "wireguard",
+		Protocol:        string(ProtocolVLESSReality),
 		Transport:       owner.Transport,
 		ServerHost:      owner.ServerHost,
 		VKTurnProxyPort: owner.VKTurnProxyPort,
-		EndpointPort:    effectiveInviteEndpointPort(owner),
-		Endpoint:        fmt.Sprintf("%s:%d", owner.ServerHost, effectiveInviteEndpointPort(owner)),
+		EndpointPort:    xrayState.Reality.Port,
+		Endpoint:        fmt.Sprintf("%s:%d", owner.ServerHost, xrayState.Reality.Port),
 		CreatedAt:       nowRFC3339(),
 		Status:          "active",
 	}
-	guest.WireGuard.ServerPublicKey = owner.WireGuard.ServerPublicKey
-	guest.WireGuard.ClientPrivateKey = guestKeys.Private
-	guest.WireGuard.ClientPublicKey = guestKeys.Public
-	guest.WireGuard.Address = nextAddress
-	guest.WireGuard.MTU = owner.WireGuard.MTU
+	guest.VLESSReality.UUID = guestUUID
+	guest.VLESSReality.Flow = "xtls-rprx-vision"
 	enrichInviteProfile(&guest, owner, xrayState)
 
 	rawJSON, err := json.MarshalIndent(guest, "", "  ")
@@ -407,6 +471,66 @@ func findLocalImportedInvite(host string, transport string) (inviteProfile, stri
 type remoteXrayState struct {
 	WireGuardPort int
 	SecretKey     string
+	Reality       remoteRealityState
+}
+
+type remoteRealityState struct {
+	Port       int
+	PrivateKey string
+	ServerName string
+	ShortID    string
+	Dest       string
+}
+
+func readInviteRealityFallback(invite inviteProfile) (realityFallback, error) {
+	if inviteHasReality(invite) {
+		flow := strings.TrimSpace(invite.VLESSReality.Flow)
+		if flow == "" {
+			flow = "xtls-rprx-vision"
+		}
+		return realityFallback{
+			Port:       invite.VLESSReality.Port,
+			ServerName: invite.VLESSReality.ServerName,
+			PublicKey:  invite.VLESSReality.PublicKey,
+			ShortID:    invite.VLESSReality.ShortID,
+			UUID:       invite.VLESSReality.UUID,
+			Flow:       flow,
+		}, nil
+	}
+
+	raw, ok := invite.StagedFallbacks["vlessReality"]
+	if !ok {
+		return realityFallback{}, fmt.Errorf("invite profile has no VLESS + REALITY settings")
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return realityFallback{}, fmt.Errorf("marshal invite reality config: %w", err)
+	}
+	var parsed struct {
+		Port       int    `json:"port"`
+		ServerName string `json:"serverName"`
+		PublicKey  string `json:"publicKey"`
+		ShortID    string `json:"shortId"`
+		UUID       string `json:"uuid"`
+		Flow       string `json:"flow"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return realityFallback{}, fmt.Errorf("parse invite reality config: %w", err)
+	}
+	if parsed.Port <= 0 || parsed.ServerName == "" || parsed.PublicKey == "" || parsed.ShortID == "" || parsed.UUID == "" {
+		return realityFallback{}, fmt.Errorf("invite profile has incomplete VLESS + REALITY settings")
+	}
+	if parsed.Flow == "" {
+		parsed.Flow = "xtls-rprx-vision"
+	}
+	return realityFallback{
+		Port:       parsed.Port,
+		ServerName: parsed.ServerName,
+		PublicKey:  parsed.PublicKey,
+		ShortID:    parsed.ShortID,
+		UUID:       parsed.UUID,
+		Flow:       parsed.Flow,
+	}, nil
 }
 
 func readRemoteGuestProfiles(client *ssh.Client) ([]inviteProfile, error) {
@@ -448,6 +572,17 @@ func loadRemoteAccessState(client *ssh.Client) (inviteProfile, string, remoteXra
 	if err := json.Unmarshal([]byte(ownerText), &owner); err != nil {
 		return owner, "", xrayState, fmt.Errorf("parse remote owner profile: %w", err)
 	}
+	if reality, err := readInviteRealityFallback(owner); err == nil {
+		owner.VLESSReality.Port = reality.Port
+		owner.VLESSReality.ServerName = reality.ServerName
+		owner.VLESSReality.PublicKey = reality.PublicKey
+		owner.VLESSReality.ShortID = reality.ShortID
+		owner.VLESSReality.UUID = reality.UUID
+		owner.VLESSReality.Flow = reality.Flow
+		owner.Protocol = string(ProtocolVLESSReality)
+	} else {
+		owner.Protocol = normalizedInviteProtocol(owner)
+	}
 
 	xrayText, err := runRemote(client, "cat "+quoteShell(whitelistXrayConfigPath))
 	if err != nil {
@@ -456,10 +591,20 @@ func loadRemoteAccessState(client *ssh.Client) (inviteProfile, string, remoteXra
 
 	var parsed struct {
 		Inbounds []struct {
-			Port     int `json:"port"`
+			Tag      string `json:"tag"`
+			Protocol string `json:"protocol"`
+			Port     int    `json:"port"`
 			Settings struct {
 				SecretKey string `json:"secretKey"`
 			} `json:"settings"`
+			StreamSettings struct {
+				RealitySettings struct {
+					Dest        string   `json:"dest"`
+					PrivateKey  string   `json:"privateKey"`
+					ServerNames []string `json:"serverNames"`
+					ShortIDs    []string `json:"shortIds"`
+				} `json:"realitySettings"`
+			} `json:"streamSettings"`
 		} `json:"inbounds"`
 	}
 	if err := json.Unmarshal([]byte(xrayText), &parsed); err != nil {
@@ -469,8 +614,26 @@ func loadRemoteAccessState(client *ssh.Client) (inviteProfile, string, remoteXra
 		return owner, ownerText, xrayState, fmt.Errorf("remote xray config has no inbounds")
 	}
 
-	xrayState.WireGuardPort = parsed.Inbounds[0].Port
-	xrayState.SecretKey = parsed.Inbounds[0].Settings.SecretKey
+	for _, inbound := range parsed.Inbounds {
+		switch inbound.Protocol {
+		case "wireguard":
+			xrayState.WireGuardPort = inbound.Port
+			xrayState.SecretKey = inbound.Settings.SecretKey
+		case "vless":
+			xrayState.Reality.Port = inbound.Port
+			xrayState.Reality.PrivateKey = inbound.StreamSettings.RealitySettings.PrivateKey
+			xrayState.Reality.Dest = inbound.StreamSettings.RealitySettings.Dest
+			if len(inbound.StreamSettings.RealitySettings.ServerNames) > 0 {
+				xrayState.Reality.ServerName = inbound.StreamSettings.RealitySettings.ServerNames[0]
+			}
+			if len(inbound.StreamSettings.RealitySettings.ShortIDs) > 0 {
+				xrayState.Reality.ShortID = inbound.StreamSettings.RealitySettings.ShortIDs[0]
+			}
+		}
+	}
+	if xrayState.WireGuardPort == 0 {
+		return owner, ownerText, xrayState, fmt.Errorf("remote xray config has no wireguard inbound")
+	}
 	if owner.EndpointPort == 0 {
 		if owner.Transport == string(TransportXray) {
 			owner.EndpointPort = xrayState.WireGuardPort
@@ -488,22 +651,48 @@ func syncRemoteXrayConfig(client *ssh.Client, owner inviteProfile, xrayState rem
 			AllowedIPs: []string{owner.WireGuard.Address},
 		},
 	}
+	realityClients := make([]xrayRealityClient, 0, len(guests)+1)
+	if reality, err := readInviteRealityFallback(owner); err == nil {
+		realityClients = append(realityClients, xrayRealityClient{
+			UUID: reality.UUID,
+			Flow: reality.Flow,
+		})
+	}
 
 	for _, guest := range guests {
 		if guest.Status == "revoked" || guest.RevokedAt != "" {
 			continue
 		}
-		peers = append(peers, xrayWireGuardPeer{
-			PublicKey:  guest.WireGuard.ClientPublicKey,
-			AllowedIPs: []string{guest.WireGuard.Address},
-		})
+		if inviteHasWireGuard(guest) {
+			peers = append(peers, xrayWireGuardPeer{
+				PublicKey:  guest.WireGuard.ClientPublicKey,
+				AllowedIPs: []string{guest.WireGuard.Address},
+			})
+		}
+		if reality, err := readInviteRealityFallback(guest); err == nil {
+			realityClients = append(realityClients, xrayRealityClient{
+				UUID: reality.UUID,
+				Flow: reality.Flow,
+			})
+		}
 	}
 
 	listenHost := "127.0.0.1"
 	if owner.Transport == string(TransportXray) {
 		listenHost = "0.0.0.0"
 	}
-	config := renderXrayConfigWithListen(xrayState.SecretKey, peers, listenHost, xrayState.WireGuardPort, nil)
+	var realityInbound *xrayRealityInbound
+	if xrayState.Reality.Port > 0 && strings.TrimSpace(xrayState.Reality.PrivateKey) != "" && len(realityClients) > 0 {
+		realityInbound = &xrayRealityInbound{
+			Port:       xrayState.Reality.Port,
+			Clients:    realityClients,
+			PrivateKey: xrayState.Reality.PrivateKey,
+			ShortID:    xrayState.Reality.ShortID,
+			ServerName: xrayState.Reality.ServerName,
+			Dest:       xrayState.Reality.Dest,
+		}
+	}
+	config := renderXrayConfigWithListen(xrayState.SecretKey, peers, listenHost, xrayState.WireGuardPort, realityInbound)
 	if err := uploadFile(client, whitelistXrayConfigPath, []byte(config), "0644"); err != nil {
 		return err
 	}
@@ -556,10 +745,21 @@ func nextGuestID(guests []inviteProfile) string {
 	return fmt.Sprintf("guest-%03d", maxID+1)
 }
 
-func enrichInviteProfile(invite *inviteProfile, owner inviteProfile, xrayState remoteXrayState) {
-	if invite.Protocol == "" {
-		invite.Protocol = "wireguard"
+func effectiveRealityPort(owner inviteProfile, xrayState remoteXrayState) int {
+	if xrayState.Reality.Port > 0 {
+		return xrayState.Reality.Port
 	}
+	if owner.VLESSReality.Port > 0 {
+		return owner.VLESSReality.Port
+	}
+	if reality, err := readInviteRealityFallback(owner); err == nil {
+		return reality.Port
+	}
+	return 0
+}
+
+func enrichInviteProfile(invite *inviteProfile, owner inviteProfile, xrayState remoteXrayState) {
+	invite.Protocol = normalizedInviteProtocol(*invite)
 	if invite.Status == "" {
 		invite.Status = "active"
 	}
@@ -572,14 +772,48 @@ func enrichInviteProfile(invite *inviteProfile, owner inviteProfile, xrayState r
 	if invite.VKTurnProxyPort == 0 {
 		invite.VKTurnProxyPort = owner.VKTurnProxyPort
 	}
+	if invite.Protocol == string(ProtocolVLESSReality) {
+		if reality, err := readInviteRealityFallback(owner); err == nil {
+			if invite.VLESSReality.Port == 0 {
+				invite.VLESSReality.Port = effectiveRealityPort(owner, xrayState)
+			}
+			if invite.VLESSReality.ServerName == "" {
+				if xrayState.Reality.ServerName != "" {
+					invite.VLESSReality.ServerName = xrayState.Reality.ServerName
+				} else {
+					invite.VLESSReality.ServerName = reality.ServerName
+				}
+			}
+			if invite.VLESSReality.PublicKey == "" {
+				invite.VLESSReality.PublicKey = reality.PublicKey
+			}
+			if invite.VLESSReality.ShortID == "" {
+				if xrayState.Reality.ShortID != "" {
+					invite.VLESSReality.ShortID = xrayState.Reality.ShortID
+				} else {
+					invite.VLESSReality.ShortID = reality.ShortID
+				}
+			}
+			if invite.VLESSReality.UUID == "" {
+				invite.VLESSReality.UUID = reality.UUID
+			}
+			if invite.VLESSReality.Flow == "" {
+				invite.VLESSReality.Flow = reality.Flow
+			}
+		}
+	}
 	if invite.EndpointPort == 0 {
-		invite.EndpointPort = effectiveInviteEndpointPort(owner)
+		if invite.Protocol == string(ProtocolVLESSReality) {
+			invite.EndpointPort = effectiveRealityPort(owner, xrayState)
+		} else {
+			invite.EndpointPort = effectiveInviteEndpointPort(owner)
+		}
 	}
 	if invite.Endpoint == "" {
 		invite.Endpoint = fmt.Sprintf("%s:%d", invite.ServerHost, effectiveInviteEndpointPort(*invite))
 	}
 	if invite.Fingerprint == "" {
-		invite.Fingerprint = inviteFingerprint(invite.ServerHost, effectiveInviteEndpointPort(*invite), invite.WireGuard.ClientPublicKey)
+		invite.Fingerprint = inviteFingerprint(invite.ServerHost, effectiveInviteEndpointPort(*invite), inviteIdentityValue(*invite))
 	}
 	if invite.WireGuard.ServerPublicKey == "" {
 		invite.WireGuard.ServerPublicKey = owner.WireGuard.ServerPublicKey
@@ -600,6 +834,9 @@ func nowRFC3339() string {
 func effectiveInviteEndpointPort(invite inviteProfile) int {
 	if invite.EndpointPort > 0 {
 		return invite.EndpointPort
+	}
+	if normalizedInviteProtocol(invite) == string(ProtocolVLESSReality) && invite.VLESSReality.Port > 0 {
+		return invite.VLESSReality.Port
 	}
 	return invite.VKTurnProxyPort
 }

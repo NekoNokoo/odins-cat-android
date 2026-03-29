@@ -60,11 +60,11 @@ func StartDeployment(req Request) Deployment {
 		DeploymentID: id,
 		ServerHost:   req.Server.Host,
 		Transport:    string(req.Server.Transport),
-		Engine:       string(normalizedEngine(req.Server.Engine)),
+		Engine:       string(resolvedEngine(req.Server.Engine, req.Server.Transport, req.Server.Protocol)),
 		Protocol:     string(normalizedProtocol(req.Server.Transport, req.Server.Protocol)),
 		Status:       "running",
 		Steps:        steps,
-		ProtocolPack: buildProtocolPack(req.Server.Transport, 0),
+		ProtocolPack: buildProtocolPack(req.Server.Transport, 0, 0),
 	}
 
 	store.mu.Lock()
@@ -140,7 +140,7 @@ func BuildPlan(req Request) Response {
 		Transport:    string(req.Server.Transport),
 		Steps:        steps,
 		Warnings:     warnings,
-		ProtocolPack: buildProtocolPack(req.Server.Transport, 0),
+		ProtocolPack: buildProtocolPack(req.Server.Transport, 0, 0),
 	}
 }
 
@@ -192,7 +192,7 @@ func executeDeployment(id string, req Request) error {
 		}
 	}
 	setDeploymentPorts(id, turnPort, wireGuardPort)
-	setDeploymentProtocolPack(id, buildProtocolPack(req.Server.Transport, endpointPortForProtocolPack(req.Server.Transport, turnPort, wireGuardPort)))
+	setDeploymentProtocolPack(id, buildProtocolPack(req.Server.Transport, endpointPortForProtocolPack(req.Server.Transport, turnPort, wireGuardPort), 0))
 
 	realityPort := realityFallbackPort
 	if req.Server.Transport == TransportXray {
@@ -208,6 +208,7 @@ func executeDeployment(id string, req Request) error {
 			}
 		}
 	}
+	setDeploymentProtocolPack(id, buildProtocolPack(req.Server.Transport, endpointPortForProtocolPack(req.Server.Transport, turnPort, wireGuardPort), realityPort))
 
 	if req.Server.Transport == TransportVKTurnProxyXray {
 		vkBinary, err := ensureVKTurnProxyBinary()
@@ -271,10 +272,17 @@ func executeDeployment(id string, req Request) error {
 	var realityInbound *xrayRealityInbound
 	if req.Server.Transport == TransportXray {
 		realityInbound = &xrayRealityInbound{
-			Port:       realityPort,
-			UUID:       realityUUID,
+			Port: realityPort,
+			Clients: []xrayRealityClient{
+				{
+					UUID: realityUUID,
+					Flow: "xtls-rprx-vision",
+				},
+			},
 			PrivateKey: realityKeys.Private,
 			ShortID:    realityShortID,
+			ServerName: realityServerName(),
+			Dest:       realityDestination(),
 		}
 	}
 	xrayConfig = renderXrayConfigWithListen(serverKeys.Private, []xrayWireGuardPeer{
@@ -308,7 +316,7 @@ func executeDeployment(id string, req Request) error {
 	if err := saveLocalOwnerProfile(req.Server.Host, []byte(inviteProfile)); err != nil {
 		return err
 	}
-	protocolPackManifest, err := renderProtocolPackManifest(req.Server.Host, req.Server.Transport, endpointPort)
+	protocolPackManifest, err := renderProtocolPackManifest(req.Server.Host, req.Server.Transport, endpointPort, realityPort)
 	if err != nil {
 		return err
 	}

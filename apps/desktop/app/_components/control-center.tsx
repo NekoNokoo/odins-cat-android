@@ -22,7 +22,7 @@ const initialDraft: ServerDraft = {
   username: "root",
   authMethod: "password",
   transport: "xray",
-  engine: "xray",
+  engine: "sing-box",
   protocol: "vless-reality"
 };
 
@@ -54,6 +54,38 @@ const normalizeEngine = (engine: string | undefined): NonNullable<ServerDraft["e
 
 const normalizeProtocol = (protocol: string | undefined): NonNullable<ServerDraft["protocol"]> =>
   protocol === "vless-reality" || protocol === "direct-wireguard" ? protocol : "vless-reality";
+
+const normalizeInviteProtocol = (protocol: InviteProfile["protocol"] | undefined): NonNullable<ServerDraft["protocol"]> =>
+  protocol === "wireguard" ? "direct-wireguard" : "vless-reality";
+
+const resolveDraftEngine = (
+  transport: ServerDraft["transport"] | undefined,
+  protocol: ServerDraft["protocol"] | undefined,
+  engine: string | undefined
+): NonNullable<ServerDraft["engine"]> => {
+  const normalizedTransportValue = normalizeTransport(transport);
+  const normalizedProtocolValue =
+    normalizedTransportValue === "xray" ? normalizeProtocol(protocol) : "direct-wireguard";
+  if (normalizedProtocolValue === "vless-reality") {
+    return "sing-box";
+  }
+  return normalizeEngine(engine);
+};
+
+const ownerProfileHasRealityFallback = (profile: OwnerAccessProfile | null) =>
+  Boolean(profile?.stagedFallbacks && Object.prototype.hasOwnProperty.call(profile.stagedFallbacks, "vlessReality"));
+
+const ownerProfileSupportsDraft = (profile: OwnerAccessProfile | null, serverDraft: ServerDraft) => {
+  if (!profile?.exists) {
+    return false;
+  }
+  const transport = normalizeTransport(serverDraft.transport);
+  const protocol = normalizeProtocol(serverDraft.protocol);
+  if (transport === "xray" && protocol === "vless-reality") {
+    return ownerProfileHasRealityFallback(profile);
+  }
+  return Boolean(profile.wireguard?.serverPublicKey && profile.wireguard?.clientPrivateKey && profile.wireguard?.address);
+};
 
 type PersistedState = {
   activeTab: WorkspaceTab;
@@ -111,10 +143,13 @@ export function ControlCenter() {
     deployment?.transport === "vk-turn-proxy+xray" ? deployment.turnPort : deployment?.wireGuardPort;
   const systemProxyActive = systemProxy?.enabled ?? false;
   const vpnModeActive = localTunnel?.status === "running" && systemProxyActive;
+  const hasMatchingOwnerProfile = Boolean(
+    ownerProfileSupportsDraft(ownerProfile, draft) && (!draft.host || ownerProfile?.serverHost === draft.host)
+  );
   const hasMatchingImportedProfile = Boolean(
     importedProfile?.localPath && (!draft.host || importedProfile.serverHost === draft.host)
   );
-  const hasLocalAccessProfile = Boolean(ownerProfile?.exists || hasMatchingImportedProfile);
+  const hasLocalAccessProfile = Boolean(hasMatchingOwnerProfile || hasMatchingImportedProfile);
   const stageStatusLabels = {
     queued: t("stageQueued"),
     current: t("stageCurrent"),
@@ -217,7 +252,7 @@ export function ControlCenter() {
   const currentHost = localTunnel?.serverHost || draft.host || importedProfile?.serverHost || "—";
   const currentTransport = draft.transport === "vk-turn-proxy+xray" ? t("transportVK") : t("transportDirect");
   const currentEngine = localTunnel?.engine ?? deployment?.engine ?? draft.engine ?? "xray";
-  const currentProtocol = localTunnel?.protocol ?? deployment?.protocol ?? draft.protocol ?? "direct-wireguard";
+  const currentProtocol = localTunnel?.protocol ?? deployment?.protocol ?? draft.protocol ?? "vless-reality";
   const deploymentHealthLabel = deployment?.healthChecks?.length
     ? deployment.healthChecks.every((check) => check.ok)
       ? t("remoteEgressReady")
@@ -294,17 +329,18 @@ export function ControlCenter() {
       if (parsed.draft) {
         const normalizedTransportValue = normalizeTransport(parsed.draft.transport);
         const normalizedProtocolValue = normalizeProtocol(parsed.draft.protocol);
+        const normalizedDraftProtocol =
+          normalizedTransportValue === "xray" && normalizedProtocolValue === "direct-wireguard"
+            ? "vless-reality"
+            : normalizedProtocolValue;
         setDraft({
           host: parsed.draft.host ?? initialDraft.host,
           port: parsed.draft.port ?? initialDraft.port,
           username: parsed.draft.username ?? initialDraft.username,
           authMethod: parsed.draft.authMethod ?? initialDraft.authMethod,
           transport: normalizedTransportValue,
-          engine: normalizeEngine(parsed.draft.engine),
-          protocol:
-            normalizedTransportValue === "xray" && normalizedProtocolValue === "direct-wireguard"
-              ? "vless-reality"
-              : normalizedProtocolValue
+          engine: resolveDraftEngine(normalizedTransportValue, normalizedDraftProtocol, parsed.draft.engine),
+          protocol: normalizedDraftProtocol
         });
         if (parsed.draft.host) {
           void fetchOwnerProfile(parsed.draft.host);
@@ -479,36 +515,54 @@ export function ControlCenter() {
 
   const applyImportedProfile = (profile: InviteProfile) => {
     const importedTransport = normalizeTransport(profile.transport);
+    const importedProtocol = normalizeInviteProtocol(profile.protocol);
     setImportedProfile(profile);
     setDraft((current) => ({
       ...current,
       host: profile.serverHost || current.host,
       transport: importedTransport,
-      engine: normalizeEngine(current.engine),
-      protocol: "direct-wireguard"
+      engine: resolveDraftEngine(importedTransport, importedProtocol, current.engine),
+      protocol: importedProtocol
     }));
     setSecret("");
   };
 
-  const buildTunnelStartRequest = () => {
-    const usingImportedProfile = Boolean(hasMatchingImportedProfile && !secret.trim());
+  const buildTunnelStartRequest = (baseDraft: ServerDraft = draft) => {
+    const usingImportedProfile = Boolean(hasMatchingImportedProfile && !secret.trim() && !hasMatchingOwnerProfile);
     const serverDraft: ServerDraft =
       usingImportedProfile && importedProfile
         ? {
-            ...draft,
-            host: importedProfile.serverHost || draft.host,
+            ...baseDraft,
+            host: importedProfile.serverHost || baseDraft.host,
             transport: normalizeTransport(importedProfile.transport),
-            engine: normalizeEngine(draft.engine),
-            protocol: "direct-wireguard"
+            protocol: normalizeInviteProtocol(importedProfile.protocol),
+            engine: resolveDraftEngine(
+              normalizeTransport(importedProfile.transport),
+              normalizeInviteProtocol(importedProfile.protocol),
+              baseDraft.engine
+            )
           }
-        : draft;
+        : baseDraft;
     const startUrl =
       !usingImportedProfile &&
       serverDraft.transport === "xray" &&
       (serverDraft.protocol ?? "vless-reality") === "vless-reality"
         ? `${apiBaseUrl}/api/local-tunnel/start-reality`
         : `${apiBaseUrl}/api/local-tunnel/start`;
-    return { startUrl, serverDraft };
+    return { startUrl, serverDraft, usingImportedProfile };
+  };
+
+  const runningTunnelMatchesRequest = (tunnel: LocalTunnelState | null, serverDraft: ServerDraft) => {
+    if (!tunnel || tunnel.status !== "running" || !tunnel.socksAddress) {
+      return false;
+    }
+    const expectedHost = serverDraft.host?.trim();
+    const expectedTransport = normalizeTransport(serverDraft.transport);
+    const expectedProtocol = normalizeProtocol(serverDraft.protocol);
+    if (expectedHost && tunnel.serverHost && tunnel.serverHost !== expectedHost) {
+      return false;
+    }
+    return tunnel.transport === expectedTransport && normalizeProtocol(tunnel.protocol) === expectedProtocol;
   };
 
   const pollLocalTunnel = (immediate = false) => {
@@ -599,6 +653,14 @@ export function ControlCenter() {
     return result;
   };
 
+  const describeTunnelProbeFailure = (state: LocalTunnelState) => {
+    const message = state.lastTest?.error ?? state.error ?? t("tunnelTestFailed");
+    if (message.includes("exit status 28")) {
+      return "Local SOCKS egress timed out (curl exit 28). System proxy was not enabled; the selected VPN path did not complete its outbound handshake.";
+    }
+    return message;
+  };
+
   const fetchSystemProxyStatus = async () => {
     const res = await fetch(`${apiBaseUrl}/api/system-proxy/status`);
     const data = (await res.json()) as SystemProxyState;
@@ -626,25 +688,41 @@ export function ControlCenter() {
   };
 
   const enableSystemProxyForTunnel = async (socksAddress?: string) => {
-    const res = await fetch(`${apiBaseUrl}/api/system-proxy/enable`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        socksAddress: socksAddress ?? ""
-      })
-    });
-    const data = (await res.json()) as SystemProxyState;
-    const verified = res.ok ? await verifySystemProxy(socksAddress) : data;
-    setSystemProxy(verified);
-    if (!res.ok) {
-      throw new Error(data.error ?? t("unknownError"));
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/system-proxy/enable`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          socksAddress: socksAddress ?? ""
+        })
+      });
+      const data = (await res.json()) as SystemProxyState;
+      const verified = res.ok ? await verifySystemProxy(socksAddress) : data;
+      setSystemProxy(verified);
+      if (!res.ok) {
+        throw new Error(data.error ?? t("unknownError"));
+      }
+      if (!matchesExpectedProxy(verified, socksAddress)) {
+        throw new Error(verified.error ?? "System SOCKS proxy did not become active on the expected local tunnel port");
+      }
+      return verified;
+    } catch (error) {
+      await fetch(`${apiBaseUrl}/api/system-proxy/disable`, {
+        method: "POST"
+      });
+      await verifySystemProxy();
+      throw error;
     }
-    if (!matchesExpectedProxy(verified, socksAddress)) {
-      throw new Error(verified.error ?? "System SOCKS proxy did not become active on the expected local tunnel port");
+  };
+
+  const prepareTunnelForSystemProxy = async () => {
+    const testedTunnel = await runCurrentTunnelTestWithRetry(3, 1500);
+    if (!testedTunnel.lastTest?.ok || testedTunnel.status !== "running" || !testedTunnel.socksAddress) {
+      throw new Error(describeTunnelProbeFailure(testedTunnel));
     }
-    return verified;
+    return testedTunnel;
   };
 
   const handleRefreshOverview = () => {
@@ -663,7 +741,7 @@ export function ControlCenter() {
     setPendingAction("startTunnel");
     startTransition(async () => {
       try {
-        const { startUrl, serverDraft } = buildTunnelStartRequest();
+        const { startUrl, serverDraft, usingImportedProfile } = buildTunnelStartRequest();
         const res = await fetch(startUrl, {
           method: "POST",
           headers: {
@@ -671,7 +749,7 @@ export function ControlCenter() {
           },
           body: JSON.stringify({
             server: serverDraft,
-            secret,
+            secret: usingImportedProfile ? "" : secret,
             vkLink
           })
         });
@@ -684,7 +762,8 @@ export function ControlCenter() {
         }
         const tunnelData = await waitForRunningTunnel();
         if (tunnelData?.status === "running" && tunnelData.socksAddress) {
-          await enableSystemProxyForTunnel(tunnelData.socksAddress);
+          const testedTunnel = await prepareTunnelForSystemProxy();
+          await enableSystemProxyForTunnel(testedTunnel.socksAddress);
         }
       } catch (requestError) {
         const message = requestError instanceof Error ? requestError.message : t("unknownError");
@@ -719,19 +798,20 @@ export function ControlCenter() {
         const realityDraft: ServerDraft = {
           ...draft,
           transport: "xray",
-          engine: "xray",
+          engine: "sing-box",
           protocol: "vless-reality"
         };
         setDraft(realityDraft);
+        const { startUrl, serverDraft, usingImportedProfile } = buildTunnelStartRequest(realityDraft);
 
-        const res = await fetch(`${apiBaseUrl}/api/local-tunnel/start-reality`, {
+        const res = await fetch(startUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json"
           },
           body: JSON.stringify({
-            server: realityDraft,
-            secret,
+            server: serverDraft,
+            secret: usingImportedProfile ? "" : secret,
             vkLink: ""
           })
         });
@@ -744,7 +824,8 @@ export function ControlCenter() {
         }
         const tunnelData = await waitForRunningTunnel();
         if (tunnelData?.status === "running" && tunnelData.socksAddress) {
-          await enableSystemProxyForTunnel(tunnelData.socksAddress);
+          const testedTunnel = await prepareTunnelForSystemProxy();
+          await enableSystemProxyForTunnel(testedTunnel.socksAddress);
         }
       } catch (requestError) {
         const message = requestError instanceof Error ? requestError.message : t("unknownError");
@@ -805,25 +886,8 @@ export function ControlCenter() {
     setPendingAction("enableSystemProxy");
     startTransition(async () => {
       try {
-        const res = await fetch(`${apiBaseUrl}/api/system-proxy/enable`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            socksAddress: localTunnel?.socksAddress ?? ""
-          })
-        });
-        const data = (await res.json()) as SystemProxyState;
-        const verified = res.ok ? await verifySystemProxy(localTunnel?.socksAddress) : data;
-        setSystemProxy(verified);
-        if (!res.ok) {
-          setError(data.error ?? t("unknownError"));
-          return;
-        }
-        if (!matchesExpectedProxy(verified, localTunnel?.socksAddress)) {
-          setError(verified.error ?? "System SOCKS proxy did not become active on the expected local tunnel port");
-        }
+        const testedTunnel = await prepareTunnelForSystemProxy();
+        await enableSystemProxyForTunnel(testedTunnel.socksAddress);
       } catch (requestError) {
         const message = requestError instanceof Error ? requestError.message : t("unknownError");
         setError(message);
@@ -838,9 +902,9 @@ export function ControlCenter() {
     setPendingAction("enableVpn");
     startTransition(async () => {
       try {
+        const { startUrl, serverDraft, usingImportedProfile } = buildTunnelStartRequest();
         let tunnelData = localTunnel;
-        if (!tunnelData || tunnelData.status !== "running" || !tunnelData.socksAddress) {
-          const { startUrl, serverDraft } = buildTunnelStartRequest();
+        if (!runningTunnelMatchesRequest(tunnelData, serverDraft)) {
           const startRes = await fetch(startUrl, {
             method: "POST",
             headers: {
@@ -848,7 +912,7 @@ export function ControlCenter() {
             },
             body: JSON.stringify({
               server: serverDraft,
-              secret,
+              secret: usingImportedProfile ? "" : secret,
               vkLink
             })
           });
@@ -867,7 +931,8 @@ export function ControlCenter() {
           return;
         }
 
-        await enableSystemProxyForTunnel(tunnelData.socksAddress);
+        const testedTunnel = await prepareTunnelForSystemProxy();
+        await enableSystemProxyForTunnel(testedTunnel.socksAddress);
       } catch (requestError) {
         const message = requestError instanceof Error ? requestError.message : t("unknownError");
         setError(message);
@@ -1314,8 +1379,12 @@ export function ControlCenter() {
                     setDraft((current) => ({
                       ...current,
                       transport: event.target.value as ServerDraft["transport"],
-                      engine: event.target.value === "xray" ? current.engine ?? "xray" : "xray",
-                      protocol: event.target.value === "xray" ? current.protocol ?? "vless-reality" : "direct-wireguard"
+                      protocol: event.target.value === "xray" ? current.protocol ?? "vless-reality" : "direct-wireguard",
+                      engine: resolveDraftEngine(
+                        event.target.value as ServerDraft["transport"],
+                        event.target.value === "xray" ? current.protocol ?? "vless-reality" : "direct-wireguard",
+                        current.engine
+                      )
                     }))
                   }
                 >
@@ -1328,12 +1397,12 @@ export function ControlCenter() {
                 <label className="input-field">
                   <span>{t("protocolMode")}</span>
                   <select
-                    value={draft.protocol ?? "direct-wireguard"}
+                    value={draft.protocol ?? "vless-reality"}
                     onChange={(event) =>
                       setDraft((current) => ({
                         ...current,
                         protocol: event.target.value as NonNullable<ServerDraft["protocol"]>,
-                        engine: event.target.value === "vless-reality" ? "xray" : current.engine ?? "xray"
+                        engine: resolveDraftEngine(current.transport, event.target.value as ServerDraft["protocol"], current.engine)
                       }))
                     }
                   >
@@ -1347,16 +1416,23 @@ export function ControlCenter() {
                 <label className="input-field">
                   <span>{t("engineStack")}</span>
                   <select
-                    value={draft.engine ?? "xray"}
+                    value={resolveDraftEngine(draft.transport, draft.protocol, draft.engine)}
                     onChange={(event) =>
                       setDraft((current) => ({
                         ...current,
-                        engine: event.target.value as NonNullable<ServerDraft["engine"]>
+                        engine: resolveDraftEngine(current.transport, current.protocol, event.target.value)
                       }))
                     }
+                    disabled={draft.protocol === "vless-reality"}
                   >
-                    <option value="xray">{t("engineXray")}</option>
-                    {draft.protocol !== "vless-reality" ? <option value="sing-box">{t("engineSingBox")}</option> : null}
+                    {draft.protocol === "vless-reality" ? (
+                      <option value="sing-box">{t("engineSingBox")}</option>
+                    ) : (
+                      <>
+                        <option value="xray">{t("engineXray")}</option>
+                        <option value="sing-box">{t("engineSingBox")}</option>
+                      </>
+                    )}
                   </select>
                 </label>
               ) : null}

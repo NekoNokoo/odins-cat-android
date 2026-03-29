@@ -31,11 +31,18 @@ type xrayWireGuardPeer struct {
 	AllowedIPs []string
 }
 
+type xrayRealityClient struct {
+	UUID string
+	Flow string
+}
+
 type xrayRealityInbound struct {
 	Port       int
-	UUID       string
+	Clients    []xrayRealityClient
 	PrivateKey string
 	ShortID    string
+	ServerName string
+	Dest       string
 }
 
 func renderXrayConfig(serverPrivateKey string, peers []xrayWireGuardPeer, port int) string {
@@ -71,7 +78,28 @@ func renderXrayConfigWithListen(serverPrivateKey string, peers []xrayWireGuardPe
       }
     }`, listenHost, port, serverPrivateKey, strings.Join(peerBlocks, ",\n"))}
 
-	if reality != nil {
+	if reality != nil && len(reality.Clients) > 0 {
+		clientBlocks := make([]string, 0, len(reality.Clients))
+		for _, client := range reality.Clients {
+			flow := strings.TrimSpace(client.Flow)
+			if flow == "" {
+				flow = "xtls-rprx-vision"
+			}
+			clientBlocks = append(clientBlocks, fmt.Sprintf(`          {
+            "flow": %q,
+            "id": %q
+          }`, flow, client.UUID))
+		}
+
+		realityDest := strings.TrimSpace(reality.Dest)
+		if realityDest == "" {
+			realityDest = realityDestination()
+		}
+		realityName := strings.TrimSpace(reality.ServerName)
+		if realityName == "" {
+			realityName = realityServerName()
+		}
+
 		inbounds = append(inbounds, fmt.Sprintf(`    {
       "tag": "reality-in",
       "listen": "0.0.0.0",
@@ -79,10 +107,7 @@ func renderXrayConfigWithListen(serverPrivateKey string, peers []xrayWireGuardPe
       "protocol": "vless",
       "settings": {
         "clients": [
-          {
-            "flow": "xtls-rprx-vision",
-            "id": %q
-          }
+%s
         ],
         "decryption": "none"
       },
@@ -110,7 +135,7 @@ func renderXrayConfigWithListen(serverPrivateKey string, peers []xrayWireGuardPe
           "xver": 0
         }
       }
-    }`, reality.Port, reality.UUID, realityDestination(), reality.PrivateKey, realityServerName(), reality.ShortID))
+    }`, reality.Port, strings.Join(clientBlocks, ",\n"), realityDest, reality.PrivateKey, realityName, reality.ShortID))
 	}
 
 	return fmt.Sprintf(`{
@@ -142,7 +167,7 @@ func renderAccessProfile(role, id, name, host string, transport Transport, endpo
 		"endpointPort":   endpointPort,
 		"createdAt":      nowRFC3339(),
 		"activeProtocol": activeProtocolID(transport),
-		"protocolPack":   buildProtocolPack(transport, endpointPort),
+		"protocolPack":   buildProtocolPack(transport, endpointPort, realityPortFromStagedFallbacks(stagedFallbacks)),
 		"wireguard": map[string]any{
 			"serverPublicKey":  serverPublicKey,
 			"clientPrivateKey": clientPrivateKey,

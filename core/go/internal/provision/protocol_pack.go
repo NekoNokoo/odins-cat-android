@@ -29,39 +29,79 @@ type protocolPackManifest struct {
 	Entries         []ProtocolPackEntry `json:"entries"`
 }
 
-func buildProtocolPack(transport Transport, endpointPort int) []ProtocolPackEntry {
+func buildProtocolPack(transport Transport, endpointPort, realityPort int) []ProtocolPackEntry {
 	if endpointPort <= 0 {
 		endpointPort = whitelistWireGuardPortStart
 	}
-	activeID := "direct-wireguard"
-	activeLabel := "Direct WireGuard-over-xray"
-	activeNotes := "Current production path for isolated localhost SOCKS and system proxy mode."
+	if realityPort <= 0 {
+		realityPort = realityFallbackPort
+	}
+
 	if transport == TransportVKTurnProxyXray {
-		activeID = "vk-turn-wireguard"
-		activeLabel = "VK TURN relay + xray"
-		activeNotes = "Current VK-focused path that relays WireGuard-compatible traffic through vk-turn-proxy."
+		return []ProtocolPackEntry{
+			{
+				ID:      "vk-turn-wireguard",
+				Label:   "VK TURN relay + xray",
+				Status:  ProtocolStatusActive,
+				Engine:  "xray",
+				Scheme:  "wireguard",
+				Network: "udp",
+				Port:    endpointPort,
+				Notes:   "Current VK-focused path that relays WireGuard-compatible traffic through vk-turn-proxy.",
+			},
+			{
+				ID:      "vless-reality",
+				Label:   "VLESS + REALITY",
+				Status:  ProtocolStatusStaged,
+				Engine:  "sing-box",
+				Scheme:  "vless+reality",
+				Network: "tcp",
+				Port:    realityPort,
+				Notes:   "Direct TCP fallback stays staged until the server is switched to the xray direct transport.",
+			},
+			{
+				ID:      "naive",
+				Label:   "Naive",
+				Status:  ProtocolStatusStaged,
+				Engine:  "sing-box",
+				Scheme:  "naive",
+				Network: "tcp",
+				Port:    naiveFallbackPort,
+				Notes:   "Planned browser-like HTTPS fallback for restrictive networks once server certificates are provisioned.",
+			},
+			{
+				ID:      "hysteria2",
+				Label:   "Hysteria2",
+				Status:  ProtocolStatusStaged,
+				Engine:  "sing-box",
+				Scheme:  "hysteria2",
+				Network: "udp",
+				Port:    hysteria2FallbackPort,
+				Notes:   "Planned high-performance UDP fallback for networks where direct WireGuard is unstable.",
+			},
+		}
 	}
 
 	return []ProtocolPackEntry{
 		{
-			ID:      activeID,
-			Label:   activeLabel,
+			ID:      "vless-reality",
+			Label:   "VLESS + REALITY",
 			Status:  ProtocolStatusActive,
+			Engine:  "sing-box",
+			Scheme:  "vless+reality",
+			Network: "tcp",
+			Port:    realityPort,
+			Notes:   "Default direct path for localhost SOCKS and system proxy mode on restrictive networks.",
+		},
+		{
+			ID:      "direct-wireguard",
+			Label:   "Direct WireGuard-over-xray",
+			Status:  ProtocolStatusStaged,
 			Engine:  "xray",
 			Scheme:  "wireguard",
 			Network: "udp",
 			Port:    endpointPort,
-			Notes:   activeNotes,
-		},
-		{
-			ID:      "vless-reality",
-			Label:   "VLESS + REALITY",
-			Status:  ProtocolStatusStaged,
-			Engine:  "xray/sing-box",
-			Scheme:  "vless+reality",
-			Network: "tcp",
-			Port:    443,
-			Notes:   "Planned Russia-friendly TCP/443 fallback for future direct mode without Apple Network Extension.",
+			Notes:   "Legacy direct UDP path kept as a fallback while VLESS + REALITY is the default.",
 		},
 		{
 			ID:      "naive",
@@ -70,7 +110,7 @@ func buildProtocolPack(transport Transport, endpointPort int) []ProtocolPackEntr
 			Engine:  "sing-box",
 			Scheme:  "naive",
 			Network: "tcp",
-			Port:    8443,
+			Port:    naiveFallbackPort,
 			Notes:   "Planned browser-like HTTPS fallback for restrictive networks once server certificates are provisioned.",
 		},
 		{
@@ -80,7 +120,7 @@ func buildProtocolPack(transport Transport, endpointPort int) []ProtocolPackEntr
 			Engine:  "sing-box",
 			Scheme:  "hysteria2",
 			Network: "udp",
-			Port:    9443,
+			Port:    hysteria2FallbackPort,
 			Notes:   "Planned high-performance UDP fallback for networks where direct WireGuard is unstable.",
 		},
 	}
@@ -90,17 +130,36 @@ func activeProtocolID(transport Transport) string {
 	if transport == TransportVKTurnProxyXray {
 		return "vk-turn-wireguard"
 	}
-	return "direct-wireguard"
+	return "vless-reality"
 }
 
-func renderProtocolPackManifest(host string, transport Transport, endpointPort int) (string, error) {
+func realityPortFromStagedFallbacks(stagedFallbacks map[string]any) int {
+	raw, ok := stagedFallbacks["vlessReality"]
+	if !ok {
+		return 0
+	}
+	entry, ok := raw.(map[string]any)
+	if !ok {
+		return 0
+	}
+	switch value := entry["port"].(type) {
+	case float64:
+		return int(value)
+	case int:
+		return value
+	default:
+		return 0
+	}
+}
+
+func renderProtocolPackManifest(host string, transport Transport, endpointPort, realityPort int) (string, error) {
 	manifest := protocolPackManifest{
 		Host:            host,
 		Transport:       string(transport),
 		ActiveProtocol:  activeProtocolID(transport),
 		GeneratedAt:     nowRFC3339(),
 		RecommendedPath: activeProtocolID(transport),
-		Entries:         buildProtocolPack(transport, endpointPort),
+		Entries:         buildProtocolPack(transport, endpointPort, realityPort),
 	}
 	raw, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {

@@ -145,7 +145,7 @@ func main() {
 		}
 
 		payload.Server.Transport = provision.TransportXray
-		payload.Server.Engine = provision.EngineXray
+		payload.Server.Engine = provision.EngineSingBox
 		payload.Server.Protocol = provision.ProtocolVLESSReality
 
 		if err := provision.EnsureRealityOwnerProfile(provision.Request{

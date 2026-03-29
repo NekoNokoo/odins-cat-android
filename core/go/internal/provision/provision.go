@@ -61,6 +61,13 @@ func normalizedEngine(engine CoreEngine) CoreEngine {
 	}
 }
 
+func resolvedEngine(engine CoreEngine, transport Transport, protocol TunnelProtocol) CoreEngine {
+	if normalizedProtocol(transport, protocol) == ProtocolVLESSReality {
+		return EngineSingBox
+	}
+	return normalizedEngine(engine)
+}
+
 func normalizedProtocol(transport Transport, protocol TunnelProtocol) TunnelProtocol {
 	if transport == TransportVKTurnProxyXray {
 		return ProtocolDirectWireGuard
@@ -69,6 +76,6 @@ func normalizedProtocol(transport Transport, protocol TunnelProtocol) TunnelProt
 	case ProtocolVLESSReality:
 		return protocol
 	default:
-		return ProtocolDirectWireGuard
+		return ProtocolVLESSReality
 	}
 }
