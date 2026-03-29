@@ -26,6 +26,7 @@ type inviteProfile struct {
 	Transport       string `json:"transport"`
 	ServerHost      string `json:"serverHost"`
 	VKTurnProxyPort int    `json:"vkTurnProxyPort"`
+	WireGuardPort   int    `json:"wireGuardPort,omitempty"`
 	EndpointPort    int    `json:"endpointPort,omitempty"`
 	Endpoint        string `json:"endpoint"`
 	Fingerprint     string `json:"fingerprint"`
@@ -58,6 +59,7 @@ type InviteProfileResponse struct {
 	Transport       string `json:"transport"`
 	ServerHost      string `json:"serverHost"`
 	VKTurnProxyPort int    `json:"vkTurnProxyPort"`
+	WireGuardPort   int    `json:"wireGuardPort,omitempty"`
 	EndpointPort    int    `json:"endpointPort,omitempty"`
 	Endpoint        string `json:"endpoint"`
 	Fingerprint     string `json:"fingerprint"`
@@ -69,14 +71,16 @@ type InviteProfileResponse struct {
 		UUID       string `json:"uuid"`
 		Flow       string `json:"flow"`
 	} `json:"vlessReality,omitempty"`
-	ShareCode  string `json:"shareCode"`
-	RawJSON    string `json:"rawJson"`
-	LocalPath  string `json:"localPath,omitempty"`
-	ImportedAt string `json:"importedAt,omitempty"`
-	CreatedAt  string `json:"createdAt,omitempty"`
-	RevokedAt  string `json:"revokedAt,omitempty"`
-	Status     string `json:"status,omitempty"`
-	Error      string `json:"error,omitempty"`
+	SupportsReality bool   `json:"supportsReality,omitempty"`
+	SupportsVKRelay bool   `json:"supportsVKRelay,omitempty"`
+	ShareCode       string `json:"shareCode"`
+	RawJSON         string `json:"rawJson"`
+	LocalPath       string `json:"localPath,omitempty"`
+	ImportedAt      string `json:"importedAt,omitempty"`
+	CreatedAt       string `json:"createdAt,omitempty"`
+	RevokedAt       string `json:"revokedAt,omitempty"`
+	Status          string `json:"status,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 func GenerateGuestInvite(host, name string) InviteProfileResponse {
@@ -124,10 +128,13 @@ func buildInviteResponse(invite inviteProfile, localPath string) InviteProfileRe
 		Transport:       invite.Transport,
 		ServerHost:      invite.ServerHost,
 		VKTurnProxyPort: invite.VKTurnProxyPort,
+		WireGuardPort:   invite.WireGuardPort,
 		EndpointPort:    invite.EndpointPort,
 		Endpoint:        invite.Endpoint,
 		Fingerprint:     invite.Fingerprint,
 		VLESSReality:    invite.VLESSReality,
+		SupportsReality: inviteSupportsReality(invite),
+		SupportsVKRelay: inviteSupportsVKRelay(invite),
 		ShareCode:       shareCodePrefix + base64.RawURLEncoding.EncodeToString(raw),
 		RawJSON:         string(raw),
 		LocalPath:       localPath,
@@ -196,6 +203,36 @@ func inviteHasReality(invite inviteProfile) bool {
 		strings.TrimSpace(invite.VLESSReality.PublicKey) != "" &&
 		strings.TrimSpace(invite.VLESSReality.ShortID) != "" &&
 		strings.TrimSpace(invite.VLESSReality.UUID) != ""
+}
+
+func effectiveInviteWireGuardPort(invite inviteProfile) int {
+	if invite.WireGuardPort > 0 {
+		return invite.WireGuardPort
+	}
+	return 0
+}
+
+func inviteSupportsReality(invite inviteProfile) bool {
+	_, err := readInviteRealityFallback(invite)
+	return err == nil
+}
+
+func inviteSupportsVKRelay(invite inviteProfile) bool {
+	return invite.VKTurnProxyPort > 0 && effectiveInviteWireGuardPort(invite) > 0 && inviteHasWireGuard(invite)
+}
+
+func inviteMatchesTransport(invite inviteProfile, transport string) bool {
+	switch strings.TrimSpace(transport) {
+	case "":
+		return true
+	case string(TransportXray):
+		return strings.TrimSpace(invite.Transport) == string(TransportXray)
+	case string(TransportVKTurnProxyXray):
+		return (strings.TrimSpace(invite.Transport) == string(TransportVKTurnProxyXray) ||
+			strings.TrimSpace(invite.Transport) == string(TransportXray)) && inviteSupportsVKRelay(invite)
+	default:
+		return strings.TrimSpace(invite.Transport) == strings.TrimSpace(transport)
+	}
 }
 
 func inviteIdentityValue(invite inviteProfile) string {
@@ -286,8 +323,19 @@ func IssueRemoteGuestProfile(req Request, name string) (InviteProfileResponse, e
 	if xrayState.Reality.Port <= 0 || strings.TrimSpace(xrayState.Reality.PrivateKey) == "" || strings.TrimSpace(owner.VLESSReality.PublicKey) == "" {
 		return InviteProfileResponse{}, fmt.Errorf("remote VLESS + REALITY inbound is not available for guest access keys")
 	}
+	if xrayState.WireGuardPort <= 0 || owner.VKTurnProxyPort <= 0 || strings.TrimSpace(owner.WireGuard.ServerPublicKey) == "" {
+		return InviteProfileResponse{}, fmt.Errorf("remote VK relay path is not available for guest access keys")
+	}
 
 	guestUUID, err := generateProtocolUUID()
+	if err != nil {
+		return InviteProfileResponse{}, err
+	}
+	guestKeys, err := generateWireGuardKeyPair()
+	if err != nil {
+		return InviteProfileResponse{}, err
+	}
+	guestAddress, err := nextGuestAddress(owner, guestProfiles)
 	if err != nil {
 		return InviteProfileResponse{}, err
 	}
@@ -301,11 +349,15 @@ func IssueRemoteGuestProfile(req Request, name string) (InviteProfileResponse, e
 		Transport:       owner.Transport,
 		ServerHost:      owner.ServerHost,
 		VKTurnProxyPort: owner.VKTurnProxyPort,
+		WireGuardPort:   xrayState.WireGuardPort,
 		EndpointPort:    xrayState.Reality.Port,
 		Endpoint:        fmt.Sprintf("%s:%d", owner.ServerHost, xrayState.Reality.Port),
 		CreatedAt:       nowRFC3339(),
 		Status:          "active",
 	}
+	guest.WireGuard.ClientPrivateKey = guestKeys.Private
+	guest.WireGuard.ClientPublicKey = guestKeys.Public
+	guest.WireGuard.Address = guestAddress
 	guest.VLESSReality.UUID = guestUUID
 	guest.VLESSReality.Flow = "xtls-rprx-vision"
 	enrichInviteProfile(&guest, owner, xrayState)
@@ -447,7 +499,7 @@ func findLocalImportedInvite(host string, transport string) (inviteProfile, stri
 		if trimmedHost != "" && invite.ServerHost != trimmedHost {
 			continue
 		}
-		if trimmedTransport != "" && invite.Transport != trimmedTransport {
+		if trimmedTransport != "" && !inviteMatchesTransport(invite, trimmedTransport) {
 			continue
 		}
 
@@ -634,6 +686,9 @@ func loadRemoteAccessState(client *ssh.Client) (inviteProfile, string, remoteXra
 	if xrayState.WireGuardPort == 0 {
 		return owner, ownerText, xrayState, fmt.Errorf("remote xray config has no wireguard inbound")
 	}
+	if owner.WireGuardPort == 0 {
+		owner.WireGuardPort = xrayState.WireGuardPort
+	}
 	if owner.EndpointPort == 0 {
 		if owner.Transport == string(TransportXray) {
 			owner.EndpointPort = xrayState.WireGuardPort
@@ -771,6 +826,13 @@ func enrichInviteProfile(invite *inviteProfile, owner inviteProfile, xrayState r
 	}
 	if invite.VKTurnProxyPort == 0 {
 		invite.VKTurnProxyPort = owner.VKTurnProxyPort
+	}
+	if invite.WireGuardPort == 0 {
+		if owner.WireGuardPort > 0 {
+			invite.WireGuardPort = owner.WireGuardPort
+		} else {
+			invite.WireGuardPort = xrayState.WireGuardPort
+		}
 	}
 	if invite.Protocol == string(ProtocolVLESSReality) {
 		if reality, err := readInviteRealityFallback(owner); err == nil {

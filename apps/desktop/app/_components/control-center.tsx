@@ -62,6 +62,12 @@ const normalizePortHint = (port: number | undefined): number | undefined =>
 const normalizeInviteProtocol = (protocol: InviteProfile["protocol"] | undefined): NonNullable<ServerDraft["protocol"]> =>
   protocol === "wireguard" ? "direct-wireguard" : "vless-reality";
 
+const importedProfileHasReality = (profile: InviteProfile | null) =>
+  Boolean(profile?.supportsReality ?? profile?.vlessReality?.port);
+
+const importedProfileHasVKRelay = (profile: InviteProfile | null) =>
+  Boolean(profile?.supportsVKRelay ?? (profile?.vkTurnProxyPort && profile?.wireGuardPort));
+
 const resolveDraftEngine = (
   transport: ServerDraft["transport"] | undefined,
   protocol: ServerDraft["protocol"] | undefined,
@@ -124,15 +130,13 @@ const importedProfileSupportsDraft = (profile: InviteProfile | null, serverDraft
     return false;
   }
   const transport = normalizeTransport(serverDraft.transport);
-  const protocol = normalizeProtocol(serverDraft.protocol);
-  const importedProtocol = normalizeInviteProtocol(profile.protocol);
-  if (transport === "xray" && protocol === "vless-reality") {
-    return importedProtocol === "vless-reality";
+  if (transport === "xray" && normalizeProtocol(serverDraft.protocol) === "vless-reality") {
+    return importedProfileHasReality(profile);
   }
   if (transport === "vk-turn-proxy+xray") {
-    return profile.transport === "vk-turn-proxy+xray" && profile.vkTurnProxyPort > 0;
+    return importedProfileHasVKRelay(profile);
   }
-  return importedProtocol === "direct-wireguard";
+  return importedProfileHasVKRelay(profile);
 };
 
 type PersistedState = {
@@ -602,13 +606,7 @@ export function ControlCenter() {
         ? {
             ...baseDraft,
             host: importedProfile.serverHost || baseDraft.host,
-            transport: normalizeTransport(importedProfile.transport),
-            protocol: normalizeInviteProtocol(importedProfile.protocol),
-            engine: resolveDraftEngine(
-              normalizeTransport(importedProfile.transport),
-              normalizeInviteProtocol(importedProfile.protocol),
-              baseDraft.engine
-            )
+            engine: resolveDraftEngine(baseDraft.transport, baseDraft.protocol, baseDraft.engine)
           }
         : baseDraft;
     const startUrl =

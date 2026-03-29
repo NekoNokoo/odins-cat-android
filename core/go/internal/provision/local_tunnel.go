@@ -749,29 +749,37 @@ func loadImportedProfile(host string, transport Transport) (ownerProfile, error)
 		EndpointPort:    effectiveInviteEndpointPort(invite),
 	}
 
-	switch normalizedInviteProtocol(invite) {
-	case string(ProtocolVLESSReality):
-		profile.ActiveProtocol = string(ProtocolVLESSReality)
-		profile.StagedFallbacks = map[string]any{
-			"vlessReality": map[string]any{
-				"port":        invite.VLESSReality.Port,
-				"serverName":  invite.VLESSReality.ServerName,
-				"publicKey":   invite.VLESSReality.PublicKey,
-				"shortId":     invite.VLESSReality.ShortID,
-				"uuid":        invite.VLESSReality.UUID,
-				"flow":        invite.VLESSReality.Flow,
-				"description": "Imported VLESS + REALITY guest access profile.",
-				"status":      "ready",
-			},
-		}
-	default:
-		profile.ActiveProtocol = string(ProtocolDirectWireGuard)
+	if inviteSupportsVKRelay(invite) {
+		profile.EndpointPort = effectiveInviteWireGuardPort(invite)
 		profile.WireGuard.ServerPublicKey = invite.WireGuard.ServerPublicKey
 		profile.WireGuard.ClientPrivateKey = invite.WireGuard.ClientPrivateKey
 		profile.WireGuard.ClientPublicKey = invite.WireGuard.ClientPublicKey
 		profile.WireGuard.Address = invite.WireGuard.Address
 		profile.WireGuard.MTU = invite.WireGuard.MTU
+		profile.ActiveProtocol = string(ProtocolDirectWireGuard)
 	}
+
+	if reality, err := readInviteRealityFallback(invite); err == nil {
+		profile.ActiveProtocol = string(ProtocolVLESSReality)
+		profile.StagedFallbacks = map[string]any{
+			"vlessReality": map[string]any{
+				"port":        reality.Port,
+				"serverName":  reality.ServerName,
+				"publicKey":   reality.PublicKey,
+				"shortId":     reality.ShortID,
+				"uuid":        reality.UUID,
+				"flow":        reality.Flow,
+				"description": "Imported VLESS + REALITY guest access profile.",
+				"status":      "ready",
+			},
+		}
+	}
+	profile.ProtocolPack = buildProtocolPack(
+		Transport(profile.Transport),
+		effectiveInviteWireGuardPort(invite),
+		realityPortFromStagedFallbacks(profile.StagedFallbacks),
+		invite.VKTurnProxyPort,
+	)
 
 	return profile, nil
 }

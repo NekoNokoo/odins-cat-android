@@ -33,6 +33,56 @@ func TestValidateInviteAcceptsRealityInvite(t *testing.T) {
 	}
 }
 
+func TestBuildInviteResponseMarksDualModeCapabilities(t *testing.T) {
+	invite := inviteProfile{
+		Name:            "Friend Laptop",
+		Protocol:        string(ProtocolVLESSReality),
+		Transport:       string(TransportXray),
+		ServerHost:      "example.com",
+		VKTurnProxyPort: 56080,
+		WireGuardPort:   51820,
+		EndpointPort:    52443,
+		Endpoint:        "example.com:52443",
+	}
+	invite.WireGuard.ServerPublicKey = "server-public"
+	invite.WireGuard.ClientPrivateKey = "client-private"
+	invite.WireGuard.ClientPublicKey = "client-public"
+	invite.WireGuard.Address = "10.66.66.3/32"
+	invite.WireGuard.MTU = 1280
+	invite.VLESSReality.Port = 52443
+	invite.VLESSReality.ServerName = "www.cloudflare.com"
+	invite.VLESSReality.PublicKey = "test-public-key"
+	invite.VLESSReality.ShortID = "abcd1234"
+	invite.VLESSReality.UUID = "11111111-1111-4111-8111-111111111111"
+	invite.VLESSReality.Flow = "xtls-rprx-vision"
+
+	resp := buildInviteResponse(invite, "")
+	if !resp.SupportsReality {
+		t.Fatal("expected response to report VLESS + REALITY support")
+	}
+	if !resp.SupportsVKRelay {
+		t.Fatal("expected response to report VK relay support")
+	}
+	if resp.WireGuardPort != 51820 {
+		t.Fatalf("expected wireguard port 51820, got %d", resp.WireGuardPort)
+	}
+}
+
+func TestInviteMatchesTransportAllowsDualModeVKRequest(t *testing.T) {
+	invite := inviteProfile{
+		Transport:       string(TransportXray),
+		VKTurnProxyPort: 56080,
+		WireGuardPort:   51820,
+	}
+	invite.WireGuard.ServerPublicKey = "server-public"
+	invite.WireGuard.ClientPrivateKey = "client-private"
+	invite.WireGuard.ClientPublicKey = "client-public"
+
+	if !inviteMatchesTransport(invite, string(TransportVKTurnProxyXray)) {
+		t.Fatal("expected dual-mode xray invite to satisfy VK transport lookup")
+	}
+}
+
 func TestRenderXrayConfigWithListenIncludesAllRealityClients(t *testing.T) {
 	config := renderXrayConfigWithListen(
 		"test-secret",

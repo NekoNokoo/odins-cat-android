@@ -1,6 +1,11 @@
 package provision
 
-import "testing"
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestParseVKRelayUnitPorts(t *testing.T) {
 	unit := renderSystemdUnit(
@@ -87,5 +92,67 @@ func TestOwnerProfileMatchesVKRequestFromDirectDualStackProfile(t *testing.T) {
 	}
 	if !ownerProfileSupportsProtocol(profile, TransportVKTurnProxyXray, ProtocolDirectWireGuard) {
 		t.Fatal("expected direct dual-stack owner profile to satisfy VK transport protocol requirements")
+	}
+}
+
+func TestLoadImportedProfilePreservesDualModeInvite(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CACHE_HOME", tempDir)
+
+	invite := inviteProfile{
+		Name:            "Guest",
+		Protocol:        string(ProtocolVLESSReality),
+		Transport:       string(TransportXray),
+		ServerHost:      "example.com",
+		VKTurnProxyPort: 56080,
+		WireGuardPort:   51820,
+		EndpointPort:    52443,
+		Endpoint:        "example.com:52443",
+	}
+	invite.WireGuard.ServerPublicKey = "server-public"
+	invite.WireGuard.ClientPrivateKey = "client-private"
+	invite.WireGuard.ClientPublicKey = "client-public"
+	invite.WireGuard.Address = "10.66.66.3/32"
+	invite.WireGuard.MTU = 1280
+	invite.VLESSReality.Port = 52443
+	invite.VLESSReality.ServerName = "www.cloudflare.com"
+	invite.VLESSReality.PublicKey = "reality-public"
+	invite.VLESSReality.ShortID = "abcd1234"
+	invite.VLESSReality.UUID = "11111111-1111-4111-8111-111111111111"
+	invite.VLESSReality.Flow = "xtls-rprx-vision"
+
+	body, err := json.Marshal(invite)
+	if err != nil {
+		t.Fatalf("marshal invite: %v", err)
+	}
+
+	importsDir, err := localImportedProfilesDir()
+	if err != nil {
+		t.Fatalf("resolve imports dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(importsDir, "guest.json"), body, 0o600); err != nil {
+		t.Fatalf("write invite: %v", err)
+	}
+
+	profile, err := loadImportedProfile("example.com", TransportVKTurnProxyXray)
+	if err != nil {
+		t.Fatalf("load imported dual-mode invite: %v", err)
+	}
+
+	if profile.Transport != string(TransportXray) {
+		t.Fatalf("expected imported profile transport %q, got %q", TransportXray, profile.Transport)
+	}
+	if profile.EndpointPort != 51820 {
+		t.Fatalf("expected imported WireGuard port 51820, got %d", profile.EndpointPort)
+	}
+	if profile.VKTurnProxyPort != 56080 {
+		t.Fatalf("expected imported relay port 56080, got %d", profile.VKTurnProxyPort)
+	}
+	if profile.WireGuard.ClientPrivateKey != "client-private" || profile.WireGuard.Address != "10.66.66.3/32" {
+		t.Fatalf("expected imported WireGuard identity to be preserved, got %+v", profile.WireGuard)
+	}
+	if _, err := readRealityFallback(profile); err != nil {
+		t.Fatalf("expected imported profile to preserve VLESS + REALITY fallback, got %v", err)
 	}
 }

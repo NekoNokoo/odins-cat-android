@@ -52,10 +52,13 @@ export interface InviteProfile {
   transport: string;
   serverHost: string;
   vkTurnProxyPort: number;
+  wireGuardPort?: number;
   endpointPort?: number;
   endpoint: string;
   fingerprint: string;
   vlessReality?: InviteRealityProfile;
+  supportsReality?: boolean;
+  supportsVKRelay?: boolean;
   shareCode: string;
   rawJson: string;
   localPath?: string;
