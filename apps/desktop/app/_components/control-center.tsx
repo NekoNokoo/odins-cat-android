@@ -793,16 +793,33 @@ export function ControlCenter() {
     return testedTunnel;
   };
 
-  const handleRefreshOverview = () => {
-    startTransition(async () => {
-      await Promise.all([
-        fetchCoreHealth(),
-        draft.host ? fetchOwnerProfile(draft.host) : Promise.resolve(),
-        draft.host ? fetchImportedProfile(draft.host) : Promise.resolve(),
-        pollLocalTunnel(true)
-      ]);
+  const handleAccessModeChange = (mode: AccessMode) => {
+    setDraft((current) => {
+      if (draftAccessMode(current) === mode) {
+        return current;
+      }
+      return applyAccessModeToDraft(current, mode);
     });
   };
+
+  const renderAccessModeToggle = (className?: string) => (
+    <div className={["lang-toggle", className].filter(Boolean).join(" ")} aria-label={t("runtimeMode")}>
+      <button
+        className={selectedAccessMode === "vless-reality" ? "lang-button is-active" : "lang-button"}
+        type="button"
+        onClick={() => handleAccessModeChange("vless-reality")}
+      >
+        {t("runtimeModeReality")}
+      </button>
+      <button
+        className={selectedAccessMode === "vk-relay" ? "lang-button is-active" : "lang-button"}
+        type="button"
+        onClick={() => handleAccessModeChange("vk-relay")}
+      >
+        {t("runtimeModeVk")}
+      </button>
+    </div>
+  );
 
   const handleStartTunnel = () => {
     setError(null);
@@ -1131,9 +1148,7 @@ export function ControlCenter() {
               <div className="home-section home-section--hero">
                 <div className="phone-statusbar">
                   <span className={`phone-pill ${vpnModeActive ? "phone-pill--ok" : ""}`}>{primaryStatusBadge}</span>
-                  <button className="ghost ghost--compact" type="button" onClick={handleRefreshOverview} disabled={isPending}>
-                    {t("refreshStatus")}
-                  </button>
+                  {renderAccessModeToggle("home-mode-toggle")}
                 </div>
 
                 <div className="phone-copy">
@@ -1406,22 +1421,7 @@ export function ControlCenter() {
               <label className="input-field input-span">
                 <div className="input-field__head">
                   <span>{t("runtimeMode")}</span>
-                  <div className="lang-toggle" aria-label={t("runtimeMode")}>
-                    <button
-                      className={selectedAccessMode === "vless-reality" ? "lang-button is-active" : "lang-button"}
-                      type="button"
-                      onClick={() => setDraft((current) => applyAccessModeToDraft(current, "vless-reality"))}
-                    >
-                      {t("runtimeModeReality")}
-                    </button>
-                    <button
-                      className={selectedAccessMode === "vk-relay" ? "lang-button is-active" : "lang-button"}
-                      type="button"
-                      onClick={() => setDraft((current) => applyAccessModeToDraft(current, "vk-relay"))}
-                    >
-                      {t("runtimeModeVk")}
-                    </button>
-                  </div>
+                  {renderAccessModeToggle()}
                 </div>
                 <p className="compact-note">
                   {selectedAccessMode === "vk-relay" ? t("runtimeModeVkHint") : t("runtimeModeRealityHint")}
