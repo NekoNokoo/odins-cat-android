@@ -59,6 +59,10 @@ select {
   padding: 16px 18px;
 }
 
+.topbar-copy--compact {
+  padding: 12px 16px;
+}
+
 .window-drag-region {
   height: 26px;
   margin: -4px 0 6px;
@@ -72,11 +76,32 @@ select {
   gap: 12px;
 }
 
+.topbar-head--compact {
+  align-items: center;
+}
+
+.topbar-title {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 0;
+}
+
+.topbar-action {
+  flex-shrink: 0;
+}
+
 .topbar-copy h1 {
   margin: 8px 0 6px;
   font-size: clamp(2rem, 6vw, 2.6rem);
   line-height: 0.98;
   letter-spacing: -0.06em;
+}
+
+.topbar-copy--compact h1 {
+  margin: 0;
+  font-size: clamp(1.2rem, 5vw, 1.7rem);
+  line-height: 1;
+  letter-spacing: -0.05em;
 }
 
 .topbar-copy p {
@@ -566,6 +591,10 @@ select {
   .topbar-copy,
   .connection-deck {
     border-radius: 24px;
+  }
+
+  .topbar-copy--compact {
+    padding: 10px 14px;
   }
 
   .section-card {

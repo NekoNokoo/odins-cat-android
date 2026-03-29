@@ -1,24 +1,44 @@
 package provision
 
 import (
+	"bufio"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
+	"strings"
 
 	"golang.org/x/crypto/curve25519"
 )
 
 const (
-	realityServerName      = "www.cloudflare.com"
-	realityDestination     = "www.cloudflare.com:443"
-	realityFallbackPort    = 443
-	realityFallbackMinPort = 52443
-	realityFallbackMaxPort = 52543
-	naiveFallbackPort      = 8443
-	hysteria2FallbackPort  = 9443
+	defaultRealityServerName = "www.cloudflare.com"
+	defaultRealityDestHost   = "www.cloudflare.com"
+	realityFallbackPort      = 443
+	realityFallbackMinPort   = 52443
+	realityFallbackMaxPort   = 52543
+	naiveFallbackPort        = 8443
+	hysteria2FallbackPort    = 9443
 )
+
+func realityServerName() string {
+	if value := strings.TrimSpace(os.Getenv("ODIN_ONE_REALITY_SERVER_NAME")); value != "" {
+		return value
+	}
+	return defaultRealityServerName
+}
+
+func realityDestination() string {
+	if value := strings.TrimSpace(os.Getenv("ODIN_ONE_REALITY_DEST")); value != "" {
+		return value
+	}
+	if host := strings.TrimSpace(os.Getenv("ODIN_ONE_REALITY_DEST_HOST")); host != "" {
+		return host + ":443"
+	}
+	return defaultRealityDestHost + ":443"
+}
 
 type x25519KeyPair struct {
 	Private string
@@ -26,6 +46,10 @@ type x25519KeyPair struct {
 }
 
 func generateX25519KeyPair() (x25519KeyPair, error) {
+	if pair, err := generateX25519KeyPairViaXray(); err == nil {
+		return pair, nil
+	}
+
 	privateKey := make([]byte, 32)
 	if _, err := rand.Read(privateKey); err != nil {
 		return x25519KeyPair{}, err
@@ -37,9 +61,60 @@ func generateX25519KeyPair() (x25519KeyPair, error) {
 		return x25519KeyPair{}, fmt.Errorf("derive x25519 public key: %w", err)
 	}
 	return x25519KeyPair{
-		Private: base64.RawURLEncoding.EncodeToString(privateKey),
-		Public:  base64.RawURLEncoding.EncodeToString(publicKey),
+		Private: encodeXrayX25519Key(privateKey),
+		Public:  encodeXrayX25519Key(publicKey),
 	}, nil
+}
+
+func generateX25519KeyPairViaXray() (x25519KeyPair, error) {
+	binaryPath, err := ensureLocalXrayBinary()
+	if err != nil {
+		return x25519KeyPair{}, err
+	}
+	cmd := exec.Command(binaryPath, "x25519")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return x25519KeyPair{}, fmt.Errorf("run xray x25519: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+
+	var pair x25519KeyPair
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "Private key:") {
+			pair.Private = strings.TrimSpace(strings.TrimPrefix(line, "Private key:"))
+		}
+		if strings.HasPrefix(line, "Public key:") {
+			pair.Public = strings.TrimSpace(strings.TrimPrefix(line, "Public key:"))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return x25519KeyPair{}, fmt.Errorf("scan xray x25519 output: %w", err)
+	}
+	if pair.Private == "" || pair.Public == "" {
+		return x25519KeyPair{}, fmt.Errorf("parse xray x25519 output: %q", strings.TrimSpace(string(output)))
+	}
+	return pair, nil
+}
+
+func encodeXrayX25519Key(key []byte) string {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	var out strings.Builder
+	out.Grow((len(key)*8 + 5) / 6)
+	var buffer uint
+	var bits uint
+	for _, b := range key {
+		buffer = (buffer << 8) | uint(b)
+		bits += 8
+		for bits >= 6 {
+			bits -= 6
+			out.WriteByte(alphabet[(buffer>>bits)&0x3F])
+		}
+	}
+	if bits > 0 {
+		out.WriteByte(alphabet[(buffer<<(6-bits))&0x3F])
+	}
+	return out.String()
 }
 
 func generateProtocolUUID() (string, error) {
@@ -86,9 +161,9 @@ func renderRealityServerConfig(port int, uuid, privateKey, shortID string) (stri
 					"security": "reality",
 					"realitySettings": map[string]any{
 						"show":        false,
-						"dest":        realityDestination,
+						"dest":        realityDestination(),
 						"xver":        0,
-						"serverNames": []string{realityServerName},
+						"serverNames": []string{realityServerName()},
 						"privateKey":  privateKey,
 						"shortIds":    []string{shortID},
 					},
@@ -164,7 +239,7 @@ func buildStagedFallbacks(realityPort int, realityPublicKey, realityShortID, rea
 		"vlessReality": map[string]any{
 			"status":      realityStatus,
 			"port":        realityPort,
-			"serverName":  realityServerName,
+			"serverName":  realityServerName(),
 			"publicKey":   realityPublicKey,
 			"shortId":     realityShortID,
 			"uuid":        realityUUID,

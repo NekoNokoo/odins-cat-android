@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -195,9 +196,16 @@ func executeDeployment(id string, req Request) error {
 
 	realityPort := realityFallbackPort
 	if req.Server.Transport == TransportXray {
-		realityPort, err = findRemotePreferredTCPPort(client, realityFallbackPort, realityFallbackMinPort, realityFallbackMaxPort)
-		if err != nil {
-			return err
+		if forcedPort := strings.TrimSpace(os.Getenv("ODIN_ONE_REALITY_PORT_HINT")); forcedPort != "" {
+			realityPort, err = strconv.Atoi(forcedPort)
+			if err != nil {
+				return fmt.Errorf("parse ODIN_ONE_REALITY_PORT_HINT: %w", err)
+			}
+		} else {
+			realityPort, err = findRemotePreferredTCPPort(client, realityFallbackPort, realityFallbackMinPort, realityFallbackMaxPort)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -210,11 +218,7 @@ func executeDeployment(id string, req Request) error {
 			return err
 		}
 	}
-	if _, err := runRemote(client, fmt.Sprintf(
-		"tmp=$(mktemp -d) && cd \"$tmp\" && curl -fsSLo xray.zip %s && unzip -oq xray.zip xray && install -m 0755 xray %s && rm -rf \"$tmp\"",
-		quoteShell(xrayReleaseURL),
-		quoteShell(whitelistXrayBinaryPath),
-	)); err != nil {
+	if _, err := runRemote(client, renderRemoteXrayInstallCommand(xrayReleaseURL, whitelistXrayBinaryPath)); err != nil {
 		return err
 	}
 	if _, err := runRemote(client, fmt.Sprintf(
@@ -370,6 +374,26 @@ func saveLocalOwnerProfile(host string, data []byte) error {
 		return fmt.Errorf("save local owner profile: %w", err)
 	}
 	return nil
+}
+
+func renderRemoteXrayInstallCommand(downloadURL, targetPath string) string {
+	return fmt.Sprintf(`tmp=$(mktemp -d) && cd "$tmp" && \
+curl -fsSLo xray.zip %s && \
+if command -v unzip >/dev/null 2>&1; then \
+  unzip -oq xray.zip xray; \
+else \
+  python3 - <<'PY'
+import zipfile
+with zipfile.ZipFile('xray.zip') as zf:
+    with zf.open('xray') as src, open('xray', 'wb') as dst:
+        dst.write(src.read())
+PY
+fi && \
+install -m 0755 xray %s && \
+rm -rf "$tmp"`,
+		quoteShell(downloadURL),
+		quoteShell(targetPath),
+	)
 }
 
 func ensureVKTurnProxyBinary() ([]byte, error) {

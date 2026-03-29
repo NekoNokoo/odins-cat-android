@@ -406,10 +406,6 @@ func (m *localTunnelManager) run(ctx context.Context, req Request, vkLink string
 	m.logs = append(m.logs, "Local tunnel started")
 	m.mu.Unlock()
 
-	if profile.Transport == string(TransportXray) {
-		go m.runDirectHealthProbe(ctx, socksAddress)
-	}
-
 	if vkCmd != nil {
 		go func() {
 			err := <-vkExit
@@ -508,6 +504,13 @@ func loadOwnerProfile(req Request) (ownerProfile, error) {
 		}
 	}
 
+	if req.Secret == "" {
+		importedProfile, importedErr := loadImportedProfile(req.Server.Host, req.Server.Transport)
+		if importedErr == nil && ownerProfileMatchesRequest(importedProfile, req.Server.Transport) {
+			return importedProfile, nil
+		}
+	}
+
 	client, err := connectSSH(req)
 	if err != nil {
 		return profile, err
@@ -525,6 +528,31 @@ func loadOwnerProfile(req Request) (ownerProfile, error) {
 	if err := saveLocalOwnerProfile(req.Server.Host, []byte(profileText)); err != nil {
 		return profile, err
 	}
+	return profile, nil
+}
+
+func loadImportedProfile(host string, transport Transport) (ownerProfile, error) {
+	var profile ownerProfile
+
+	invite, _, err := findLocalImportedInvite(host, string(transport))
+	if err != nil {
+		return profile, err
+	}
+
+	profile = ownerProfile{
+		Name:            invite.Name,
+		Transport:       invite.Transport,
+		ActiveProtocol:  string(ProtocolDirectWireGuard),
+		ServerHost:      invite.ServerHost,
+		VKTurnProxyPort: invite.VKTurnProxyPort,
+		EndpointPort:    effectiveInviteEndpointPort(invite),
+	}
+	profile.WireGuard.ServerPublicKey = invite.WireGuard.ServerPublicKey
+	profile.WireGuard.ClientPrivateKey = invite.WireGuard.ClientPrivateKey
+	profile.WireGuard.ClientPublicKey = invite.WireGuard.ClientPublicKey
+	profile.WireGuard.Address = invite.WireGuard.Address
+	profile.WireGuard.MTU = invite.WireGuard.MTU
+
 	return profile, nil
 }
 
@@ -615,6 +643,8 @@ func (m *localTunnelManager) cleanupOrphanedClientsLocked() {
 }
 
 func (m *localTunnelManager) runDirectHealthProbe(ctx context.Context, socksAddress string) {
+	time.Sleep(1500 * time.Millisecond)
+
 	m.mu.Lock()
 	if m.state.Status != "running" || m.state.SOCKSAddress != socksAddress {
 		m.mu.Unlock()
@@ -628,7 +658,7 @@ func (m *localTunnelManager) runDirectHealthProbe(ctx context.Context, socksAddr
 	}
 	m.mu.Unlock()
 
-	result := runSOCKSProbe(socksAddress, defaultProbeHTTPSURL, 5, 12)
+	result := runSOCKSProbe(socksAddress, defaultProbeHTTPSURL, 8, 20)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()

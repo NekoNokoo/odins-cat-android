@@ -259,6 +259,21 @@ func main() {
 		writeJSON(w, status, resp)
 	})
 
+	mux.HandleFunc("/api/profile/imported", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+
+		host := strings.TrimSpace(r.URL.Query().Get("host"))
+		resp := provision.GetImportedInvite(host)
+		status := http.StatusOK
+		if resp.Error != "" {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, resp)
+	})
+
 	mux.HandleFunc("/api/profile/guest", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -276,13 +291,10 @@ func main() {
 			return
 		}
 
-		if payload.Secret == "" {
-			resp := provision.GenerateGuestInvite(payload.Host, payload.Name)
-			status := http.StatusOK
-			if resp.Error != "" {
-				status = http.StatusBadRequest
-			}
-			writeJSON(w, status, resp)
+		if strings.TrimSpace(payload.Secret) == "" {
+			writeJSON(w, http.StatusBadRequest, provision.InviteProfileResponse{
+				Error: "server secret is required to issue a guest access key",
+			})
 			return
 		}
 

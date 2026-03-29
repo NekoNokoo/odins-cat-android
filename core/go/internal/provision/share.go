@@ -63,36 +63,11 @@ type InviteProfileResponse struct {
 }
 
 func GenerateGuestInvite(host, name string) InviteProfileResponse {
-	profileResp := GetLocalOwnerProfile(host)
-	if profileResp.Error != "" {
-		return InviteProfileResponse{Error: profileResp.Error}
+	_ = host
+	_ = name
+	return InviteProfileResponse{
+		Error: "guest access keys must be issued remotely so each device gets its own WireGuard identity",
 	}
-	if !profileResp.Exists {
-		return InviteProfileResponse{Error: "owner profile not found for host"}
-	}
-
-	endpointPort := profileResp.EndpointPort
-	if endpointPort == 0 {
-		endpointPort = profileResp.VKTurnProxyPort
-	}
-	invite := inviteProfile{
-		Role:            "guest",
-		Name:            defaultInviteName(name),
-		Protocol:        "wireguard",
-		Transport:       profileResp.Transport,
-		ServerHost:      profileResp.ServerHost,
-		VKTurnProxyPort: profileResp.VKTurnProxyPort,
-		EndpointPort:    endpointPort,
-		Endpoint:        fmt.Sprintf("%s:%d", profileResp.ServerHost, endpointPort),
-		Fingerprint:     inviteFingerprint(profileResp.ServerHost, endpointPort, profileResp.WireGuard.ServerPublicKey),
-	}
-	invite.WireGuard.ServerPublicKey = profileResp.WireGuard.ServerPublicKey
-	invite.WireGuard.ClientPrivateKey = profileResp.WireGuard.ClientPrivateKey
-	invite.WireGuard.ClientPublicKey = profileResp.WireGuard.ClientPublicKey
-	invite.WireGuard.Address = profileResp.WireGuard.Address
-	invite.WireGuard.MTU = profileResp.WireGuard.MTU
-
-	return buildInviteResponse(invite, "")
 }
 
 func ImportInvite(shareCode string) InviteProfileResponse {
@@ -112,6 +87,14 @@ func ImportInvite(shareCode string) InviteProfileResponse {
 	resp := buildInviteResponse(invite, targetPath)
 	resp.ImportedAt = time.Now().UTC().Format(time.RFC3339)
 	return resp
+}
+
+func GetImportedInvite(host string) InviteProfileResponse {
+	invite, localPath, err := findLocalImportedInvite(host, "")
+	if err != nil {
+		return InviteProfileResponse{Error: err.Error()}
+	}
+	return buildInviteResponse(invite, localPath)
 }
 
 func buildInviteResponse(invite inviteProfile, localPath string) InviteProfileResponse {
@@ -359,6 +342,66 @@ func localImportedProfilePath(host, name, fingerprint string) (string, error) {
 	}
 	fileName := fmt.Sprintf("%s-%s-%s.json", sanitizeHost(host), sanitizeHost(name), sanitizeHost(fingerprint))
 	return filepath.Join(dir, fileName), nil
+}
+
+func findLocalImportedInvite(host string, transport string) (inviteProfile, string, error) {
+	var matched inviteProfile
+
+	dir, err := localImportedProfilesDir()
+	if err != nil {
+		return matched, "", err
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return matched, "", err
+	}
+
+	trimmedHost := strings.TrimSpace(host)
+	trimmedTransport := strings.TrimSpace(transport)
+	matchCount := 0
+	matchPath := ""
+
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+
+		path := filepath.Join(dir, entry.Name())
+		body, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+
+		var invite inviteProfile
+		if err := json.Unmarshal(body, &invite); err != nil {
+			continue
+		}
+		if err := validateInvite(invite); err != nil {
+			continue
+		}
+		if trimmedHost != "" && invite.ServerHost != trimmedHost {
+			continue
+		}
+		if trimmedTransport != "" && invite.Transport != trimmedTransport {
+			continue
+		}
+
+		matched = invite
+		matchPath = path
+		matchCount++
+	}
+
+	switch {
+	case matchCount == 0 && trimmedHost != "":
+		return matched, "", fmt.Errorf("no imported profile found for host %q", trimmedHost)
+	case matchCount == 0:
+		return matched, "", fmt.Errorf("no imported profile found")
+	case matchCount > 1 && trimmedHost == "":
+		return matched, "", fmt.Errorf("multiple imported profiles found; choose a server first")
+	default:
+		return matched, matchPath, nil
+	}
 }
 
 type remoteXrayState struct {

@@ -110,7 +110,7 @@ func renderXrayConfigWithListen(serverPrivateKey string, peers []xrayWireGuardPe
           "xver": 0
         }
       }
-    }`, reality.Port, reality.UUID, realityDestination, reality.PrivateKey, realityServerName, reality.ShortID))
+    }`, reality.Port, reality.UUID, realityDestination(), reality.PrivateKey, realityServerName(), reality.ShortID))
 	}
 
 	return fmt.Sprintf(`{

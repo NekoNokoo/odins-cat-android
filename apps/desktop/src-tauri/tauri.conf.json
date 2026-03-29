@@ -12,17 +12,15 @@
   "app": {
     "windows": [
       {
-        "title": "Odin One VK",
-        "width": 1040,
-        "height": 900,
+        "title": "Odin One",
+        "width": 470,
+        "height": 1040,
+        "minWidth": 430,
+        "minHeight": 920,
         "resizable": true,
         "fullscreen": false,
-        "titleBarStyle": "Overlay",
-        "hiddenTitle": true,
-        "trafficLightPosition": {
-          "x": 20,
-          "y": 20
-        },
+        "center": true,
+        "decorations": true,
         "acceptFirstMouse": true,
         "shadow": true
       }
