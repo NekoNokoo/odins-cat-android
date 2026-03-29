@@ -8,10 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 const ownerProfileRemotePath = whitelistInvitePath
@@ -501,7 +505,8 @@ func loadOwnerProfile(req Request) (ownerProfile, error) {
 			if unmarshalErr := json.Unmarshal(data, &profile); unmarshalErr == nil {
 				if ownerProfileMatchesRequest(profile, req.Server.Transport) {
 					cachedOwnerFound = true
-					if ownerProfileSupportsProtocol(profile, req.Server.Transport, expectedProtocol) {
+					if ownerProfileSupportsProtocol(profile, req.Server.Transport, expectedProtocol) &&
+						!(req.Secret != "" && req.Server.Transport == TransportVKTurnProxyXray) {
 						return profile, nil
 					}
 				}
@@ -537,7 +542,137 @@ func loadOwnerProfile(req Request) (ownerProfile, error) {
 	if err := saveLocalOwnerProfile(req.Server.Host, []byte(profileText)); err != nil {
 		return profile, err
 	}
+	if req.Server.Transport == TransportVKTurnProxyXray {
+		return ensureVKRuntimeOwnerProfile(client, profile)
+	}
+	if !ownerProfileSupportsProtocol(profile, req.Server.Transport, expectedProtocol) {
+		return profile, fmt.Errorf("no usable owner profile found for %s on %s", expectedProtocol, req.Server.Host)
+	}
 	return profile, nil
+}
+
+func ensureVKRuntimeOwnerProfile(client *ssh.Client, profile ownerProfile) (ownerProfile, error) {
+	var (
+		connectPort        int
+		preferredRelayPort int
+	)
+
+	switch profile.Transport {
+	case string(TransportVKTurnProxyXray):
+		preferredRelayPort = effectiveOwnerEndpointPort(profile)
+	default:
+		connectPort = effectiveOwnerEndpointPort(profile)
+	}
+
+	relayPort, err := ensureRemoteVKRelayService(client, connectPort, preferredRelayPort)
+	if err != nil {
+		return ownerProfile{}, err
+	}
+	return buildVKRelayRuntimeProfile(profile, relayPort)
+}
+
+func buildVKRelayRuntimeProfile(profile ownerProfile, relayPort int) (ownerProfile, error) {
+	if relayPort <= 0 {
+		return ownerProfile{}, fmt.Errorf("vk relay port is required")
+	}
+	if strings.TrimSpace(profile.WireGuard.ServerPublicKey) == "" ||
+		strings.TrimSpace(profile.WireGuard.ClientPrivateKey) == "" ||
+		strings.TrimSpace(profile.WireGuard.Address) == "" {
+		return ownerProfile{}, fmt.Errorf("owner profile is missing WireGuard data required for vk-turn-proxy")
+	}
+
+	profile.Transport = string(TransportVKTurnProxyXray)
+	profile.VKTurnProxyPort = relayPort
+	profile.EndpointPort = relayPort
+	profile.ActiveProtocol = activeProtocolID(TransportVKTurnProxyXray)
+	profile.ProtocolPack = buildProtocolPack(
+		TransportVKTurnProxyXray,
+		relayPort,
+		realityPortFromStagedFallbacks(profile.StagedFallbacks),
+	)
+	return profile, nil
+}
+
+func ensureRemoteVKRelayService(client *ssh.Client, connectPort, preferredRelayPort int) (int, error) {
+	if client == nil {
+		return 0, fmt.Errorf("ssh client is required to prepare vk-turn-proxy relay")
+	}
+
+	unitText, unitErr := runRemote(client, "cat "+quoteShell(whitelistProxyServicePath))
+	existingRelayPort, existingConnectPort := parseVKRelayUnitPorts(unitText)
+
+	relayPort := preferredRelayPort
+	if relayPort <= 0 {
+		relayPort = existingRelayPort
+	}
+	if relayPort <= 0 {
+		var err error
+		relayPort, err = findRemoteFreeUDPPort(client, whitelistTurnPortStart, whitelistTurnPortEnd)
+		if err != nil {
+			return 0, fmt.Errorf("select vk-turn-proxy relay port: %w", err)
+		}
+	}
+
+	if connectPort <= 0 {
+		connectPort = existingConnectPort
+	}
+	if connectPort <= 0 {
+		return 0, fmt.Errorf("vk-turn-proxy relay connect port is unknown on the server")
+	}
+
+	needsUnitRewrite := unitErr != nil || existingRelayPort != relayPort || existingConnectPort != connectPort
+	if needsUnitRewrite {
+		if _, err := runRemote(client, "test -x "+quoteShell(whitelistProxyBinaryPath)); err != nil {
+			vkBinary, binaryErr := ensureVKTurnProxyBinary()
+			if binaryErr != nil {
+				return 0, fmt.Errorf("build vk-turn-proxy relay binary: %w", binaryErr)
+			}
+			if uploadErr := uploadFile(client, whitelistProxyBinaryPath, vkBinary, "0755"); uploadErr != nil {
+				return 0, fmt.Errorf("upload vk-turn-proxy relay binary: %w", uploadErr)
+			}
+		}
+
+		proxyUnit := renderSystemdUnit(
+			"Odin One vk-turn-proxy",
+			fmt.Sprintf("%s -listen 0.0.0.0:%d -connect 127.0.0.1:%d", whitelistProxyBinaryPath, relayPort, connectPort),
+		)
+		if err := uploadFile(client, whitelistProxyServicePath, []byte(proxyUnit), "0644"); err != nil {
+			return 0, fmt.Errorf("upload vk-turn-proxy relay unit: %w", err)
+		}
+	}
+
+	command := fmt.Sprintf(
+		"systemctl daemon-reload && systemctl restart whitelist-vk-turn-proxy.service && systemctl is-active whitelist-vk-turn-proxy.service >/dev/null && sleep 1 && ss -H -lun | grep -Fq ':%d'",
+		relayPort,
+	)
+	if _, err := runRemote(client, command); err != nil {
+		return 0, fmt.Errorf("start vk-turn-proxy relay on %d/udp: %w", relayPort, err)
+	}
+
+	return relayPort, nil
+}
+
+var (
+	vkRelayListenPattern  = regexp.MustCompile(`-listen\s+\S+:(\d+)`)
+	vkRelayConnectPattern = regexp.MustCompile(`-connect\s+\S+:(\d+)`)
+)
+
+func parseVKRelayUnitPorts(unitText string) (listenPort, connectPort int) {
+	listenPort = parseVKRelayPortMatch(vkRelayListenPattern, unitText)
+	connectPort = parseVKRelayPortMatch(vkRelayConnectPattern, unitText)
+	return listenPort, connectPort
+}
+
+func parseVKRelayPortMatch(pattern *regexp.Regexp, text string) int {
+	matches := pattern.FindStringSubmatch(text)
+	if len(matches) != 2 {
+		return 0
+	}
+	port, err := strconv.Atoi(matches[1])
+	if err != nil {
+		return 0
+	}
+	return port
 }
 
 func loadImportedProfile(host string, transport Transport) (ownerProfile, error) {
