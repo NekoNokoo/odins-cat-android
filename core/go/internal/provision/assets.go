@@ -157,7 +157,10 @@ func renderXrayConfigWithListen(serverPrivateKey string, peers []xrayWireGuardPe
 `, strings.Join(inbounds, ",\n"))
 }
 
-func renderAccessProfile(role, id, name, host string, transport Transport, endpointPort int, serverPublicKey, clientPrivateKey, clientPublicKey, address string, stagedFallbacks map[string]any) (string, error) {
+func renderAccessProfile(role, id, name, host string, transport Transport, endpointPort, wireGuardPort, vkTurnProxyPort int, serverPublicKey, clientPrivateKey, clientPublicKey, address string, stagedFallbacks map[string]any) (string, error) {
+	if wireGuardPort <= 0 {
+		wireGuardPort = endpointPort
+	}
 	profile := map[string]any{
 		"id":             id,
 		"role":           role,
@@ -167,7 +170,7 @@ func renderAccessProfile(role, id, name, host string, transport Transport, endpo
 		"endpointPort":   endpointPort,
 		"createdAt":      nowRFC3339(),
 		"activeProtocol": activeProtocolID(transport),
-		"protocolPack":   buildProtocolPack(transport, endpointPort, realityPortFromStagedFallbacks(stagedFallbacks)),
+		"protocolPack":   buildProtocolPack(transport, wireGuardPort, realityPortFromStagedFallbacks(stagedFallbacks), vkTurnProxyPort),
 		"wireguard": map[string]any{
 			"serverPublicKey":  serverPublicKey,
 			"clientPrivateKey": clientPrivateKey,
@@ -179,8 +182,8 @@ func renderAccessProfile(role, id, name, host string, transport Transport, endpo
 	if len(stagedFallbacks) > 0 {
 		profile["stagedFallbacks"] = stagedFallbacks
 	}
-	if transport == TransportVKTurnProxyXray {
-		profile["vkTurnProxyPort"] = endpointPort
+	if vkTurnProxyPort > 0 {
+		profile["vkTurnProxyPort"] = vkTurnProxyPort
 	}
 
 	raw, err := json.MarshalIndent(profile, "", "  ")

@@ -24,6 +24,8 @@ export interface ServerDraft {
   transport: TransportMode;
   engine?: TunnelEngine;
   protocol?: TunnelProtocol;
+  vkTurnProxyPort?: number;
+  realityPort?: number;
 }
 
 export interface DeployStage {
@@ -130,6 +132,7 @@ export interface DeploymentState {
   steps: DeployStage[];
   turnPort?: number;
   wireGuardPort?: number;
+  realityPort?: number;
   healthChecks?: Array<{
     key: string;
     label: string;

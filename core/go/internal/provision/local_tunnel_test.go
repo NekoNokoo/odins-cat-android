@@ -51,8 +51,17 @@ func TestBuildVKRelayRuntimeProfileFromDirectProfile(t *testing.T) {
 	if runtimeProfile.ActiveProtocol != "vk-turn-wireguard" {
 		t.Fatalf("expected VK active protocol, got %q", runtimeProfile.ActiveProtocol)
 	}
-	if len(runtimeProfile.ProtocolPack) == 0 || runtimeProfile.ProtocolPack[0].Port != 56080 {
-		t.Fatalf("expected protocol pack to point at relay port 56080, got %+v", runtimeProfile.ProtocolPack)
+	activeFound := false
+	for _, entry := range runtimeProfile.ProtocolPack {
+		if entry.Status == ProtocolStatusActive {
+			activeFound = true
+			if entry.ID != "vk-turn-wireguard" || entry.Port != 56080 {
+				t.Fatalf("expected active VK relay entry on 56080, got %+v", entry)
+			}
+		}
+	}
+	if !activeFound {
+		t.Fatalf("expected protocol pack to contain an active entry, got %+v", runtimeProfile.ProtocolPack)
 	}
 }
 
@@ -60,5 +69,23 @@ func TestBuildVKRelayRuntimeProfileRejectsMissingWireGuard(t *testing.T) {
 	_, err := buildVKRelayRuntimeProfile(ownerProfile{}, 56080)
 	if err == nil {
 		t.Fatal("expected missing WireGuard data to be rejected")
+	}
+}
+
+func TestOwnerProfileMatchesVKRequestFromDirectDualStackProfile(t *testing.T) {
+	profile := ownerProfile{
+		Transport:       string(TransportXray),
+		EndpointPort:    51820,
+		VKTurnProxyPort: 56080,
+	}
+	profile.WireGuard.ServerPublicKey = "server-public"
+	profile.WireGuard.ClientPrivateKey = "client-private"
+	profile.WireGuard.Address = "10.66.66.2/32"
+
+	if !ownerProfileMatchesRequest(profile, TransportVKTurnProxyXray) {
+		t.Fatal("expected direct dual-stack owner profile to satisfy VK runtime request")
+	}
+	if !ownerProfileSupportsProtocol(profile, TransportVKTurnProxyXray, ProtocolDirectWireGuard) {
+		t.Fatal("expected direct dual-stack owner profile to satisfy VK transport protocol requirements")
 	}
 }

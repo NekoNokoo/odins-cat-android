@@ -32,6 +32,7 @@ type Deployment struct {
 	Steps         []Step              `json:"steps"`
 	TurnPort      int                 `json:"turnPort,omitempty"`
 	WireGuardPort int                 `json:"wireGuardPort,omitempty"`
+	RealityPort   int                 `json:"realityPort,omitempty"`
 	HealthChecks  []Check             `json:"healthChecks,omitempty"`
 	ProtocolPack  []ProtocolPackEntry `json:"protocolPack,omitempty"`
 	Error         string              `json:"error,omitempty"`
@@ -59,12 +60,12 @@ func StartDeployment(req Request) Deployment {
 	deployment := Deployment{
 		DeploymentID: id,
 		ServerHost:   req.Server.Host,
-		Transport:    string(req.Server.Transport),
-		Engine:       string(resolvedEngine(req.Server.Engine, req.Server.Transport, req.Server.Protocol)),
-		Protocol:     string(normalizedProtocol(req.Server.Transport, req.Server.Protocol)),
+		Transport:    string(TransportXray),
+		Engine:       string(EngineSingBox),
+		Protocol:     string(ProtocolVLESSReality),
 		Status:       "running",
 		Steps:        steps,
-		ProtocolPack: buildProtocolPack(req.Server.Transport, 0, 0),
+		ProtocolPack: buildProtocolPack(TransportXray, 0, req.Server.RealityPort, req.Server.VKTurnProxyPort),
 	}
 
 	store.mu.Lock()
@@ -126,21 +127,26 @@ func BuildPlan(req Request) Response {
 
 	warnings := []string{
 		"Odin One uses its own ports and paths so the existing Amnezia stack can remain untouched.",
+		"Odin One now keeps VLESS + REALITY and the VK relay live on the same server, so the desktop client can switch paths locally without redeploying the node.",
 	}
 
-	if req.Server.Transport == TransportVKTurnProxyXray {
-		warnings = append(warnings, "This deployment auto-selects free UDP ports for both the public vk-turn-proxy listener and the local xray WireGuard inbound, so it can coexist with an existing VPN stack.")
-	} else if req.Server.Transport == TransportXray {
-		warnings = append(warnings, "Direct xray mode publishes a WireGuard-compatible UDP port on the server and does not depend on VK for connectivity.")
+	if req.Server.VKTurnProxyPort > 0 || req.Server.RealityPort > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"Manual public ports are requested: VK relay %s and REALITY %s. Deploy will fail if either port is already busy on the server.",
+			describeManualPort(req.Server.VKTurnProxyPort, "auto/udp"),
+			describeManualPort(req.Server.RealityPort, "auto/tcp"),
+		))
+	} else {
+		warnings = append(warnings, "Public VK relay and REALITY ports are auto-selected from currently free server ports unless you pin them manually.")
 	}
 	warnings = append(warnings, "Protocol pack staging is enabled: Odin One keeps the current active data path, while preparing Russia-friendly fallback protocols for later rollout without Apple Network Extension entitlements.")
 
 	return Response{
 		ServerHost:   req.Server.Host,
-		Transport:    string(req.Server.Transport),
+		Transport:    string(TransportXray),
 		Steps:        steps,
 		Warnings:     warnings,
-		ProtocolPack: buildProtocolPack(req.Server.Transport, 0, 0),
+		ProtocolPack: buildProtocolPack(TransportXray, 0, req.Server.RealityPort, req.Server.VKTurnProxyPort),
 	}
 }
 
@@ -174,50 +180,31 @@ func executeDeployment(id string, req Request) error {
 	}
 	completeStep(id, 1)
 
-	turnPort := 0
-	if req.Server.Transport == TransportVKTurnProxyXray {
-		turnPort, err = findRemoteFreeUDPPort(client, whitelistTurnPortStart, whitelistTurnPortEnd)
-		if err != nil {
-			return err
-		}
+	if err := validateDeploymentPortHints(req.Server); err != nil {
+		return err
 	}
-	wireGuardPort, err := findRemoteFreeUDPPort(client, whitelistWireGuardPortStart, whitelistWireGuardPortEnd)
+
+	turnPort, err := resolveRemoteRelayPort(client, req.Server.VKTurnProxyPort)
 	if err != nil {
 		return err
 	}
-	if turnPort != 0 && wireGuardPort == turnPort {
-		wireGuardPort, err = findRemoteFreeUDPPort(client, wireGuardPort+1, whitelistWireGuardPortEnd+20)
-		if err != nil {
-			return err
-		}
+	wireGuardPort, err := resolveRemoteUDPPort(client, 0, whitelistWireGuardPortStart, whitelistWireGuardPortEnd, []int{turnPort}, "xray wireguard")
+	if err != nil {
+		return err
 	}
-	setDeploymentPorts(id, turnPort, wireGuardPort)
-	setDeploymentProtocolPack(id, buildProtocolPack(req.Server.Transport, endpointPortForProtocolPack(req.Server.Transport, turnPort, wireGuardPort), 0))
-
-	realityPort := realityFallbackPort
-	if req.Server.Transport == TransportXray {
-		if forcedPort := strings.TrimSpace(os.Getenv("ODIN_ONE_REALITY_PORT_HINT")); forcedPort != "" {
-			realityPort, err = strconv.Atoi(forcedPort)
-			if err != nil {
-				return fmt.Errorf("parse ODIN_ONE_REALITY_PORT_HINT: %w", err)
-			}
-		} else {
-			realityPort, err = findRemotePreferredTCPPort(client, realityFallbackPort, realityFallbackMinPort, realityFallbackMaxPort)
-			if err != nil {
-				return err
-			}
-		}
+	realityPort, err := resolveDeploymentRealityPort(client, req.Server.RealityPort)
+	if err != nil {
+		return err
 	}
-	setDeploymentProtocolPack(id, buildProtocolPack(req.Server.Transport, endpointPortForProtocolPack(req.Server.Transport, turnPort, wireGuardPort), realityPort))
+	setDeploymentPorts(id, turnPort, wireGuardPort, realityPort)
+	setDeploymentProtocolPack(id, buildProtocolPack(TransportXray, wireGuardPort, realityPort, turnPort))
 
-	if req.Server.Transport == TransportVKTurnProxyXray {
-		vkBinary, err := ensureVKTurnProxyBinary()
-		if err != nil {
-			return err
-		}
-		if err := uploadFile(client, whitelistProxyBinaryPath, vkBinary, "0755"); err != nil {
-			return err
-		}
+	vkBinary, err := ensureVKTurnProxyBinary()
+	if err != nil {
+		return err
+	}
+	if err := uploadFile(client, whitelistProxyBinaryPath, vkBinary, "0755"); err != nil {
+		return err
 	}
 	if _, err := runRemote(client, renderRemoteXrayInstallCommand(xrayReleaseURL, whitelistXrayBinaryPath)); err != nil {
 		return err
@@ -240,19 +227,7 @@ func executeDeployment(id string, req Request) error {
 		return err
 	}
 
-	listenHost := "127.0.0.1"
-	endpointPort := turnPort
-	if req.Server.Transport == TransportXray {
-		listenHost = "0.0.0.0"
-		endpointPort = wireGuardPort
-	}
-
-	xrayConfig := renderXrayConfigWithListen(serverKeys.Private, []xrayWireGuardPeer{
-		{
-			PublicKey:  clientKeys.Public,
-			AllowedIPs: []string{"10.66.66.2/32"},
-		},
-	}, listenHost, wireGuardPort, nil)
+	endpointPort := wireGuardPort
 	realityKeys, err := generateX25519KeyPair()
 	if err != nil {
 		return err
@@ -269,28 +244,25 @@ func executeDeployment(id string, req Request) error {
 	if err != nil {
 		return err
 	}
-	var realityInbound *xrayRealityInbound
-	if req.Server.Transport == TransportXray {
-		realityInbound = &xrayRealityInbound{
-			Port: realityPort,
-			Clients: []xrayRealityClient{
-				{
-					UUID: realityUUID,
-					Flow: "xtls-rprx-vision",
-				},
+	realityInbound := &xrayRealityInbound{
+		Port: realityPort,
+		Clients: []xrayRealityClient{
+			{
+				UUID: realityUUID,
+				Flow: "xtls-rprx-vision",
 			},
-			PrivateKey: realityKeys.Private,
-			ShortID:    realityShortID,
-			ServerName: realityServerName(),
-			Dest:       realityDestination(),
-		}
+		},
+		PrivateKey: realityKeys.Private,
+		ShortID:    realityShortID,
+		ServerName: realityServerName(),
+		Dest:       realityDestination(),
 	}
-	xrayConfig = renderXrayConfigWithListen(serverKeys.Private, []xrayWireGuardPeer{
+	xrayConfig := renderXrayConfigWithListen(serverKeys.Private, []xrayWireGuardPeer{
 		{
 			PublicKey:  clientKeys.Public,
 			AllowedIPs: []string{"10.66.66.2/32"},
 		},
-	}, listenHost, wireGuardPort, realityInbound)
+	}, "0.0.0.0", wireGuardPort, realityInbound)
 	if err := uploadFile(client, whitelistXrayConfigPath, []byte(xrayConfig), "0644"); err != nil {
 		return err
 	}
@@ -305,8 +277,22 @@ func executeDeployment(id string, req Request) error {
 		return err
 	}
 
-	stagedFallbacks := buildStagedFallbacks(realityPort, realityKeys.Public, realityShortID, realityUUID, req.Server.Transport == TransportXray)
-	inviteProfile, err := renderAccessProfile("owner", "owner", "Odin One Owner Node", req.Server.Host, req.Server.Transport, endpointPort, serverKeys.Public, clientKeys.Private, clientKeys.Public, "10.66.66.2/32", stagedFallbacks)
+	stagedFallbacks := buildStagedFallbacks(realityPort, realityKeys.Public, realityShortID, realityUUID, true)
+	inviteProfile, err := renderAccessProfile(
+		"owner",
+		"owner",
+		"Odin One Owner Node",
+		req.Server.Host,
+		TransportXray,
+		endpointPort,
+		wireGuardPort,
+		turnPort,
+		serverKeys.Public,
+		clientKeys.Private,
+		clientKeys.Public,
+		"10.66.66.2/32",
+		stagedFallbacks,
+	)
 	if err != nil {
 		return err
 	}
@@ -316,7 +302,7 @@ func executeDeployment(id string, req Request) error {
 	if err := saveLocalOwnerProfile(req.Server.Host, []byte(inviteProfile)); err != nil {
 		return err
 	}
-	protocolPackManifest, err := renderProtocolPackManifest(req.Server.Host, req.Server.Transport, endpointPort, realityPort)
+	protocolPackManifest, err := renderProtocolPackManifest(req.Server.Host, TransportXray, wireGuardPort, realityPort, turnPort)
 	if err != nil {
 		return err
 	}
@@ -332,34 +318,20 @@ func executeDeployment(id string, req Request) error {
 		return err
 	}
 
-	if req.Server.Transport == TransportVKTurnProxyXray {
-		proxyUnit := renderSystemdUnit(
-			"Odin One vk-turn-proxy",
-			fmt.Sprintf("%s -listen 0.0.0.0:%d -connect 127.0.0.1:%d", whitelistProxyBinaryPath, turnPort, wireGuardPort),
-		)
-		if err := uploadFile(client, whitelistProxyServicePath, []byte(proxyUnit), "0644"); err != nil {
-			return err
-		}
+	proxyUnit := renderSystemdUnit(
+		"Odin One vk-turn-proxy",
+		fmt.Sprintf("%s -listen 0.0.0.0:%d -connect 127.0.0.1:%d", whitelistProxyBinaryPath, turnPort, wireGuardPort),
+	)
+	if err := uploadFile(client, whitelistProxyServicePath, []byte(proxyUnit), "0644"); err != nil {
+		return err
 	}
 	completeStep(id, 3)
 
-	switch req.Server.Transport {
-	case TransportVKTurnProxyXray:
-		if _, err := runRemote(client, "systemctl daemon-reload && systemctl enable whitelist-xray.service whitelist-vk-turn-proxy.service && systemctl restart whitelist-xray.service whitelist-vk-turn-proxy.service && sleep 2"); err != nil {
-			return err
-		}
-		if _, err := runRemote(client, fmt.Sprintf("systemctl is-active whitelist-xray.service && systemctl is-active whitelist-vk-turn-proxy.service && ss -lun | grep ':%d'", turnPort)); err != nil {
-			return err
-		}
-	case TransportXray:
-		if _, err := runRemote(client, "systemctl daemon-reload && systemctl disable --now whitelist-vk-turn-proxy.service >/dev/null 2>&1 || true && systemctl enable whitelist-xray.service && systemctl restart whitelist-xray.service && sleep 2"); err != nil {
-			return err
-		}
-		if _, err := runRemote(client, fmt.Sprintf("systemctl is-active whitelist-xray.service && ss -lun | grep ':%d' && ss -ltn | grep ':%d'", wireGuardPort, realityPort)); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("unsupported transport %q", req.Server.Transport)
+	if _, err := runRemote(client, "systemctl daemon-reload && systemctl enable whitelist-xray.service whitelist-vk-turn-proxy.service && systemctl restart whitelist-xray.service whitelist-vk-turn-proxy.service && sleep 2"); err != nil {
+		return err
+	}
+	if _, err := runRemote(client, fmt.Sprintf("systemctl is-active whitelist-xray.service && systemctl is-active whitelist-vk-turn-proxy.service && ss -H -lun | grep -Fq ':%d' && ss -H -lun | grep -Fq ':%d' && ss -H -ltn | grep -Fq ':%d'", wireGuardPort, turnPort, realityPort)); err != nil {
+		return err
 	}
 	completeStep(id, 4)
 
@@ -463,7 +435,7 @@ func completeStep(id string, index int) {
 	store.items[id] = deployment
 }
 
-func setDeploymentPorts(id string, turnPort, wireGuardPort int) {
+func setDeploymentPorts(id string, turnPort, wireGuardPort, realityPort int) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
@@ -473,6 +445,7 @@ func setDeploymentPorts(id string, turnPort, wireGuardPort int) {
 	}
 	deployment.TurnPort = turnPort
 	deployment.WireGuardPort = wireGuardPort
+	deployment.RealityPort = realityPort
 	store.items[id] = deployment
 }
 
@@ -500,13 +473,6 @@ func setDeploymentProtocolPack(id string, protocolPack []ProtocolPackEntry) {
 	store.items[id] = deployment
 }
 
-func endpointPortForProtocolPack(transport Transport, turnPort, wireGuardPort int) int {
-	if transport == TransportVKTurnProxyXray {
-		return turnPort
-	}
-	return wireGuardPort
-}
-
 func findRemoteFreeUDPPort(client *ssh.Client, start, end int) (int, error) {
 	for port := start; port <= end; port++ {
 		cmd := fmt.Sprintf("if ss -H -lun | awk '{print $5}' | grep -Eq '(^|\\]|:)%d$'; then exit 1; fi", port)
@@ -530,6 +496,151 @@ func findRemotePreferredTCPPort(client *ssh.Client, preferred, start, end int) (
 		}
 	}
 	return 0, fmt.Errorf("no free TCP port found in range %d-%d", start, end)
+}
+
+func describeManualPort(port int, fallback string) string {
+	if port <= 0 {
+		return fallback
+	}
+	return strconv.Itoa(port)
+}
+
+func validateDeploymentPortHints(server Server) error {
+	if err := validateRequestedPort(server.VKTurnProxyPort, "vk-turn-proxy relay"); err != nil {
+		return err
+	}
+	if err := validateRequestedPort(server.RealityPort, "VLESS + REALITY"); err != nil {
+		return err
+	}
+	if server.VKTurnProxyPort > 0 && server.RealityPort > 0 && server.VKTurnProxyPort == server.RealityPort {
+		return fmt.Errorf("vk-turn-proxy relay UDP port and VLESS + REALITY TCP port must be different")
+	}
+	return nil
+}
+
+func validateRequestedPort(port int, name string) error {
+	if port == 0 {
+		return nil
+	}
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("%s port must be between 1 and 65535", name)
+	}
+	return nil
+}
+
+func resolveRemoteUDPPort(client *ssh.Client, requested, start, end int, excluded []int, label string) (int, error) {
+	if requested > 0 {
+		if portExcluded(requested, excluded) {
+			return 0, fmt.Errorf("%s UDP port %d conflicts with another Odin One service", label, requested)
+		}
+		free, err := remoteUDPPortIsFree(client, requested)
+		if err != nil {
+			return 0, err
+		}
+		if !free {
+			return 0, fmt.Errorf("%s UDP port %d is already in use on the server", label, requested)
+		}
+		return requested, nil
+	}
+
+	for port := start; port <= end; port++ {
+		if portExcluded(port, excluded) {
+			continue
+		}
+		free, err := remoteUDPPortIsFree(client, port)
+		if err != nil {
+			return 0, err
+		}
+		if free {
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("no free UDP port found in range %d-%d", start, end)
+}
+
+func resolveRemoteRelayPort(client *ssh.Client, requested int) (int, error) {
+	if requested > 0 {
+		free, err := remoteUDPPortIsFree(client, requested)
+		if err != nil {
+			return 0, err
+		}
+		if free || remoteExistingRelayUsesPort(client, requested) {
+			return requested, nil
+		}
+		return 0, fmt.Errorf("vk-turn-proxy relay UDP port %d is already in use on the server", requested)
+	}
+	return resolveRemoteUDPPort(client, 0, whitelistTurnPortStart, whitelistTurnPortEnd, nil, "vk-turn-proxy relay")
+}
+
+func resolveDeploymentRealityPort(client *ssh.Client, requested int) (int, error) {
+	if requested > 0 {
+		free, err := remoteTCPPortIsFree(client, requested)
+		if err != nil {
+			return 0, err
+		}
+		if !free && !remoteExistingRealityUsesPort(client, requested) {
+			return 0, fmt.Errorf("VLESS + REALITY TCP port %d is already in use on the server", requested)
+		}
+		return requested, nil
+	}
+
+	if forcedPort := strings.TrimSpace(os.Getenv("ODIN_ONE_REALITY_PORT_HINT")); forcedPort != "" {
+		realityPort, err := strconv.Atoi(forcedPort)
+		if err != nil {
+			return 0, fmt.Errorf("parse ODIN_ONE_REALITY_PORT_HINT: %w", err)
+		}
+		free, err := remoteTCPPortIsFree(client, realityPort)
+		if err != nil {
+			return 0, err
+		}
+		if free {
+			return realityPort, nil
+		}
+	}
+
+	return findRemotePreferredTCPPort(client, realityFallbackPort, realityFallbackMinPort, realityFallbackMaxPort)
+}
+
+func remoteUDPPortIsFree(client *ssh.Client, port int) (bool, error) {
+	_, err := runRemote(client, fmt.Sprintf("if ss -H -lun | awk '{print $5}' | grep -Eq '(^|\\]|:)%d$'; then exit 1; fi", port))
+	if err == nil {
+		return true, nil
+	}
+	return false, nil
+}
+
+func remoteTCPPortIsFree(client *ssh.Client, port int) (bool, error) {
+	_, err := runRemote(client, fmt.Sprintf("if ss -H -ltn | awk '{print $4}' | grep -Eq '(^|\\]|:)%d$'; then exit 1; fi", port))
+	if err == nil {
+		return true, nil
+	}
+	return false, nil
+}
+
+func remoteExistingRelayUsesPort(client *ssh.Client, port int) bool {
+	unitText, err := runRemote(client, "cat "+quoteShell(whitelistProxyServicePath))
+	if err != nil {
+		return false
+	}
+	relayPort, _ := parseVKRelayUnitPorts(unitText)
+	return relayPort == port
+}
+
+func remoteExistingRealityUsesPort(client *ssh.Client, port int) bool {
+	_, _, xrayState, err := loadRemoteAccessState(client)
+	if err != nil {
+		return false
+	}
+	return xrayState.Reality.Port == port
+}
+
+func portExcluded(port int, excluded []int) bool {
+	for _, item := range excluded {
+		if item == port {
+			return true
+		}
+	}
+	return false
 }
 
 func failDeployment(id string, err error) {

@@ -381,6 +381,14 @@ func (m *localTunnelManager) run(ctx context.Context, req Request, vkLink string
 		return
 	default:
 	}
+	if vkCmd != nil {
+		if err := waitForVKRelayWarmup(ctx, 4*time.Second, vkExit, vkLogPath, m); err != nil {
+			if ctx.Err() == nil {
+				m.fail(err)
+			}
+			return
+		}
+	}
 
 	m.mu.Lock()
 	if vkCmd != nil {
@@ -507,7 +515,7 @@ func loadOwnerProfile(req Request) (ownerProfile, error) {
 					cachedOwnerFound = true
 					if ownerProfileSupportsProtocol(profile, req.Server.Transport, expectedProtocol) &&
 						!(req.Secret != "" && req.Server.Transport == TransportVKTurnProxyXray) {
-						return profile, nil
+						return runtimeOwnerProfileForRequest(profile, req.Server.Transport)
 					}
 				}
 			}
@@ -517,10 +525,10 @@ func loadOwnerProfile(req Request) (ownerProfile, error) {
 	if req.Secret == "" {
 		importedProfile, importedErr := loadImportedProfile(req.Server.Host, req.Server.Transport)
 		if importedErr == nil && ownerProfileSupportsProtocol(importedProfile, req.Server.Transport, expectedProtocol) {
-			return importedProfile, nil
+			return runtimeOwnerProfileForRequest(importedProfile, req.Server.Transport)
 		}
 		if cachedOwnerFound {
-			return profile, nil
+			return runtimeOwnerProfileForRequest(profile, req.Server.Transport)
 		}
 		return profile, fmt.Errorf("no usable imported access key found for %s on %s", expectedProtocol, req.Server.Host)
 	}
@@ -562,6 +570,7 @@ func ensureVKRuntimeOwnerProfile(client *ssh.Client, profile ownerProfile) (owne
 		preferredRelayPort = effectiveOwnerEndpointPort(profile)
 	default:
 		connectPort = effectiveOwnerEndpointPort(profile)
+		preferredRelayPort = profile.VKTurnProxyPort
 	}
 
 	relayPort, err := ensureRemoteVKRelayService(client, connectPort, preferredRelayPort)
@@ -581,16 +590,65 @@ func buildVKRelayRuntimeProfile(profile ownerProfile, relayPort int) (ownerProfi
 		return ownerProfile{}, fmt.Errorf("owner profile is missing WireGuard data required for vk-turn-proxy")
 	}
 
+	wireGuardPort := effectiveOwnerEndpointPort(profile)
 	profile.Transport = string(TransportVKTurnProxyXray)
 	profile.VKTurnProxyPort = relayPort
 	profile.EndpointPort = relayPort
 	profile.ActiveProtocol = activeProtocolID(TransportVKTurnProxyXray)
 	profile.ProtocolPack = buildProtocolPack(
 		TransportVKTurnProxyXray,
-		relayPort,
+		wireGuardPort,
 		realityPortFromStagedFallbacks(profile.StagedFallbacks),
+		relayPort,
 	)
 	return profile, nil
+}
+
+func runtimeOwnerProfileForRequest(profile ownerProfile, transport Transport) (ownerProfile, error) {
+	if transport != TransportVKTurnProxyXray {
+		return profile, nil
+	}
+	switch profile.Transport {
+	case string(TransportVKTurnProxyXray):
+		if profile.VKTurnProxyPort <= 0 {
+			return ownerProfile{}, fmt.Errorf("owner profile is missing vk-turn-proxy relay port")
+		}
+		return profile, nil
+	case string(TransportXray):
+		return buildVKRelayRuntimeProfile(profile, profile.VKTurnProxyPort)
+	default:
+		return ownerProfile{}, fmt.Errorf("owner profile transport %q does not support vk-turn-proxy runtime", profile.Transport)
+	}
+}
+
+func ownerProfileMatchesRequest(profile ownerProfile, transport Transport) bool {
+	switch transport {
+	case TransportXray:
+		return profile.Transport == string(TransportXray) && effectiveOwnerEndpointPort(profile) > 0
+	case TransportVKTurnProxyXray:
+		if profile.Transport != string(TransportVKTurnProxyXray) && profile.Transport != string(TransportXray) {
+			return false
+		}
+		return profile.VKTurnProxyPort > 0
+	default:
+		return false
+	}
+}
+
+func ownerProfileSupportsProtocol(profile ownerProfile, transport Transport, protocol TunnelProtocol) bool {
+	if !ownerProfileMatchesRequest(profile, transport) {
+		return false
+	}
+
+	switch normalizedProtocol(transport, protocol) {
+	case ProtocolVLESSReality:
+		_, err := readRealityFallback(profile)
+		return err == nil
+	default:
+		return strings.TrimSpace(profile.WireGuard.ServerPublicKey) != "" &&
+			strings.TrimSpace(profile.WireGuard.ClientPrivateKey) != "" &&
+			strings.TrimSpace(profile.WireGuard.Address) != ""
+	}
 }
 
 func ensureRemoteVKRelayService(client *ssh.Client, connectPort, preferredRelayPort int) (int, error) {
@@ -742,36 +800,6 @@ func EnsureRealityOwnerProfile(req Request) error {
 		return err
 	}
 	return nil
-}
-
-func ownerProfileMatchesRequest(profile ownerProfile, transport Transport) bool {
-	if profile.Transport != string(transport) {
-		return false
-	}
-	switch transport {
-	case TransportXray:
-		return effectiveOwnerEndpointPort(profile) > 0
-	case TransportVKTurnProxyXray:
-		return profile.VKTurnProxyPort > 0
-	default:
-		return false
-	}
-}
-
-func ownerProfileSupportsProtocol(profile ownerProfile, transport Transport, protocol TunnelProtocol) bool {
-	if !ownerProfileMatchesRequest(profile, transport) {
-		return false
-	}
-
-	switch normalizedProtocol(transport, protocol) {
-	case ProtocolVLESSReality:
-		_, err := readRealityFallback(profile)
-		return err == nil
-	default:
-		return strings.TrimSpace(profile.WireGuard.ServerPublicKey) != "" &&
-			strings.TrimSpace(profile.WireGuard.ClientPrivateKey) != "" &&
-			strings.TrimSpace(profile.WireGuard.Address) != ""
-	}
 }
 
 func (m *localTunnelManager) fail(err error) {
@@ -960,6 +988,37 @@ func waitForSOCKSReady(
 		time.Sleep(150 * time.Millisecond)
 	}
 	return fmt.Errorf("local SOCKS listener did not become ready on %s", socksAddress)
+}
+
+func waitForVKRelayWarmup(
+	ctx context.Context,
+	timeout time.Duration,
+	vkExit <-chan error,
+	vkLogPath string,
+	manager *localTunnelManager,
+) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-vkExit:
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return manager.describeProcessExit("vk-turn-proxy client", err, vkLogPath)
+		default:
+		}
+
+		for _, line := range readRecentLogLines(vkLogPath, 16) {
+			if strings.Contains(line, "Established DTLS connection!") || strings.Contains(line, "relayed-address=") {
+				time.Sleep(600 * time.Millisecond)
+				return nil
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return nil
 }
 
 func isSOCKSReady(socksAddress string) bool {

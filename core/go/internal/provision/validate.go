@@ -32,13 +32,17 @@ func Validate(req Request) ValidationResponse {
 		AuthMethod: string(req.Server.AuthMethod),
 		Warnings: []string{
 			"MVP validation currently uses insecure host key acceptance and should be hardened before production use.",
-			"Odin One keeps the current localhost-first data path while staging a future protocol pack for Russia-friendly TCP and UDP fallbacks.",
+			"Odin One keeps VLESS + REALITY and the VK relay ready on the same server so the desktop client can switch paths locally without redeploy.",
 		},
-		ProtocolPack: buildProtocolPack(req.Server.Transport, 0, 0),
+		ProtocolPack: buildProtocolPack(TransportXray, 0, req.Server.RealityPort, req.Server.VKTurnProxyPort),
 	}
 
 	if req.Server.Host == "" || req.Server.Username == "" || req.Secret == "" {
 		resp.Error = "host, username, and secret are required"
+		return resp
+	}
+	if err := validateDeploymentPortHints(req.Server); err != nil {
+		resp.Error = err.Error()
 		return resp
 	}
 

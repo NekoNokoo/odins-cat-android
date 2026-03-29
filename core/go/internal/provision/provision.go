@@ -23,13 +23,15 @@ const (
 )
 
 type Server struct {
-	Host       string         `json:"host"`
-	Port       int            `json:"port"`
-	Username   string         `json:"username"`
-	AuthMethod AuthMethod     `json:"authMethod"`
-	Transport  Transport      `json:"transport"`
-	Engine     CoreEngine     `json:"engine,omitempty"`
-	Protocol   TunnelProtocol `json:"protocol,omitempty"`
+	Host            string         `json:"host"`
+	Port            int            `json:"port"`
+	Username        string         `json:"username"`
+	AuthMethod      AuthMethod     `json:"authMethod"`
+	Transport       Transport      `json:"transport"`
+	Engine          CoreEngine     `json:"engine,omitempty"`
+	Protocol        TunnelProtocol `json:"protocol,omitempty"`
+	VKTurnProxyPort int            `json:"vkTurnProxyPort,omitempty"`
+	RealityPort     int            `json:"realityPort,omitempty"`
 }
 
 type Request struct {

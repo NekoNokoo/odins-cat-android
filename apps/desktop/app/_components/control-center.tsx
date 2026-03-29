@@ -29,13 +29,14 @@ const initialDraft: ServerDraft = {
 type WorkspaceTab = "server" | "access" | "tunnel";
 type AccessTab = "key" | "share" | "import";
 type MobileSheet = "server" | "protocol" | "logs" | "more" | null;
+type AccessMode = "vless-reality" | "vk-relay";
+type DeployPortMode = "auto" | "manual";
 type PendingAction =
   | "enableVpn"
   | "disableVpn"
   | "validate"
   | "deploy"
   | "startTunnel"
-  | "startReality"
   | "stopTunnel"
   | "refreshTunnel"
   | "runTest"
@@ -44,7 +45,7 @@ type PendingAction =
   | "disableSystemProxy"
   | null;
 
-const storageKey = "odin-one-vk-control-center-v3";
+const storageKey = "odin-one-vk-control-center-v4";
 
 const normalizeTransport = (transport: string | undefined): ServerDraft["transport"] =>
   transport === "xray" || transport === "vk-turn-proxy+xray" ? transport : initialDraft.transport;
@@ -54,6 +55,9 @@ const normalizeEngine = (engine: string | undefined): NonNullable<ServerDraft["e
 
 const normalizeProtocol = (protocol: string | undefined): NonNullable<ServerDraft["protocol"]> =>
   protocol === "vless-reality" || protocol === "direct-wireguard" ? protocol : "vless-reality";
+
+const normalizePortHint = (port: number | undefined): number | undefined =>
+  typeof port === "number" && Number.isInteger(port) && port > 0 && port <= 65535 ? port : undefined;
 
 const normalizeInviteProtocol = (protocol: InviteProfile["protocol"] | undefined): NonNullable<ServerDraft["protocol"]> =>
   protocol === "wireguard" ? "direct-wireguard" : "vless-reality";
@@ -72,6 +76,26 @@ const resolveDraftEngine = (
   return normalizeEngine(engine);
 };
 
+const draftAccessMode = (serverDraft: ServerDraft): AccessMode =>
+  serverDraft.transport === "vk-turn-proxy+xray" ? "vk-relay" : "vless-reality";
+
+const applyAccessModeToDraft = (serverDraft: ServerDraft, mode: AccessMode): ServerDraft => {
+  if (mode === "vk-relay") {
+    return {
+      ...serverDraft,
+      transport: "vk-turn-proxy+xray",
+      engine: "xray",
+      protocol: "direct-wireguard"
+    };
+  }
+  return {
+    ...serverDraft,
+    transport: "xray",
+    engine: "sing-box",
+    protocol: "vless-reality"
+  };
+};
+
 const ownerProfileHasRealityFallback = (profile: OwnerAccessProfile | null) =>
   Boolean(profile?.stagedFallbacks && Object.prototype.hasOwnProperty.call(profile.stagedFallbacks, "vlessReality"));
 
@@ -84,13 +108,38 @@ const ownerProfileSupportsDraft = (profile: OwnerAccessProfile | null, serverDra
   if (transport === "xray" && protocol === "vless-reality") {
     return ownerProfileHasRealityFallback(profile);
   }
+  if (transport === "vk-turn-proxy+xray") {
+    return Boolean(
+      profile.vkTurnProxyPort &&
+      profile.wireguard?.serverPublicKey &&
+      profile.wireguard?.clientPrivateKey &&
+      profile.wireguard?.address
+    );
+  }
   return Boolean(profile.wireguard?.serverPublicKey && profile.wireguard?.clientPrivateKey && profile.wireguard?.address);
+};
+
+const importedProfileSupportsDraft = (profile: InviteProfile | null, serverDraft: ServerDraft) => {
+  if (!profile?.localPath) {
+    return false;
+  }
+  const transport = normalizeTransport(serverDraft.transport);
+  const protocol = normalizeProtocol(serverDraft.protocol);
+  const importedProtocol = normalizeInviteProtocol(profile.protocol);
+  if (transport === "xray" && protocol === "vless-reality") {
+    return importedProtocol === "vless-reality";
+  }
+  if (transport === "vk-turn-proxy+xray") {
+    return profile.transport === "vk-turn-proxy+xray" && profile.vkTurnProxyPort > 0;
+  }
+  return importedProtocol === "direct-wireguard";
 };
 
 type PersistedState = {
   activeTab: WorkspaceTab;
   activeAccessTab: AccessTab;
   draft: ServerDraft;
+  deployPortMode: DeployPortMode;
   secret: string;
   vkLink: string;
   validation: ValidationResponse | null;
@@ -111,6 +160,7 @@ export function ControlCenter() {
   const [activeAccessTab, setActiveAccessTab] = useState<AccessTab>("key");
   const [activeSheet, setActiveSheet] = useState<MobileSheet>(null);
   const [draft, setDraft] = useState<ServerDraft>(initialDraft);
+  const [deployPortMode, setDeployPortMode] = useState<DeployPortMode>("auto");
   const [secret, setSecret] = useState("");
   const [validation, setValidation] = useState<ValidationResponse | null>(null);
   const [showValidationOverlay, setShowValidationOverlay] = useState(false);
@@ -130,24 +180,29 @@ export function ControlCenter() {
   const [error, setError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [isPending, startTransition] = useTransition();
+  const selectedAccessMode = draftAccessMode(draft);
   const curlCommand = localTunnel?.socksAddress
     ? `curl --socks5-hostname ${localTunnel.socksAddress} -I https://example.com`
     : "";
-  const requiresVKLink = draft.transport === "vk-turn-proxy+xray";
+  const requiresVKLink = selectedAccessMode === "vk-relay";
   const cooldownMinutes =
     localTunnel?.cooldownRemainingSeconds && localTunnel.cooldownRemainingSeconds > 0
       ? Math.ceil(localTunnel.cooldownRemainingSeconds / 60)
       : 0;
   const endpointPort = ownerProfile?.endpointPort ?? ownerProfile?.vkTurnProxyPort ?? 0;
-  const deploymentPort =
-    deployment?.transport === "vk-turn-proxy+xray" ? deployment.turnPort : deployment?.wireGuardPort;
+  const deploymentPortSummary = [
+    deployment?.turnPort ? `VK UDP ${deployment.turnPort}` : "",
+    deployment?.realityPort ? `REALITY TCP ${deployment.realityPort}` : ""
+  ]
+    .filter(Boolean)
+    .join(" / ");
   const systemProxyActive = systemProxy?.enabled ?? false;
   const vpnModeActive = localTunnel?.status === "running" && systemProxyActive;
   const hasMatchingOwnerProfile = Boolean(
     ownerProfileSupportsDraft(ownerProfile, draft) && (!draft.host || ownerProfile?.serverHost === draft.host)
   );
   const hasMatchingImportedProfile = Boolean(
-    importedProfile?.localPath && (!draft.host || importedProfile.serverHost === draft.host)
+    importedProfileSupportsDraft(importedProfile, draft) && (!draft.host || importedProfile?.serverHost === draft.host)
   );
   const hasLocalAccessProfile = Boolean(hasMatchingOwnerProfile || hasMatchingImportedProfile);
   const stageStatusLabels = {
@@ -165,7 +220,7 @@ export function ControlCenter() {
     const labelMap: Record<string, string> = {
       "ssh-check": "Проверка SSH",
       "runtime-prep": "Подготовка окружения",
-      "install-binaries": draft.transport === "xray" ? "Установка xray" : "Установка бинарников",
+      "install-binaries": "Установка бинарников",
       "configure-services": "Настройка сервисов",
       "service-start": "Запуск сервисов",
       "egress-check": "Проверка исходящего трафика"
@@ -173,15 +228,9 @@ export function ControlCenter() {
     const descriptionMap: Record<string, string> = {
       "ssh-check": "Проверяет учётные данные, удалённую ОС и текущее состояние сервера.",
       "runtime-prep": "Создаёт изолированные директории Odin One и проверяет сетевую готовность.",
-      "install-binaries": draft.transport === "xray"
-        ? "Устанавливает xray на хост без зависимости от VK."
-        : "Устанавливает xray и загружает бинарник vk-turn-proxy server на хост.",
-      "configure-services": draft.transport === "xray"
-        ? "Генерирует ключи, пишет direct-конфиг xray и ставит systemd unit-файлы."
-        : "Генерирует ключи, пишет конфиги xray и Odin One и ставит systemd unit-файлы.",
-      "service-start": draft.transport === "xray"
-        ? "Запускает xray на публичном UDP порту и проверяет его состояние."
-        : "Запускает xray и vk-turn-proxy на изолированных портах и проверяет их состояние.",
+      "install-binaries": "Устанавливает xray и загружает server-side vk-turn-proxy для общего dual-stack runtime.",
+      "configure-services": "Генерирует ключи, пишет конфиги xray и ставит unit-файлы для REALITY и VK relay.",
+      "service-start": "Запускает xray и vk-turn-proxy на одном сервере и проверяет оба входа.",
       "egress-check": "Проверяет DNS, HTTP и HTTPS egress на сервере после запуска сервисов."
     };
 
@@ -250,7 +299,8 @@ export function ControlCenter() {
       ? t("disableVpn")
       : t("enableVpn");
   const currentHost = localTunnel?.serverHost || draft.host || importedProfile?.serverHost || "—";
-  const currentTransport = draft.transport === "vk-turn-proxy+xray" ? t("transportVK") : t("transportDirect");
+  const currentTransport =
+    (localTunnel?.transport ?? draft.transport) === "vk-turn-proxy+xray" ? t("runtimeModeVk") : t("runtimeModeReality");
   const currentEngine = localTunnel?.engine ?? deployment?.engine ?? draft.engine ?? "xray";
   const currentProtocol = localTunnel?.protocol ?? deployment?.protocol ?? draft.protocol ?? "vless-reality";
   const deploymentHealthLabel = deployment?.healthChecks?.length
@@ -275,7 +325,15 @@ export function ControlCenter() {
       ? t("profileCacheReady")
       : t("profileCacheMissing")
     : t("profileCacheUnknown");
-  const deployModeLabel = requiresVKLink ? t("deployModeVk") : t("deployModeDirect");
+  const manualPortConfigError =
+    deployPortMode !== "manual"
+      ? null
+      : !draft.vkTurnProxyPort || !draft.realityPort
+        ? t("manualPortsRequired")
+        : draft.vkTurnProxyPort === draft.realityPort
+          ? t("manualPortsDistinct")
+          : null;
+  const deployModeLabel = `${t("deployModeDual")} / ${deployPortMode === "manual" ? t("portSetupManual") : t("portSetupAuto")}`;
   const safetyPostureLabel = systemProxyActive ? t("safetySystemProxyOn") : t("safetyLocalhostOnly");
   const runtimeLogTail = localTunnel?.logTail ?? [];
   const operatorSummary = [
@@ -340,8 +398,17 @@ export function ControlCenter() {
           authMethod: parsed.draft.authMethod ?? initialDraft.authMethod,
           transport: normalizedTransportValue,
           engine: resolveDraftEngine(normalizedTransportValue, normalizedDraftProtocol, parsed.draft.engine),
-          protocol: normalizedDraftProtocol
+          protocol: normalizedDraftProtocol,
+          vkTurnProxyPort: normalizePortHint(parsed.draft.vkTurnProxyPort),
+          realityPort: normalizePortHint(parsed.draft.realityPort)
         });
+        setDeployPortMode(
+          parsed.deployPortMode === "manual" ||
+          normalizePortHint(parsed.draft.vkTurnProxyPort) ||
+          normalizePortHint(parsed.draft.realityPort)
+            ? "manual"
+            : "auto"
+        );
         if (parsed.draft.host) {
           void fetchOwnerProfile(parsed.draft.host);
           void fetchImportedProfile(parsed.draft.host);
@@ -377,13 +444,14 @@ export function ControlCenter() {
       activeTab,
       activeAccessTab,
       draft,
+      deployPortMode,
       secret,
       vkLink,
       validation,
       importedProfile
     };
     window.localStorage.setItem(storageKey, JSON.stringify(snapshot));
-  }, [activeAccessTab, activeTab, draft, importedProfile, secret, validation, vkLink]);
+  }, [activeAccessTab, activeTab, deployPortMode, draft, importedProfile, secret, validation, vkLink]);
 
   const handleValidate = () => {
     setError(null);
@@ -790,52 +858,6 @@ export function ControlCenter() {
     });
   };
 
-  const handleStartRealityTunnel = () => {
-    setError(null);
-    setPendingAction("startReality");
-    startTransition(async () => {
-      try {
-        const realityDraft: ServerDraft = {
-          ...draft,
-          transport: "xray",
-          engine: "sing-box",
-          protocol: "vless-reality"
-        };
-        setDraft(realityDraft);
-        const { startUrl, serverDraft, usingImportedProfile } = buildTunnelStartRequest(realityDraft);
-
-        const res = await fetch(startUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            server: serverDraft,
-            secret: usingImportedProfile ? "" : secret,
-            vkLink: ""
-          })
-        });
-        const data = (await res.json()) as LocalTunnelState;
-        setLocalTunnel(data);
-        void fetchSystemProxyStatus();
-        if (!res.ok) {
-          setError(data.error ?? t("tunnelStartFailed"));
-          return;
-        }
-        const tunnelData = await waitForRunningTunnel();
-        if (tunnelData?.status === "running" && tunnelData.socksAddress) {
-          const testedTunnel = await prepareTunnelForSystemProxy();
-          await enableSystemProxyForTunnel(testedTunnel.socksAddress);
-        }
-      } catch (requestError) {
-        const message = requestError instanceof Error ? requestError.message : t("unknownError");
-        setError(message);
-      } finally {
-        setPendingAction(null);
-      }
-    });
-  };
-
   const handleRefreshTunnelStatus = () => {
     setError(null);
     setPendingAction("refreshTunnel");
@@ -1083,6 +1105,7 @@ export function ControlCenter() {
     setActiveAccessTab("key");
     setActiveSheet(null);
     setDraft(initialDraft);
+    setDeployPortMode("auto");
     setSecret("");
     setValidation(null);
     setShowValidationOverlay(false);
@@ -1138,7 +1161,7 @@ export function ControlCenter() {
                 {deployment ? (
                   <p className="status-banner">
                     {t("deploymentPrefix")} {deployment.deploymentId} / {deploymentStatusLabel}
-                    {deploymentPort ? ` / UDP ${deploymentPort}` : ""}
+                    {deploymentPortSummary ? ` / ${deploymentPortSummary}` : ""}
                   </p>
                 ) : null}
               </div>
@@ -1332,9 +1355,14 @@ export function ControlCenter() {
             </div>
 
             {successNotice ? <p className="status-banner status-success">{successNotice}</p> : null}
+            {manualPortConfigError ? <p className="status-banner status-error">{manualPortConfigError}</p> : null}
 
             <div className="sheet-actions">
-              <button className="primary" onClick={handleDeploy} disabled={isPending || !draft.host || !secret.trim()}>
+              <button
+                className="primary"
+                onClick={handleDeploy}
+                disabled={isPending || !draft.host || !secret.trim() || Boolean(manualPortConfigError)}
+              >
                 {t("startDeploy")}
               </button>
               <button className="ghost" onClick={handleResetState} disabled={isPending}>
@@ -1361,82 +1389,113 @@ export function ControlCenter() {
 
             <div className="phone-facts">
               <div className="phone-fact">
-                <span>{t("transport")}</span>
+                <span>{t("runtimeMode")}</span>
                 <strong>{currentTransport}</strong>
               </div>
               <div className="phone-fact">
                 <span>{t("activeProtocol")}</span>
                 <strong>{currentProtocol === "vless-reality" ? t("protocolReality") : t("protocolWireGuard")}</strong>
               </div>
+              <div className="phone-fact">
+                <span>{t("portSetup")}</span>
+                <strong>{deployPortMode === "manual" ? t("portSetupManual") : t("portSetupAuto")}</strong>
+              </div>
             </div>
 
             <div className="form-grid">
               <label className="input-field input-span">
-                <span>{t("transportStack")}</span>
-                <select
-                  value={draft.transport}
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      transport: event.target.value as ServerDraft["transport"],
-                      protocol: event.target.value === "xray" ? current.protocol ?? "vless-reality" : "direct-wireguard",
-                      engine: resolveDraftEngine(
-                        event.target.value as ServerDraft["transport"],
-                        event.target.value === "xray" ? current.protocol ?? "vless-reality" : "direct-wireguard",
-                        current.engine
-                      )
-                    }))
-                  }
-                >
-                  <option value="vk-turn-proxy+xray">{t("transportVK")}</option>
-                  <option value="xray">{t("transportDirect")}</option>
-                </select>
+                <div className="input-field__head">
+                  <span>{t("runtimeMode")}</span>
+                  <div className="lang-toggle" aria-label={t("runtimeMode")}>
+                    <button
+                      className={selectedAccessMode === "vless-reality" ? "lang-button is-active" : "lang-button"}
+                      type="button"
+                      onClick={() => setDraft((current) => applyAccessModeToDraft(current, "vless-reality"))}
+                    >
+                      {t("runtimeModeReality")}
+                    </button>
+                    <button
+                      className={selectedAccessMode === "vk-relay" ? "lang-button is-active" : "lang-button"}
+                      type="button"
+                      onClick={() => setDraft((current) => applyAccessModeToDraft(current, "vk-relay"))}
+                    >
+                      {t("runtimeModeVk")}
+                    </button>
+                  </div>
+                </div>
+                <p className="compact-note">
+                  {selectedAccessMode === "vk-relay" ? t("runtimeModeVkHint") : t("runtimeModeRealityHint")}
+                </p>
               </label>
 
-              {!requiresVKLink ? (
-                <label className="input-field">
-                  <span>{t("protocolMode")}</span>
-                  <select
-                    value={draft.protocol ?? "vless-reality"}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        protocol: event.target.value as NonNullable<ServerDraft["protocol"]>,
-                        engine: resolveDraftEngine(current.transport, event.target.value as ServerDraft["protocol"], current.engine)
-                      }))
-                    }
-                  >
-                    <option value="direct-wireguard">{t("protocolWireGuard")}</option>
-                    <option value="vless-reality">{t("protocolReality")}</option>
-                  </select>
-                </label>
-              ) : null}
+              <label className="input-field input-span">
+                <div className="input-field__head">
+                  <span>{t("portSetup")}</span>
+                  <div className="lang-toggle" aria-label={t("portSetup")}>
+                    <button
+                      className={deployPortMode === "auto" ? "lang-button is-active" : "lang-button"}
+                      type="button"
+                      onClick={() => {
+                        setDeployPortMode("auto");
+                        setDraft((current) => ({
+                          ...current,
+                          vkTurnProxyPort: undefined,
+                          realityPort: undefined
+                        }));
+                      }}
+                    >
+                      {t("portSetupAuto")}
+                    </button>
+                    <button
+                      className={deployPortMode === "manual" ? "lang-button is-active" : "lang-button"}
+                      type="button"
+                      onClick={() => setDeployPortMode("manual")}
+                    >
+                      {t("portSetupManual")}
+                    </button>
+                  </div>
+                </div>
+                <p className="compact-note">
+                  {deployPortMode === "manual" ? t("portSetupManualHint") : t("portSetupAutoHint")}
+                </p>
+              </label>
 
-              {!requiresVKLink ? (
-                <label className="input-field">
-                  <span>{t("engineStack")}</span>
-                  <select
-                    value={resolveDraftEngine(draft.transport, draft.protocol, draft.engine)}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        engine: resolveDraftEngine(current.transport, current.protocol, event.target.value)
-                      }))
-                    }
-                    disabled={draft.protocol === "vless-reality"}
-                  >
-                    {draft.protocol === "vless-reality" ? (
-                      <option value="sing-box">{t("engineSingBox")}</option>
-                    ) : (
-                      <>
-                        <option value="xray">{t("engineXray")}</option>
-                        <option value="sing-box">{t("engineSingBox")}</option>
-                      </>
-                    )}
-                  </select>
-                </label>
+              {deployPortMode === "manual" ? (
+                <>
+                  <label className="input-field">
+                    <span>{t("vkRelayPort")}</span>
+                    <input
+                      value={draft.vkTurnProxyPort ?? ""}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          vkTurnProxyPort: normalizePortHint(Number.parseInt(event.target.value, 10))
+                        }))
+                      }
+                      placeholder="56080"
+                      inputMode="numeric"
+                    />
+                  </label>
+
+                  <label className="input-field">
+                    <span>{t("realityPort")}</span>
+                    <input
+                      value={draft.realityPort ?? ""}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          realityPort: normalizePortHint(Number.parseInt(event.target.value, 10))
+                        }))
+                      }
+                      placeholder="52443"
+                      inputMode="numeric"
+                    />
+                  </label>
+                </>
               ) : null}
             </div>
+
+            {manualPortConfigError ? <p className="status-banner status-error">{manualPortConfigError}</p> : null}
 
             <div className="sheet-actions">
               <button
@@ -1447,16 +1506,6 @@ export function ControlCenter() {
               >
                 {isBusy("startTunnel") ? t("startingTunnel") : t("startTunnel")}
               </button>
-              {!requiresVKLink ? (
-                <button
-                  className="ghost"
-                  type="button"
-                  onClick={handleStartRealityTunnel}
-                  disabled={isPending || !draft.host || !secret.trim()}
-                >
-                  {isBusy("startReality") ? t("startingTunnel") : t("startRealityTunnel")}
-                </button>
-              ) : null}
               <button className="ghost" type="button" onClick={handleStopTunnel} disabled={isPending}>
                 {isBusy("stopTunnel") ? t("stoppingTunnel") : t("stopTunnel")}
               </button>
