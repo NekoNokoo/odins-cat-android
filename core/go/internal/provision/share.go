@@ -586,7 +586,7 @@ func readInviteRealityFallback(invite inviteProfile) (realityFallback, error) {
 }
 
 func readRemoteGuestProfiles(client *ssh.Client) ([]inviteProfile, error) {
-	output, err := runRemote(client, fmt.Sprintf("find %s -maxdepth 1 -type f -name '*.json' | sort", quoteShell(whitelistGuestProfilesDir)))
+	output, err := runRemoteReadOnly(client, fmt.Sprintf("find %s -maxdepth 1 -type f -name '*.json' | sort", quoteShell(whitelistGuestProfilesDir)))
 	if err != nil {
 		if strings.Contains(err.Error(), "No such file") {
 			return nil, nil
@@ -600,7 +600,7 @@ func readRemoteGuestProfiles(client *ssh.Client) ([]inviteProfile, error) {
 	paths := strings.Split(strings.TrimSpace(output), "\n")
 	guestProfiles := make([]inviteProfile, 0, len(paths))
 	for _, path := range paths {
-		body, err := runRemote(client, "cat "+quoteShell(strings.TrimSpace(path)))
+		body, err := runRemoteReadOnly(client, "cat "+quoteShell(strings.TrimSpace(path)))
 		if err != nil {
 			return nil, err
 		}
@@ -617,7 +617,7 @@ func loadRemoteAccessState(client *ssh.Client) (inviteProfile, string, remoteXra
 	var owner inviteProfile
 	var xrayState remoteXrayState
 
-	ownerText, err := runRemote(client, "cat "+quoteShell(ownerProfileRemotePath))
+	ownerText, err := runRemoteReadOnly(client, "cat "+quoteShell(ownerProfileRemotePath))
 	if err != nil {
 		return owner, "", xrayState, err
 	}
@@ -636,7 +636,7 @@ func loadRemoteAccessState(client *ssh.Client) (inviteProfile, string, remoteXra
 		owner.Protocol = normalizedInviteProtocol(owner)
 	}
 
-	xrayText, err := runRemote(client, "cat "+quoteShell(whitelistXrayConfigPath))
+	xrayText, err := runRemoteReadOnly(client, "cat "+quoteShell(whitelistXrayConfigPath))
 	if err != nil {
 		return owner, ownerText, xrayState, err
 	}

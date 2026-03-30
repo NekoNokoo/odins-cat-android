@@ -12,9 +12,8 @@ import type {
   ValidationResponse
 } from "@whitelist/contracts";
 import { StageList } from "@whitelist/ui/StageList";
+import { coreApi, type CoreHealthState } from "../_core/core-api";
 import { useI18n } from "./i18n";
-
-const apiBaseUrl = process.env.NEXT_PUBLIC_CORE_API_URL ?? "http://127.0.0.1:18088";
 
 const initialDraft: ServerDraft = {
   host: "",
@@ -58,6 +57,17 @@ const normalizeProtocol = (protocol: string | undefined): NonNullable<ServerDraf
 
 const normalizePortHint = (port: number | undefined): number | undefined =>
   typeof port === "number" && Number.isInteger(port) && port > 0 && port <= 65535 ? port : undefined;
+
+const normalizeHostValue = (host: string | null | undefined) => host?.trim().toLowerCase() ?? "";
+
+const hostsMatch = (left: string | null | undefined, right: string | null | undefined) => {
+  const normalizedLeft = normalizeHostValue(left);
+  const normalizedRight = normalizeHostValue(right);
+  if (!normalizedLeft || !normalizedRight) {
+    return true;
+  }
+  return normalizedLeft === normalizedRight;
+};
 
 const normalizeInviteProtocol = (protocol: InviteProfile["protocol"] | undefined): NonNullable<ServerDraft["protocol"]> =>
   protocol === "wireguard" ? "direct-wireguard" : "vless-reality";
@@ -139,6 +149,9 @@ const importedProfileSupportsDraft = (profile: InviteProfile | null, serverDraft
   return importedProfileHasVKRelay(profile);
 };
 
+const importedProfileMatchesHost = (profile: InviteProfile | null, host: string | null | undefined) =>
+  Boolean(profile?.localPath && hostsMatch(host, profile?.serverHost));
+
 type PersistedState = {
   activeTab: WorkspaceTab;
   activeAccessTab: AccessTab;
@@ -148,11 +161,6 @@ type PersistedState = {
   vkLink: string;
   validation: ValidationResponse | null;
   importedProfile?: InviteProfile | null;
-};
-
-type CoreHealthState = {
-  service: string;
-  status: string;
 };
 
 const formatProtocolEntry = (entry: NonNullable<OwnerAccessProfile["protocolPack"]>[number]) =>
@@ -184,11 +192,16 @@ export function ControlCenter() {
   const [error, setError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [isPending, startTransition] = useTransition();
+  const [androidVpnVisualOverride, setAndroidVpnVisualOverride] = useState(false);
+  const isAndroidClient =
+    coreHealth?.service === "odin-one-mobile-bridge" ||
+    (typeof window !== "undefined" && /Android/i.test(window.navigator.userAgent));
   const selectedAccessMode = draftAccessMode(draft);
   const curlCommand = localTunnel?.socksAddress
     ? `curl --socks5-hostname ${localTunnel.socksAddress} -I https://example.com`
     : "";
   const requiresVKLink = selectedAccessMode === "vk-relay";
+  const resolvedDraftHost = draft.host.trim() || importedProfile?.serverHost?.trim() || ownerProfile?.serverHost?.trim() || "";
   const cooldownMinutes =
     localTunnel?.cooldownRemainingSeconds && localTunnel.cooldownRemainingSeconds > 0
       ? Math.ceil(localTunnel.cooldownRemainingSeconds / 60)
@@ -201,14 +214,26 @@ export function ControlCenter() {
     .filter(Boolean)
     .join(" / ");
   const systemProxyActive = systemProxy?.enabled ?? false;
-  const vpnModeActive = localTunnel?.status === "running" && systemProxyActive;
+  const isAndroidVpnRuntime = systemProxy?.serviceName === "Android VpnService";
+  const androidInterfaceEstablished =
+    isAndroidClient &&
+    Boolean(
+      localTunnel &&
+        localTunnel.status !== "idle" &&
+        localTunnel.status !== "stopped" &&
+        localTunnel.status !== "failed" &&
+        localTunnel.logTail?.some((line) => line.includes("Android VpnService established the system VPN interface."))
+    );
+  const runtimeTunnelActive = localTunnel?.status === "running" || androidInterfaceEstablished;
+  const vpnModeActive = runtimeTunnelActive && (isAndroidClient || isAndroidVpnRuntime || systemProxyActive);
   const hasMatchingOwnerProfile = Boolean(
-    ownerProfileSupportsDraft(ownerProfile, draft) && (!draft.host || ownerProfile?.serverHost === draft.host)
+    ownerProfileSupportsDraft(ownerProfile, draft) && hostsMatch(draft.host, ownerProfile?.serverHost)
   );
   const hasMatchingImportedProfile = Boolean(
-    importedProfileSupportsDraft(importedProfile, draft) && (!draft.host || importedProfile?.serverHost === draft.host)
+    importedProfileSupportsDraft(importedProfile, draft) && hostsMatch(draft.host, importedProfile?.serverHost)
   );
-  const hasLocalAccessProfile = Boolean(hasMatchingOwnerProfile || hasMatchingImportedProfile);
+  const hasImportedProfileForHost = importedProfileMatchesHost(importedProfile, draft.host || resolvedDraftHost);
+  const hasLocalAccessProfile = Boolean(hasMatchingOwnerProfile || hasMatchingImportedProfile || hasImportedProfileForHost);
   const stageStatusLabels = {
     queued: t("stageQueued"),
     current: t("stageCurrent"),
@@ -295,13 +320,15 @@ export function ControlCenter() {
     : "";
   const isBusy = (action: Exclude<PendingAction, null>) => pendingAction === action;
   const vpnButtonBusy = isBusy("enableVpn") || isBusy("disableVpn");
-  const vpnButtonLabel = vpnButtonBusy
-    ? isBusy("enableVpn")
-      ? t("enablingVpn")
-      : t("disablingVpn")
-    : vpnModeActive
+  const vpnActionActive = runtimeTunnelActive || vpnModeActive || (isAndroidClient && androidVpnVisualOverride);
+  const vpnVisualActive = vpnActionActive;
+  const vpnButtonLabel = isBusy("disableVpn")
+    ? t("disablingVpn")
+    : vpnActionActive
       ? t("disableVpn")
-      : t("enableVpn");
+      : isBusy("enableVpn") && !runtimeTunnelActive
+        ? t("enablingVpn")
+        : t("enableVpn");
   const currentHost = localTunnel?.serverHost || draft.host || importedProfile?.serverHost || "—";
   const currentTransport =
     (localTunnel?.transport ?? draft.transport) === "vk-turn-proxy+xray" ? t("runtimeModeVk") : t("runtimeModeReality");
@@ -321,8 +348,8 @@ export function ControlCenter() {
           ? t("testing")
           : t("tunnelStatusIdle")
     : t("tunnelStatusIdle");
-  const primaryStatusBadge = vpnModeActive ? t("ready") : tunnelStatusLabel || t("tunnelStatusIdle");
-  const primaryStatusText = vpnModeActive ? t("vpnEnabled") : t("vpnDisabled");
+  const primaryStatusBadge = vpnVisualActive ? t("ready") : tunnelStatusLabel || t("tunnelStatusIdle");
+  const primaryStatusText = vpnVisualActive ? t("vpnEnabled") : t("vpnDisabled");
   const coreRuntimeLabel = coreHealth?.status === "ok" ? t("runtimeHealthy") : t("runtimeUnavailable");
   const profileCacheLabel = draft.host
     ? ownerProfile?.exists
@@ -346,9 +373,9 @@ export function ControlCenter() {
     localTunnel?.status === "running" ? tunnelStatusLabel : primaryStatusBadge,
     deploymentHealthLabel
   ].join(" / ");
-  const recoveryHint = !draft.host || (!secret.trim() && !hasLocalAccessProfile)
+  const recoveryHint = !resolvedDraftHost || (!secret.trim() && !hasLocalAccessProfile)
     ? t("recoveryHintValidate")
-    : requiresVKLink && !vkLink
+    : requiresVKLink && !vkLink.trim()
       ? t("recoveryHintVkLink")
       : cooldownMinutes > 0
         ? t("recoveryHintCooldown")
@@ -440,6 +467,30 @@ export function ControlCenter() {
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined" || !isAndroidClient) {
+      return;
+    }
+    if (localTunnel?.status !== "running" && localTunnel?.status !== "starting") {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void pollLocalTunnel(true);
+    }, 1500);
+
+    return () => window.clearInterval(intervalId);
+  }, [isAndroidClient, localTunnel?.status]);
+
+  useEffect(() => {
+    if (!isAndroidClient) {
+      return;
+    }
+    if (!localTunnel || localTunnel.status === "idle" || localTunnel.status === "stopped" || localTunnel.status === "failed") {
+      setAndroidVpnVisualOverride(false);
+    }
+  }, [isAndroidClient, localTunnel]);
+
+  useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
@@ -461,33 +512,19 @@ export function ControlCenter() {
     setError(null);
     startTransition(async () => {
       try {
-        const validateRes = await fetch(`${apiBaseUrl}/api/provision/validate`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            server: draft,
-            secret
-          })
+        const validateRes = await coreApi.validateProvision({
+          server: draft,
+          secret
         });
-
-        const validateData = (await validateRes.json()) as ValidationResponse;
+        const validateData = validateRes.data;
         setValidation(validateData);
         setShowValidationOverlay(true);
 
-        const planRes = await fetch(`${apiBaseUrl}/api/provision/plan`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            server: draft,
-            secret
-          })
+        const planRes = await coreApi.getProvisionPlan({
+          server: draft,
+          secret
         });
-
-        const planData = (await planRes.json()) as { steps: DeployStage[] };
+        const planData = planRes.data;
         setPlan(planData.steps ?? []);
 
         if (!validateRes.ok && validateData.error) {
@@ -505,18 +542,11 @@ export function ControlCenter() {
     setSuccessNotice(null);
     startTransition(async () => {
       try {
-        const deployRes = await fetch(`${apiBaseUrl}/api/provision/deploy`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            server: draft,
-            secret
-          })
+        const deployRes = await coreApi.startDeployment({
+          server: draft,
+          secret
         });
-
-        const deployData = (await deployRes.json()) as DeploymentState;
+        const deployData = deployRes.data;
         setDeployment(deployData);
         setPlan(deployData.steps);
         setShowDeploymentOverlay(true);
@@ -527,8 +557,8 @@ export function ControlCenter() {
         }
 
         const timer = window.setInterval(async () => {
-          const statusRes = await fetch(`${apiBaseUrl}/api/provision/deploy/${deployData.deploymentId}`);
-          const statusData = (await statusRes.json()) as DeploymentState;
+          const statusRes = await coreApi.getDeployment(deployData.deploymentId);
+          const statusData = statusRes.data;
           setDeployment(statusData);
           setPlan(statusData.steps);
           if (statusData.status === "done" || statusData.status === "failed") {
@@ -551,8 +581,8 @@ export function ControlCenter() {
 
   const fetchCoreHealth = async () => {
     try {
-      const res = await fetch(`${apiBaseUrl}/healthz`);
-      const data = (await res.json()) as CoreHealthState;
+      const res = await coreApi.getHealth();
+      const data = res.data;
       setCoreHealth(data);
       return data;
     } catch {
@@ -565,8 +595,8 @@ export function ControlCenter() {
     if (!host) {
       return;
     }
-    const res = await fetch(`${apiBaseUrl}/api/profile/owner?host=${encodeURIComponent(host)}`);
-    const data = (await res.json()) as OwnerAccessProfile;
+    const res = await coreApi.getOwnerProfile(host);
+    const data = res.data;
     setOwnerProfile(data);
     return data;
   };
@@ -575,8 +605,8 @@ export function ControlCenter() {
     if (!host) {
       return null;
     }
-    const res = await fetch(`${apiBaseUrl}/api/profile/imported?host=${encodeURIComponent(host)}`);
-    const data = (await res.json()) as InviteProfile;
+    const res = await coreApi.getImportedProfile(host);
+    const data = res.data;
     if (res.ok && data.localPath) {
       setImportedProfile(data);
       return data;
@@ -600,22 +630,30 @@ export function ControlCenter() {
   };
 
   const buildTunnelStartRequest = (baseDraft: ServerDraft = draft) => {
-    const usingImportedProfile = Boolean(hasMatchingImportedProfile && !secret.trim() && !hasMatchingOwnerProfile);
+    const normalizedHost = baseDraft.host.trim() || importedProfile?.serverHost?.trim() || ownerProfile?.serverHost?.trim() || "";
+    const ownerProfileAvailable = Boolean(
+      ownerProfileSupportsDraft(ownerProfile, baseDraft) && hostsMatch(normalizedHost, ownerProfile?.serverHost)
+    );
+    const importedProfileAvailable = Boolean(
+      importedProfileMatchesHost(importedProfile, normalizedHost)
+    );
+    const usingImportedProfile = Boolean(importedProfileAvailable && !secret.trim() && !ownerProfileAvailable);
     const serverDraft: ServerDraft =
       usingImportedProfile && importedProfile
         ? {
             ...baseDraft,
-            host: importedProfile.serverHost || baseDraft.host,
+            host: importedProfile.serverHost || normalizedHost || baseDraft.host,
             engine: resolveDraftEngine(baseDraft.transport, baseDraft.protocol, baseDraft.engine)
           }
-        : baseDraft;
-    const startUrl =
+        : {
+            ...baseDraft,
+            host: normalizedHost || baseDraft.host
+          };
+    const useRealityStartEndpoint =
       !usingImportedProfile &&
       serverDraft.transport === "xray" &&
-      (serverDraft.protocol ?? "vless-reality") === "vless-reality"
-        ? `${apiBaseUrl}/api/local-tunnel/start-reality`
-        : `${apiBaseUrl}/api/local-tunnel/start`;
-    return { startUrl, serverDraft, usingImportedProfile };
+      (serverDraft.protocol ?? "vless-reality") === "vless-reality";
+    return { serverDraft, useRealityStartEndpoint, usingImportedProfile };
   };
 
   const runningTunnelMatchesRequest = (tunnel: LocalTunnelState | null, serverDraft: ServerDraft) => {
@@ -635,11 +673,11 @@ export function ControlCenter() {
     const run = async () => {
       try {
         const [tunnelRes, proxyRes] = await Promise.all([
-          fetch(`${apiBaseUrl}/api/local-tunnel/status`),
-          fetch(`${apiBaseUrl}/api/system-proxy/status`)
+          coreApi.getLocalTunnelStatus(),
+          coreApi.getSystemProxyStatus()
         ]);
-        const tunnelData = (await tunnelRes.json()) as LocalTunnelState;
-        const proxyData = (await proxyRes.json()) as SystemProxyState;
+        const tunnelData = tunnelRes.data;
+        const proxyData = proxyRes.data;
         setLocalTunnel(tunnelData);
         setSystemProxy(proxyData);
         if (tunnelData.status === "starting") {
@@ -667,9 +705,12 @@ export function ControlCenter() {
 
   const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
-  const waitForRunningTunnel = async (attempts = 8, delayMs = 900) => {
+  const waitForRunningTunnel = async (attempts = 18, delayMs = 1000) => {
     let tunnelData = await pollLocalTunnel(true);
     if (tunnelData?.status === "running" && tunnelData.socksAddress) {
+      return tunnelData;
+    }
+    if (tunnelData && (tunnelData.status === "failed" || tunnelData.status === "stopped")) {
       return tunnelData;
     }
 
@@ -679,22 +720,34 @@ export function ControlCenter() {
       if (tunnelData?.status === "running" && tunnelData.socksAddress) {
         return tunnelData;
       }
+      if (tunnelData && (tunnelData.status === "failed" || tunnelData.status === "stopped")) {
+        return tunnelData;
+      }
+    }
+
+    return tunnelData;
+  };
+
+  const waitForStoppedTunnel = async (attempts = 20, delayMs = 300) => {
+    let tunnelData = await pollLocalTunnel(true);
+    if (!tunnelData || tunnelData.status === "stopped" || tunnelData.status === "idle" || tunnelData.status === "failed") {
+      return tunnelData;
+    }
+
+    for (let i = 0; i < attempts; i += 1) {
+      await sleep(delayMs);
+      tunnelData = await pollLocalTunnel(true);
+      if (!tunnelData || tunnelData.status === "stopped" || tunnelData.status === "idle" || tunnelData.status === "failed") {
+        return tunnelData;
+      }
     }
 
     return tunnelData;
   };
 
   const runCurrentTunnelTest = async () => {
-    const res = await fetch(`${apiBaseUrl}/api/local-tunnel/test`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        url: "https://example.com"
-      })
-    });
-    const data = (await res.json()) as LocalTunnelState;
+    const res = await coreApi.runLocalTunnelTest("https://example.com");
+    const data = res.data;
     setLocalTunnel(data);
     if (!res.ok) {
       setError(data.lastTest?.error ?? data.error ?? t("tunnelTestFailed"));
@@ -728,8 +781,8 @@ export function ControlCenter() {
   };
 
   const fetchSystemProxyStatus = async () => {
-    const res = await fetch(`${apiBaseUrl}/api/system-proxy/status`);
-    const data = (await res.json()) as SystemProxyState;
+    const res = await coreApi.getSystemProxyStatus();
+    const data = res.data;
     setSystemProxy(data);
     return data;
   };
@@ -755,16 +808,10 @@ export function ControlCenter() {
 
   const enableSystemProxyForTunnel = async (socksAddress?: string) => {
     try {
-      const res = await fetch(`${apiBaseUrl}/api/system-proxy/enable`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          socksAddress: socksAddress ?? ""
-        })
+      const res = await coreApi.enableSystemProxy({
+        socksAddress: socksAddress ?? ""
       });
-      const data = (await res.json()) as SystemProxyState;
+      const data = res.data;
       const verified = res.ok ? await verifySystemProxy(socksAddress) : data;
       setSystemProxy(verified);
       if (!res.ok) {
@@ -775,9 +822,7 @@ export function ControlCenter() {
       }
       return verified;
     } catch (error) {
-      await fetch(`${apiBaseUrl}/api/system-proxy/disable`, {
-        method: "POST"
-      });
+      await coreApi.disableSystemProxy();
       await verifySystemProxy();
       throw error;
     }
@@ -805,6 +850,8 @@ export function ControlCenter() {
       <button
         className={selectedAccessMode === "vless-reality" ? "lang-button is-active" : "lang-button"}
         type="button"
+        aria-pressed={selectedAccessMode === "vless-reality"}
+        title={t("runtimeModeRealityHint")}
         onClick={() => handleAccessModeChange("vless-reality")}
       >
         {t("runtimeModeReality")}
@@ -812,6 +859,8 @@ export function ControlCenter() {
       <button
         className={selectedAccessMode === "vk-relay" ? "lang-button is-active" : "lang-button"}
         type="button"
+        aria-pressed={selectedAccessMode === "vk-relay"}
+        title={t("runtimeModeVkHint")}
         onClick={() => handleAccessModeChange("vk-relay")}
       >
         {t("runtimeModeVk")}
@@ -824,19 +873,28 @@ export function ControlCenter() {
     setPendingAction("startTunnel");
     startTransition(async () => {
       try {
-        const { startUrl, serverDraft, usingImportedProfile } = buildTunnelStartRequest();
-        const res = await fetch(startUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
+        const { serverDraft, useRealityStartEndpoint, usingImportedProfile } = buildTunnelStartRequest();
+        if (
+          isAndroidClient &&
+          localTunnel &&
+          (localTunnel.status === "running" || localTunnel.status === "starting") &&
+          !runningTunnelMatchesRequest(localTunnel, serverDraft)
+        ) {
+          const stopRes = await coreApi.stopLocalTunnel();
+          setLocalTunnel(stopRes.data);
+          const stoppedTunnel = await waitForStoppedTunnel();
+          setLocalTunnel(stoppedTunnel ?? stopRes.data);
+          setAndroidVpnVisualOverride(false);
+        }
+        const res = await coreApi.startLocalTunnel(
+          {
             server: serverDraft,
             secret: usingImportedProfile ? "" : secret,
             vkLink
-          })
-        });
-        const data = (await res.json()) as LocalTunnelState;
+          },
+          useRealityStartEndpoint
+        );
+        const data = res.data;
         setLocalTunnel(data);
         void fetchSystemProxyStatus();
         if (!res.ok) {
@@ -845,9 +903,16 @@ export function ControlCenter() {
         }
         const tunnelData = await waitForRunningTunnel();
         if (tunnelData?.status === "running" && tunnelData.socksAddress) {
+          if (isAndroidClient) {
+            setAndroidVpnVisualOverride(true);
+            void fetchSystemProxyStatus();
+            return;
+          }
           const testedTunnel = await prepareTunnelForSystemProxy();
           await enableSystemProxyForTunnel(testedTunnel.socksAddress);
+          return;
         }
+        setError(tunnelData?.error ?? t("tunnelStartFailed"));
       } catch (requestError) {
         const message = requestError instanceof Error ? requestError.message : t("unknownError");
         setError(message);
@@ -861,11 +926,15 @@ export function ControlCenter() {
     setPendingAction("stopTunnel");
     startTransition(async () => {
       try {
-        const res = await fetch(`${apiBaseUrl}/api/local-tunnel/stop`, {
-          method: "POST"
-        });
-        const data = (await res.json()) as LocalTunnelState;
+        const res = await coreApi.stopLocalTunnel();
+        const data = res.data;
         setLocalTunnel(data);
+        if (isAndroidClient) {
+          const stoppedTunnel = await waitForStoppedTunnel();
+          setLocalTunnel(stoppedTunnel ?? data);
+          setAndroidVpnVisualOverride(false);
+          return;
+        }
         await verifySystemProxy();
       } finally {
         setPendingAction(null);
@@ -939,32 +1008,55 @@ export function ControlCenter() {
     setPendingAction("enableVpn");
     startTransition(async () => {
       try {
-        const { startUrl, serverDraft, usingImportedProfile } = buildTunnelStartRequest();
+        const { serverDraft, useRealityStartEndpoint, usingImportedProfile } = buildTunnelStartRequest();
         let tunnelData = localTunnel;
+        if (
+          isAndroidClient &&
+          tunnelData &&
+          (tunnelData.status === "running" || tunnelData.status === "starting") &&
+          !runningTunnelMatchesRequest(tunnelData, serverDraft)
+        ) {
+          const stopRes = await coreApi.stopLocalTunnel();
+          setLocalTunnel(stopRes.data);
+          tunnelData = await waitForStoppedTunnel();
+          setLocalTunnel(tunnelData ?? stopRes.data);
+          setAndroidVpnVisualOverride(false);
+        }
         if (!runningTunnelMatchesRequest(tunnelData, serverDraft)) {
-          const startRes = await fetch(startUrl, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
+          const startRes = await coreApi.startLocalTunnel(
+            {
               server: serverDraft,
               secret: usingImportedProfile ? "" : secret,
               vkLink
-            })
-          });
-          tunnelData = (await startRes.json()) as LocalTunnelState;
+            },
+            useRealityStartEndpoint
+          );
+          tunnelData = startRes.data;
           setLocalTunnel(tunnelData);
           if (!startRes.ok) {
             setError(tunnelData.error ?? t("tunnelStartFailed"));
             return;
           }
 
-          tunnelData = await waitForRunningTunnel(8, 900);
+          tunnelData = await waitForRunningTunnel(18, 1000);
         }
 
         if (!tunnelData || tunnelData.status !== "running" || !tunnelData.socksAddress) {
-          setError(t("tunnelStartFailed"));
+          if (isAndroidClient) {
+            setAndroidVpnVisualOverride(false);
+          }
+          setError(
+            tunnelData?.error ??
+              (tunnelData?.status === "starting"
+                ? "Android local tunnel is still starting. Check the runtime log and try again in a few seconds."
+                : t("tunnelStartFailed"))
+          );
+          return;
+        }
+
+        if (isAndroidClient) {
+          setAndroidVpnVisualOverride(true);
+          void fetchSystemProxyStatus();
           return;
         }
 
@@ -984,10 +1076,18 @@ export function ControlCenter() {
     setPendingAction("disableVpn");
     startTransition(async () => {
       try {
-        const proxyRes = await fetch(`${apiBaseUrl}/api/system-proxy/disable`, {
-          method: "POST"
-        });
-        const proxyData = (await proxyRes.json()) as SystemProxyState;
+        if (isAndroidClient) {
+          const stopRes = await coreApi.stopLocalTunnel();
+          const stopData = stopRes.data;
+          setLocalTunnel(stopData);
+          const stoppedTunnel = await waitForStoppedTunnel();
+          setLocalTunnel(stoppedTunnel ?? stopData);
+          setAndroidVpnVisualOverride(false);
+          return;
+        }
+
+        const proxyRes = await coreApi.disableSystemProxy();
+        const proxyData = proxyRes.data;
         const verifiedProxy = await verifySystemProxy();
         setSystemProxy(verifiedProxy);
         if (!proxyRes.ok) {
@@ -995,11 +1095,12 @@ export function ControlCenter() {
           return;
         }
 
-        const stopRes = await fetch(`${apiBaseUrl}/api/local-tunnel/stop`, {
-          method: "POST"
-        });
-        const stopData = (await stopRes.json()) as LocalTunnelState;
+        const stopRes = await coreApi.stopLocalTunnel();
+        const stopData = stopRes.data;
         setLocalTunnel(stopData);
+        if (isAndroidClient && (stopData.status === "stopped" || stopData.status === "idle" || stopData.status === "failed")) {
+          setAndroidVpnVisualOverride(false);
+        }
       } catch (requestError) {
         const message = requestError instanceof Error ? requestError.message : t("unknownError");
         setError(message);
@@ -1014,10 +1115,8 @@ export function ControlCenter() {
     setPendingAction("disableSystemProxy");
     startTransition(async () => {
       try {
-        const res = await fetch(`${apiBaseUrl}/api/system-proxy/disable`, {
-          method: "POST"
-        });
-        const data = (await res.json()) as SystemProxyState;
+        const res = await coreApi.disableSystemProxy();
+        const data = res.data;
         const verified = await verifySystemProxy();
         setSystemProxy(verified);
         if (!res.ok) {
@@ -1043,19 +1142,13 @@ export function ControlCenter() {
         if (draft.host) {
           await fetchOwnerProfile(draft.host);
         }
-        const res = await fetch(`${apiBaseUrl}/api/profile/guest`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            server: draft,
-            secret,
-            host: draft.host,
-            name: ownerProfile?.name ?? "Odin One Access Key"
-          })
+        const res = await coreApi.generateGuestProfile({
+          server: draft,
+          secret,
+          host: draft.host,
+          name: ownerProfile?.name ?? "Odin One Access Key"
         });
-        const data = (await res.json()) as InviteProfile;
+        const data = res.data;
         setGuestProfile(data);
         if (res.ok) {
           setSuccessNotice(t("deploySuccess"));
@@ -1074,16 +1167,10 @@ export function ControlCenter() {
     setError(null);
     startTransition(async () => {
       try {
-        const res = await fetch(`${apiBaseUrl}/api/profile/import`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            shareCode: importShareCode
-          })
+        const res = await coreApi.importProfile({
+          shareCode: importShareCode
         });
-        const data = (await res.json()) as InviteProfile;
+        const data = res.data;
         if (res.ok) {
           applyImportedProfile(data);
           setImportShareCode("");
@@ -1145,7 +1232,7 @@ export function ControlCenter() {
             <div className="home-stack__scroll">
               <div className="home-section home-section--hero">
                 <div className="phone-statusbar">
-                  <span className={`phone-pill ${vpnModeActive ? "phone-pill--ok" : ""}`}>{primaryStatusBadge}</span>
+                  <span className={`phone-pill ${vpnVisualActive ? "phone-pill--ok" : ""}`}>{primaryStatusBadge}</span>
                   {renderAccessModeToggle("home-mode-toggle")}
                 </div>
 
@@ -1156,15 +1243,16 @@ export function ControlCenter() {
                 </div>
 
                 <button
-                  className={`phone-connect ${vpnModeActive ? "phone-connect--active" : ""}`}
+                  className={`phone-connect ${vpnVisualActive ? "phone-connect--active" : ""}`}
                   type="button"
-                  onClick={vpnModeActive ? handleDisableVPN : handleEnableVPN}
+                  onClick={vpnActionActive ? handleDisableVPN : handleEnableVPN}
                   disabled={
-                    isPending ||
-                    (!vpnModeActive &&
-                      (!draft.host ||
+                    vpnActionActive
+                      ? isBusy("disableVpn")
+                      : isPending ||
+                        !resolvedDraftHost ||
                         (!secret.trim() && !hasLocalAccessProfile) ||
-                        (requiresVKLink && (!vkLink || cooldownMinutes > 0))))
+                        (requiresVKLink && (!vkLink.trim() || cooldownMinutes > 0))
                   }
                 >
                   <span>{vpnButtonLabel}</span>
@@ -1500,7 +1588,13 @@ export function ControlCenter() {
                 className="primary"
                 type="button"
                 onClick={handleStartTunnel}
-                disabled={isPending || !draft.host || !secret.trim() || (requiresVKLink && !vkLink) || (requiresVKLink && cooldownMinutes > 0)}
+                disabled={
+                  isPending ||
+                  !resolvedDraftHost ||
+                  (!secret.trim() && !hasLocalAccessProfile) ||
+                  (requiresVKLink && !vkLink.trim()) ||
+                  (requiresVKLink && cooldownMinutes > 0)
+                }
               >
                 {isBusy("startTunnel") ? t("startingTunnel") : t("startTunnel")}
               </button>

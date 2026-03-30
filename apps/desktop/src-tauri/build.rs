@@ -8,7 +8,12 @@ fn main() {
     println!("cargo:rerun-if-changed=../../../core/go/cmd/mvpd");
     println!("cargo:rerun-if-changed=../../../core/go/internal");
 
-    build_mvpd().expect("failed to build bundled mvpd");
+    if !matches!(
+        env::var("CARGO_CFG_TARGET_OS").ok().as_deref(),
+        Some("android") | Some("ios")
+    ) {
+        build_mvpd().expect("failed to build bundled mvpd");
+    }
     tauri_build::build()
 }
 

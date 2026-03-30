@@ -5,7 +5,7 @@ Minimal macOS-first MVP scaffold for the Odin One self-hosted VPN client that:
 - takes a user's server credentials
 - deploys VPN infrastructure remotely
 - prepares shareable client access
-- keeps architecture ready for future iOS and Android clients
+- keeps architecture ready for future additional clients
 
 ## Stack
 
@@ -19,7 +19,6 @@ Minimal macOS-first MVP scaffold for the Odin One self-hosted VPN client that:
 ```text
 apps/
   desktop/        Next.js macOS-first UI
-  mobile/         mobile architecture notes and future shell
 packages/
   contracts/      shared TypeScript contracts
   ui/             shared UI components
@@ -105,5 +104,4 @@ npm run desktop:tauri:build
 1. Persist the fetched owner profile locally after deploy so tunnel startup no longer depends on a fresh SSH handshake.
 2. Upgrade guest profile sharing from local export/import to true per-user remote profile issuance.
 3. Wrap the desktop UI in `Tauri` and prepare `.dmg` packaging.
-4. Add mobile shells reusing the same contracts and API model.
-5. Introduce a true system VPN mode only after the isolated proxy mode is fully stable.
+4. Introduce a true system VPN mode only after the isolated proxy mode is fully stable.

@@ -50,6 +50,36 @@ func runRemote(client *ssh.Client, cmd string) (string, error) {
 	return text, nil
 }
 
+func runRemoteReadOnly(client *ssh.Client, cmd string) (string, error) {
+	var lastErr error
+
+	for attempt := 0; attempt < 2; attempt++ {
+		output, err := runRemote(client, cmd)
+		if err == nil {
+			return output, nil
+		}
+		if !isTransientRemoteReadError(err) {
+			return "", err
+		}
+
+		lastErr = err
+		if attempt == 0 {
+			time.Sleep(150 * time.Millisecond)
+		}
+	}
+
+	return "", lastErr
+}
+
+func isTransientRemoteReadError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, `failed: eof`) || strings.Contains(message, `failed: unexpected eof`)
+}
+
 func uploadFile(client *ssh.Client, remotePath string, data []byte, mode string) error {
 	session, err := client.NewSession()
 	if err != nil {

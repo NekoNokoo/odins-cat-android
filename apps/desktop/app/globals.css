@@ -111,6 +111,8 @@ textarea {
   border: 1px solid var(--line);
   border-radius: 999px;
   background: #fff;
+  position: relative;
+  z-index: 1;
 }
 
 .lang-button {
@@ -124,6 +126,11 @@ textarea {
   font-family: var(--font-mono), monospace;
   font-size: 0.78rem;
   letter-spacing: 0.08em;
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .lang-button.is-active {
@@ -417,6 +424,8 @@ body > main.shell > section.workspace > .mobile-shell > .home-scroll {
   max-width: 100%;
   padding: 4px;
   box-shadow: 0 12px 24px rgba(17, 17, 17, 0.08);
+  position: relative;
+  z-index: 3;
 }
 
 .home-mode-toggle .lang-button {
@@ -516,6 +525,8 @@ body > main.shell > section.workspace > .mobile-shell > .home-scroll {
   font-size: clamp(2rem, 9vw, 2.8rem);
   font-weight: 700;
   letter-spacing: -0.06em;
+  position: relative;
+  z-index: 0;
   box-shadow:
     inset 0 18px 40px rgba(255, 255, 255, 0.08),
     0 24px 50px rgba(220, 183, 141, 0.28);

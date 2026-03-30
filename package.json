@@ -14,9 +14,7 @@
     "desktop:repeat:test": "npm run repeat:test -w @whitelist/desktop",
     "desktop:tauri:dev": "npm run tauri:dev -w @whitelist/desktop",
     "desktop:tauri:build": "npm run tauri:build -w @whitelist/desktop",
-    "mobile:dev": "npm run dev -w @whitelist/mobile",
-    "mobile:build": "npm run build -w @whitelist/mobile",
-    "mobile:tauri:android:init": "npm run tauri:android:init -w @whitelist/mobile",
-    "mobile:tauri:android:build": "npm run tauri:android:build -w @whitelist/mobile"
+    "android:tauri:dev": "npm run tauri:android:dev -w @whitelist/desktop",
+    "android:tauri:build": "npm run tauri:android:build -w @whitelist/desktop"
   }
 }
