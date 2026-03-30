@@ -56,7 +56,8 @@ const DEFAULT_REALITY_DEST: &str = "www.cloudflare.com:443";
 const XRAY_RELEASE_URL: &str =
     "https://github.com/XTLS/Xray-core/releases/download/v25.8.3/Xray-linux-64.zip";
 const SING_BOX_LINUX_RELEASE_URL: &str = "https://github.com/SagerNet/sing-box/releases/download/v1.12.22/sing-box-1.12.22-linux-amd64.tar.gz";
-const VK_TURN_PROXY_GO_INSTALL_TARGET: &str = "github.com/cacggghp/vk-turn-proxy/server@latest";
+const BUNDLED_VK_TURN_PROXY_SERVER_LINUX_AMD64: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/vk-turn-proxy-server-linux-amd64"));
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -2162,15 +2163,11 @@ async fn ensure_remote_vk_turn_proxy_binary(ssh: &mut MobileSshSession) -> Resul
         return Ok(());
     }
 
-    if ssh.run("command -v go").await.is_err() {
-        return Err("vk-turn-proxy server binary is missing on the server, and Android deploy cannot upload it yet. Install Go on the server so Odin One can build it remotely, or bootstrap the node once from desktop.".to_string());
-    }
-
-    ssh.run(&format!(
-        "tmp=$(mktemp -d) && export GOBIN=\"$tmp/bin\" && mkdir -p \"$GOBIN\" && GO111MODULE=on GOBIN=\"$GOBIN\" CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go install {} && install -m 0755 \"$GOBIN/server\" {} && rm -rf \"$tmp\"",
-        quote_shell(VK_TURN_PROXY_GO_INSTALL_TARGET),
-        quote_shell(WHITELIST_PROXY_BINARY_PATH),
-    ))
+    ssh.upload(
+        WHITELIST_PROXY_BINARY_PATH,
+        BUNDLED_VK_TURN_PROXY_SERVER_LINUX_AMD64,
+        "0755",
+    )
     .await?;
     ssh.run(&format!(
         "test -x {}",

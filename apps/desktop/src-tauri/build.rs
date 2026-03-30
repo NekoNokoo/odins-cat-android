@@ -7,6 +7,7 @@ use std::{
 fn main() {
     println!("cargo:rerun-if-changed=../../../core/go/cmd/mvpd");
     println!("cargo:rerun-if-changed=../../../core/go/internal");
+    println!("cargo:rerun-if-env-changed=GO_BINARY");
 
     if !matches!(
         env::var("CARGO_CFG_TARGET_OS").ok().as_deref(),
@@ -14,6 +15,7 @@ fn main() {
     ) {
         build_mvpd().expect("failed to build bundled mvpd");
     }
+    build_vk_turn_proxy_server_bundle().expect("failed to build bundled vk-turn-proxy server");
     tauri_build::build()
 }
 
@@ -49,6 +51,43 @@ fn build_mvpd() -> Result<(), String> {
     }
 
     ensure_executable(&output_path)?;
+
+    Ok(())
+}
+
+fn build_vk_turn_proxy_server_bundle() -> Result<(), String> {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").map_err(|err| err.to_string())?);
+    let output_path = out_dir.join("vk-turn-proxy-server-linux-amd64");
+    if output_path.exists() {
+        return Ok(());
+    }
+
+    let go_binary = resolve_go_binary();
+    let gopath_dir = out_dir.join("gopath-vk-turn-proxy-server");
+    fs::create_dir_all(&gopath_dir).map_err(|err| err.to_string())?;
+
+    let output = Command::new(&go_binary)
+        .arg("install")
+        .arg("github.com/cacggghp/vk-turn-proxy/server@latest")
+        .env("GOPATH", &gopath_dir)
+        .env("GOOS", "linux")
+        .env("GOARCH", "amd64")
+        .env("CGO_ENABLED", "0")
+        .output()
+        .map_err(|err| format!("spawn go install vk-turn-proxy server: {err}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "go install vk-turn-proxy server failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let installed_path = gopath_dir.join("bin").join("linux_amd64").join("server");
+    let data = fs::read(&installed_path)
+        .map_err(|err| format!("read built vk-turn-proxy server: {err}"))?;
+    fs::write(&output_path, data)
+        .map_err(|err| format!("cache bundled vk-turn-proxy server: {err}"))?;
 
     Ok(())
 }
