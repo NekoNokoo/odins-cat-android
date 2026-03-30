@@ -1,107 +1,147 @@
-# Odin One MVP
+# Odin One VK
 
-Minimal macOS-first MVP scaffold for the Odin One self-hosted VPN client that:
+`Odin One VK` is a self-hosted VPN client for macOS and Android that deploys and runs dual-mode access on your own server:
 
-- takes a user's server credentials
-- deploys VPN infrastructure remotely
-- prepares shareable client access
-- keeps architecture ready for future additional clients
+- direct `VLESS + REALITY`
+- `VK relay` via `vk-turn-proxy + xray`
+
+The current release line is `0.1.0`.
+
+## Current status
+
+- macOS desktop app is shipped as a `Tauri + Next.js` build
+- Android app is built from the same product shell and Android VPN runtime
+- one server can expose both `REALITY` and `VK relay` at the same time
+- users can switch between `VLESS + REALITY` and `VK relay` without redeploy
+- one invite/import key can grant access to both modes
+
+## What already works
+
+- SSH-based deploy to a fresh Linux VPS
+- remote install and configuration of:
+  - `xray`
+  - `sing-box`
+  - `vk-turn-proxy`
+  - `systemd` units
+- dual-stack server deploy:
+  - `REALITY` on its own TCP port
+  - `VK relay` on its own UDP port
+- owner profile, guest share, import, revoke flow
+- local runtime start/stop
+- quick connectivity test through the local tunnel
+- Android VPN runtime with:
+  - `VLESS + REALITY`
+  - `VK relay`
+  - local `SOCKS` endpoint
+  - APK and AAB builds
 
 ## Stack
 
-- `Next.js` for the desktop UI
-- `Tauri` planned as the desktop shell for `.dmg` packaging
-- `Go` for provisioning, SSH orchestration, and future shared core logic
-- `xray` plus `vk-turn-proxy` planned as the first transport stack
+- `Next.js` for the app UI
+- `Tauri 2` for desktop/mobile shell integration
+- `Go` for provisioning, SSH orchestration, profiles, sharing, and local runtime helpers
+- `Rust` for native Tauri bridge pieces
+- `xray`, `sing-box`, and `vk-turn-proxy` for transport/runtime
 
 ## Monorepo layout
 
 ```text
 apps/
-  desktop/        Next.js macOS-first UI
+  desktop/        Main product app (desktop shell + Android shell/runtime)
 packages/
-  contracts/      shared TypeScript contracts
-  ui/             shared UI components
+  contracts/      Shared TypeScript contracts
+  ui/             Shared UI and i18n
 core/
-  go/             Go provisioning core scaffold
+  go/             Provisioning core, profiles, invite flow, local tunnel runtime
+docs/
+  android-port-plan.md
 ```
 
-## MVP scope
+## Key product behavior
 
-The current MVP already includes:
+### Server
 
-- a minimal black-and-white macOS-first UI
-- real SSH validation from the Go core
-- real remote deployment of:
-  - `xray`
-  - `vk-turn-proxy`
-  - `systemd` units
-  - an owner profile in `/opt/whitelist/profiles/owner-profile.json`
-- automatic server-side UDP port selection during deploy
-- a local isolated tunnel mode for macOS tests through a localhost-only `SOCKS5` proxy
-- one-click tunnel testing through the local proxy without changing system routes
-- local guest share/import flow based on the cached owner profile, without SSH or live tunnel startup
-- server-side guest issue/list/revoke flow that rebuilds xray peers without touching macOS system routes
+- deploy from app credentials over SSH
+- auto or manual public port selection
+- dual-mode access on one server
+- no redeploy required for every runtime mode switch
 
-## Current MVP flow
+### Client
 
-1. User enters `host`, `port`, `username`, and password or SSH key.
-2. Desktop app asks the Go core to validate SSH access.
-3. Go core picks free UDP ports on the server and deploys the Odin One stack.
-4. App shows deployment progress and the allocated external UDP port.
-5. User pastes a fresh `VK call link`.
-6. App starts an isolated local tunnel for testing on the Mac.
-7. App runs a single outbound test request through the local SOCKS proxy.
+- owner mode
+- imported guest mode
+- `Generate connection key`
+- `Import key`
+- runtime mode toggle:
+  - `VLESS + REALITY`
+  - `VK relay`
 
-## Run requirements
+### VK path
 
-This workspace is currently using:
+- server-side relay via `whitelist-vk-turn-proxy.service`
+- client-side `vk-turn-proxy` bridge
+- Android runtime includes warmup handling and cached TURN credential reuse
+
+## Requirements
+
+Workspace versions used during development:
 
 - Node.js `22.22.2`
 - npm `10.9.7`
 - Go `1.26.1`
+- JDK `21`
 
-Then the intended commands will be:
+Typical server target:
+
+- Linux `x86_64`
+- `systemd`
+- SSH access with enough privileges to write to `/opt` and `/etc/systemd/system`
+
+## Development
+
+Install dependencies:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 npm install
+```
+
+Run the desktop web UI:
+
+```bash
 npm run dev
 ```
 
-For the Go stub:
+Run the Go backend:
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
 cd core/go
 go run ./cmd/mvpd
 ```
 
-Or use the combined helper:
-
-```bash
-zsh scripts/dev.sh
-```
-
-For the native macOS shell:
+Run the Tauri desktop shell:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 npm run desktop:tauri:dev
 ```
 
-The Tauri dev shell reuses an already running desktop frontend on `http://localhost:3000` and an existing Go core on `:8088` when present.
-
-And for a local desktop bundle build:
+Build the macOS app bundle:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 npm run desktop:tauri:build
 ```
 
-## Next implementation steps
+Build Android artifacts:
 
-1. Persist the fetched owner profile locally after deploy so tunnel startup no longer depends on a fresh SSH handshake.
-2. Upgrade guest profile sharing from local export/import to true per-user remote profile issuance.
-3. Wrap the desktop UI in `Tauri` and prepare `.dmg` packaging.
-4. Introduce a true system VPN mode only after the isolated proxy mode is fully stable.
+```bash
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+npm run android:tauri:build
+```
+
+## Notes
+
+- The desktop and Android products now live in one app workspace under `apps/desktop`.
+- The old legacy `apps/mobile` scaffold has been removed from active development.
+- Android runtime is already functional, but stabilization work is still ongoing around stop/switch lifecycle and `VK relay` parity.
