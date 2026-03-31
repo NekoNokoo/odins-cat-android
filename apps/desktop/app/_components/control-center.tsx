@@ -367,6 +367,42 @@ export function ControlCenter() {
   const deployModeLabel = `${t("deployModeDual")} / ${deployPortMode === "manual" ? t("portSetupManual") : t("portSetupAuto")}`;
   const safetyPostureLabel = systemProxyActive ? t("safetySystemProxyOn") : t("safetyLocalhostOnly");
   const runtimeLogTail = localTunnel?.logTail ?? [];
+  const runtimeStartSource = localTunnel?.startSource ?? t("diagnosticsEmpty");
+  const realityConfigMode = localTunnel?.configMode ?? t("diagnosticsEmpty");
+  const runtimeAlwaysOnState =
+    typeof localTunnel?.alwaysOnEnabled === "boolean"
+      ? localTunnel.alwaysOnEnabled
+        ? t("stateEnabled")
+        : t("stateDisabled")
+      : t("diagnosticsEmpty");
+  const runtimeLockdownState =
+    typeof localTunnel?.lockdownEnabled === "boolean"
+      ? localTunnel.lockdownEnabled
+        ? t("stateEnabled")
+        : t("stateDisabled")
+      : t("diagnosticsEmpty");
+  const runtimeResumeState =
+    typeof localTunnel?.resumeEligible === "boolean"
+      ? localTunnel.resumeEligible
+        ? t("stateEnabled")
+        : t("stateDisabled")
+      : t("diagnosticsEmpty");
+  const runtimeNetworkEvent = localTunnel?.lastNetworkEvent ?? t("diagnosticsEmpty");
+  const runtimeStartupDuration =
+    typeof localTunnel?.lastStartupDurationMs === "number"
+      ? `${localTunnel.lastStartupDurationMs} ms`
+      : t("diagnosticsEmpty");
+  const runtimeStartupStage = localTunnel?.lastStartupStage ?? t("diagnosticsEmpty");
+  const runtimeFailureStage = localTunnel?.lastFailureStage ?? t("diagnosticsEmpty");
+  const runtimeFailureCode = localTunnel?.lastFailureCode ?? t("diagnosticsEmpty");
+  const runtimeRecoveryCounters = localTunnel
+    ? `restore=${localTunnel.restoreCount ?? 0} / reload=${localTunnel.reloadCount ?? 0} / network=${localTunnel.networkChangeCount ?? 0}`
+    : t("diagnosticsEmpty");
+  const runtimeRecoveryAction = localTunnel?.lastRecoveryAction ?? t("diagnosticsEmpty");
+  const realityFeatureSummary =
+    localTunnel?.activeFeatures && localTunnel.activeFeatures.length > 0
+      ? localTunnel.activeFeatures.join(" / ")
+      : t("diagnosticsEmpty");
   const operatorSummary = [
     coreHealth?.status === "ok" ? t("runtimeHealthy") : t("runtimeUnavailable"),
     ownerProfile?.exists ? t("profileCacheReady") : t("profileCacheMissing"),
@@ -1237,7 +1273,6 @@ export function ControlCenter() {
                 </div>
 
                 <div className="phone-copy">
-                  <span className="section-eyebrow">{t("vpnMode")}</span>
                   <h2 className="phone-title">{primaryStatusText}</h2>
                   <p className="phone-subtitle">{currentHost}</p>
                 </div>
@@ -1631,6 +1666,71 @@ export function ControlCenter() {
                 <button className="ghost" type="button" onClick={handleRunTest} disabled={isPending || localTunnel?.status !== "running"}>
                   {isBusy("runTest") ? t("testing") : t("runTest")}
                 </button>
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("runtimeStartSource")}</strong>
+                <textarea readOnly value={runtimeStartSource} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("realityConfigMode")}</strong>
+                <textarea readOnly value={realityConfigMode} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("realityFeatures")}</strong>
+                <textarea readOnly value={realityFeatureSummary} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("alwaysOnMode")}</strong>
+                <textarea readOnly value={runtimeAlwaysOnState} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("lockdownMode")}</strong>
+                <textarea readOnly value={runtimeLockdownState} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("resumeEligibility")}</strong>
+                <textarea readOnly value={runtimeResumeState} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("lastNetworkEvent")}</strong>
+                <textarea readOnly value={runtimeNetworkEvent} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("startupDuration")}</strong>
+                <textarea readOnly value={runtimeStartupDuration} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("startupStage")}</strong>
+                <textarea readOnly value={runtimeStartupStage} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("failureStage")}</strong>
+                <textarea readOnly value={runtimeFailureStage} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("failureCode")}</strong>
+                <textarea readOnly value={runtimeFailureCode} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("recoveryCounters")}</strong>
+                <textarea readOnly value={runtimeRecoveryCounters} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("lastRecoveryAction")}</strong>
+                <textarea readOnly value={runtimeRecoveryAction} />
               </div>
 
               <div className="command-card command-card--compact">

@@ -3,6 +3,7 @@ package com.odinone.desktop.vk
 import android.app.Activity
 import android.content.Intent
 import android.net.VpnService
+import android.util.Log
 import androidx.activity.result.ActivityResult
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
@@ -46,9 +47,17 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
         argsJson.put("profileJson", args.profileJson)
         argsJson.put("profileSource", args.profileSource)
         argsJson.put("useRealityStartEndpoint", args.useRealityStartEndpoint)
+        val normalizedArgs =
+            VpnRuntimeLibbox.normalizeRuntimeArgs(
+                mergePersistedRealityOverrides(
+                    previousRequest = VpnRuntimeRestoreStore.readStartRequest(activity),
+                    incomingRequest = argsJson,
+                ),
+            )
+        normalizedArgs.put("startSource", "app")
 
         val current = VpnRuntimeStore.snapshot(activity)
-        if (isActiveTunnelStatus(current.status) && matchesTunnelRequest(current, argsJson)) {
+        if (isActiveTunnelStatus(current.status) && matchesTunnelRequest(current, normalizedArgs)) {
             val reused =
                 VpnRuntimeStore.write(
                     activity,
@@ -62,12 +71,12 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
 
         val prepareIntent = VpnService.prepare(activity)
         if (prepareIntent != null) {
-            pendingStartPayload = argsJson.toString()
+            pendingStartPayload = normalizedArgs.toString()
             startActivityForResult(invoke, prepareIntent, "onVpnPrepared")
             return
         }
 
-        val snapshot = launchTunnelService(argsJson)
+        val snapshot = launchTunnelService(normalizedArgs)
         invoke.resolve(snapshot.toJsObject())
     }
 
@@ -148,14 +157,48 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
     fun runConnectivityTest(invoke: Invoke) {
         val args = invoke.parseArgs(ConnectivityTestArgs::class.java)
         thread(name = "odin-one-connectivity-test", isDaemon = true) {
-            val snapshot = VpnRuntimeLibbox.runConnectivityTest(activity, args.url)
-            invoke.resolve(snapshot.toJsObject())
+            Log.i("VpnRuntimeService", "VpnRuntimePlugin received runConnectivityTest for ${args.url}")
+            runCatching {
+                VpnRuntimeLibbox.runConnectivityTest(activity, args.url)
+            }.onSuccess { snapshot ->
+                invoke.resolve(snapshot.toJsObject())
+            }.onFailure { error ->
+                Log.e("VpnRuntimeService", "runConnectivityTest crashed before producing a snapshot", error)
+                val current = VpnRuntimeStore.snapshot(activity)
+                val failed =
+                    VpnRuntimeStore.write(
+                        activity,
+                        current.copy(
+                            lastTest = TunnelTestSnapshot(
+                                ok = false,
+                                status = "failed",
+                                url = args.url.ifBlank { "https://example.com" },
+                                error = error.message ?: "Android VPN connectivity test crashed.",
+                                checkedAt = currentTimestamp(),
+                            ),
+                            logTail =
+                                trimLogTail(
+                                    current.logTail +
+                                        "Connectivity test crashed before completion: ${error.message ?: "unknown error"}",
+                                ),
+                        ),
+                        sync = true,
+                    )
+                invoke.resolve(failed.toJsObject())
+            }
         }
     }
 
     private fun launchTunnelService(args: JSObject): TunnelSnapshot {
+        val normalizedArgs =
+            VpnRuntimeLibbox.normalizeRuntimeArgs(
+                mergePersistedRealityOverrides(
+                    previousRequest = VpnRuntimeRestoreStore.readStartRequest(activity),
+                    incomingRequest = args,
+                ),
+            )
         val current = VpnRuntimeStore.snapshot(activity)
-        if (isActiveTunnelStatus(current.status) && matchesTunnelRequest(current, args)) {
+        if (isActiveTunnelStatus(current.status) && matchesTunnelRequest(current, normalizedArgs)) {
             return VpnRuntimeStore.write(
                 activity,
                 current.copy(
@@ -167,12 +210,12 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
         val starting =
             VpnRuntimeStore.write(
             activity,
-            startSnapshotFromArgs(args, "Android VPN permission granted. Starting VpnService..."),
+            startSnapshotFromArgs(normalizedArgs, "Android VPN permission granted. Starting VpnService..."),
         )
 
         val intent = Intent(activity, VpnRuntimeService::class.java).apply {
             action = VpnRuntimeService.ACTION_START
-            putExtra(VpnRuntimeService.EXTRA_START_ARGS, args.toString())
+            putExtra(VpnRuntimeService.EXTRA_START_ARGS, normalizedArgs.toString())
         }
         val requiresForegroundStart = !isActiveTunnelStatus(current.status)
         val dispatchError = dispatchServiceIntent(intent, requireForegroundStart = requiresForegroundStart)

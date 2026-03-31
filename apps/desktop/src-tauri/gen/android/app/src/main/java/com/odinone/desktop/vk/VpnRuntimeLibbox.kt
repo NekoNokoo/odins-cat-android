@@ -6,6 +6,7 @@ import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.system.OsConstants
+import android.util.Log
 import android.util.Base64
 import app.tauri.plugin.JSObject
 import io.nekohasekai.libbox.Libbox
@@ -25,9 +26,11 @@ import java.net.Proxy
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URL
+import java.security.MessageDigest
 import java.security.KeyStore
 import java.util.Locale
 import kotlin.concurrent.thread
+import org.json.JSONArray
 import org.json.JSONObject
 
 private const val DEFAULT_TUN_MTU = 1280
@@ -37,6 +40,21 @@ private const val DEFAULT_SOCKS_PORT = 58371
 private const val DEFAULT_VK_BRIDGE_PORT = 39090
 private const val DEFAULT_LOG_LINES = 3000L
 private const val DEFAULT_HTTP_FALLBACK_TEST_URL = "http://example.com"
+private const val REALITY_MODE_STABLE = "stable"
+private const val REALITY_MODE_EXPERIMENTAL = "experimental"
+private const val REALITY_DNS_MODE_UDP = "udp"
+private const val REALITY_DNS_MODE_DOT = "dot"
+private const val REALITY_DNS_MODE_DOH = "doh"
+private const val REALITY_DNS_STRATEGY_PREFER_IPV4 = "prefer_ipv4"
+private const val REALITY_DNS_STRATEGY_PREFER_IPV6 = "prefer_ipv6"
+private const val REALITY_DNS_STRATEGY_IPV4_ONLY = "ipv4_only"
+private const val REALITY_DNS_STRATEGY_IPV6_ONLY = "ipv6_only"
+private const val REALITY_DNS_DEFAULT_SERVER = "1.1.1.1"
+private const val REALITY_DNS_DEFAULT_SERVER_NAME = "cloudflare-dns.com"
+private const val REALITY_DNS_DEFAULT_DOH_PATH = "/dns-query"
+private const val REALITY_NETWORK_RELOAD_DEBOUNCE_DEFAULT_MS = 1500L
+private const val REALITY_NETWORK_RELOAD_DEBOUNCE_MIN_MS = 250L
+private const val REALITY_NETWORK_RELOAD_DEBOUNCE_MAX_MS = 5000L
 
 data class PreparedRuntime(
     val configContent: String,
@@ -46,6 +64,11 @@ data class PreparedRuntime(
     val remotePeer: String? = null,
     val vkBinaryPath: String? = null,
     val vkArgs: List<String> = emptyList(),
+    val configMode: String = REALITY_MODE_STABLE,
+    val activeFeatures: List<String> = emptyList(),
+    val profileHash: String? = null,
+    val networkReloadOnChange: Boolean = false,
+    val networkReloadDebounceMs: Long = REALITY_NETWORK_RELOAD_DEBOUNCE_DEFAULT_MS,
 )
 
 private data class RealitySettings(
@@ -65,6 +88,72 @@ private data class WireGuardSettings(
     val mtu: Int,
     val relayPort: Int,
 )
+
+private data class RealityRuntimeOptions(
+    val mode: String,
+    val dnsMode: String,
+    val strictRoute: Boolean,
+    val disableMultiplex: Boolean,
+    val tlsFragment: Boolean,
+    val recordFragment: Boolean,
+    val bootRestoreEnabled: Boolean,
+    val allowPrivateNetworkBypass: Boolean,
+    val privateBypassCidrs: List<String>,
+    val networkReloadOnChange: Boolean,
+    val networkReloadDebounceMs: Long,
+    val dnsServer: String,
+    val dnsServerPort: Int?,
+    val dnsServerName: String,
+    val dnsDohPath: String,
+    val dnsStrategy: String,
+    val dnsDisableCache: Boolean,
+    val dnsIndependentCache: Boolean,
+    val includePackages: List<String>,
+    val excludePackages: List<String>,
+) {
+    fun featureLabels(): List<String> =
+        buildList {
+            add("flow:xtls-rprx-vision")
+            add("utls:chrome")
+            add("mux:disabled")
+            add("dns:$dnsMode")
+            add("resolver:$dnsServer")
+            add("dns-strategy:$dnsStrategy")
+            add("mode:$mode")
+            if (strictRoute) {
+                add("strict-route")
+            }
+            if (tlsFragment) {
+                add("tls-fragment")
+            }
+            if (recordFragment) {
+                add("tls-record-fragment")
+            }
+            if (bootRestoreEnabled) {
+                add("boot-restore")
+            }
+            if (networkReloadOnChange) {
+                add("net-reload:${networkReloadDebounceMs}ms")
+            }
+            if (dnsDisableCache) {
+                add("dns-cache:disabled")
+            }
+            if (dnsIndependentCache) {
+                add("dns-cache:independent")
+            }
+            if (includePackages.isNotEmpty()) {
+                add("pkg-include:${includePackages.size}")
+            }
+            if (excludePackages.isNotEmpty()) {
+                add("pkg-exclude:${excludePackages.size}")
+            }
+            when {
+                privateBypassCidrs.isNotEmpty() -> add("private-bypass:selective:${privateBypassCidrs.size}")
+                allowPrivateNetworkBypass -> add("private-bypass:on")
+                else -> add("private-bypass:off")
+            }
+        }
+}
 
 private class StringArray(
     private val values: List<String>,
@@ -132,15 +221,16 @@ object VpnRuntimeLibbox {
     ): PreparedRuntime {
         ensureInitialized(context)
 
-        val protocol = args.getString("protocol", "vless-reality")?.trim().orEmpty()
-        val transport = args.getString("transport", "xray")?.trim().orEmpty()
-        val rawProfile = args.getString("profileJson", "{}") ?: "{}"
+        val normalizedArgs = normalizeRuntimeArgs(args)
+        val protocol = normalizedArgs.getString("protocol", "vless-reality")?.trim().orEmpty()
+        val transport = normalizedArgs.getString("transport", "xray")?.trim().orEmpty()
+        val rawProfile = normalizedArgs.getString("profileJson", "{}") ?: "{}"
         val profile = try {
             JSObject(rawProfile)
         } catch (error: Exception) {
             throw IllegalArgumentException("Failed to parse access profile for Android runtime: ${error.message}")
         }
-        val serverHost = args.getString("serverHost", "")?.trim().orEmpty().ifBlank {
+        val serverHost = normalizedArgs.getString("serverHost", "")?.trim().orEmpty().ifBlank {
             profile.optString("serverHost", "").trim()
         }
         if (serverHost.isBlank()) {
@@ -154,10 +244,16 @@ object VpnRuntimeLibbox {
         val prepared = when (protocol) {
             "vless-reality" -> {
                 val reality = readRealitySettings(profile, serverHost)
+                val options = readRealityRuntimeOptions(normalizedArgs, profile)
                 PreparedRuntime(
-                    configContent = buildRealityConfig(socksPort, reality),
+                    configContent = buildRealityConfig(socksPort, reality, options),
                     configPath = File(runtimeDir, "active-vless-reality.json").path,
                     socksAddress = socksAddress,
+                    configMode = options.mode,
+                    activeFeatures = options.featureLabels(),
+                    profileHash = normalizedArgs.getString("profileHash", null),
+                    networkReloadOnChange = options.networkReloadOnChange,
+                    networkReloadDebounceMs = options.networkReloadDebounceMs,
                 )
             }
 
@@ -203,6 +299,9 @@ object VpnRuntimeLibbox {
             status = "running",
             socksAddress = prepared.socksAddress,
             bridgeAddress = prepared.bridgeAddress,
+            profileHash = prepared.profileHash,
+            configMode = prepared.configMode,
+            activeFeatures = prepared.activeFeatures,
             error = null,
             logTail = trimLogTail(current.logTail + "Android VPN runtime is active."),
             lastTest = TunnelTestSnapshot(
@@ -220,6 +319,9 @@ object VpnRuntimeLibbox {
             status = "starting",
             socksAddress = prepared.socksAddress,
             bridgeAddress = prepared.bridgeAddress,
+            profileHash = prepared.profileHash,
+            configMode = prepared.configMode,
+            activeFeatures = prepared.activeFeatures,
             error = null,
             logTail = trimLogTail(current.logTail + "Waiting for VK relay warmup before marking the Android VPN runtime as ready."),
             lastTest = TunnelTestSnapshot(
@@ -235,20 +337,37 @@ object VpnRuntimeLibbox {
     ): TunnelSnapshot {
         val current = VpnRuntimeStore.snapshot(context)
         val targetUrl = rawUrl.ifBlank { "https://example.com" }
+        Log.i("VpnRuntimeService", "Connectivity test requested for $targetUrl with status=${current.status} socks=${current.socksAddress ?: "<none>"}")
         if (current.status != "running" || current.socksAddress.isNullOrBlank()) {
-            val next = current.copy(
-                lastTest = TunnelTestSnapshot(
-                    ok = false,
-                    status = "failed",
-                    url = targetUrl,
-                    error = "Android VPN tunnel is not running.",
-                    checkedAt = currentTimestamp(),
-                ),
-                logTail = trimLogTail(current.logTail + "Connectivity test skipped because the Android VPN tunnel is not running."),
-            )
-            return VpnRuntimeStore.write(context, next)
+            Log.i("VpnRuntimeService", "Connectivity test skipped because the Android VPN tunnel is not running.")
+            return VpnRuntimeStore.update(context, sync = true) { latest ->
+                latest.copy(
+                    lastTest = TunnelTestSnapshot(
+                        ok = false,
+                        status = "failed",
+                        url = targetUrl,
+                        error = "Android VPN tunnel is not running.",
+                        checkedAt = currentTimestamp(),
+                    ),
+                    logTail = trimLogTail(latest.logTail + "Connectivity test skipped because the Android VPN tunnel is not running."),
+                )
+            }
         }
 
+        VpnRuntimeStore.update(
+            context,
+            sync = true,
+        ) { latest ->
+            latest.copy(
+                lastTest = TunnelTestSnapshot(
+                    ok = false,
+                    status = "running",
+                    url = targetUrl,
+                    checkedAt = currentTimestamp(),
+                ),
+                logTail = trimLogTail(latest.logTail + "Connectivity test started for $targetUrl."),
+            )
+        }
         val (host, port) = splitHostAndPort(current.socksAddress)
         val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(host, port))
         val primary = runCatching {
@@ -291,7 +410,7 @@ object VpnRuntimeLibbox {
                     primary.copy(
                         error =
                             buildString {
-                                append(primary.error ?: "Android HTTPS probe failed.")
+                                append(primary.error)
                                 fallback.error?.let {
                                     append(" HTTP fallback also failed: ")
                                     append(it)
@@ -313,11 +432,13 @@ object VpnRuntimeLibbox {
             } else {
                 "Connectivity test failed for $targetUrl: ${outcome.error ?: outcome.output ?: "unknown error"}"
             }
-        val next = current.copy(
-            lastTest = outcome,
-            logTail = trimLogTail(current.logTail + line),
-        )
-        return VpnRuntimeStore.write(context, next)
+        Log.i("VpnRuntimeService", line)
+        return VpnRuntimeStore.update(context, sync = true) { latest ->
+            latest.copy(
+                lastTest = outcome,
+                logTail = trimLogTail(latest.logTail + line),
+            )
+        }
     }
 
     private fun executeHttpProbe(
@@ -433,34 +554,108 @@ object VpnRuntimeLibbox {
 
     fun listPlatformInterfaces(context: Context): NetworkInterfaceIterator {
         val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val interfaces = mutableListOf<NetworkInterface>()
         val javaInterfaces = JavaNetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
-        for (network in connectivity.allNetworks) {
-            val linkProperties = connectivity.getLinkProperties(network) ?: continue
-            val capabilities = connectivity.getNetworkCapabilities(network) ?: continue
-            val interfaceName = linkProperties.interfaceName ?: continue
-            val javaInterface = javaInterfaces.firstOrNull { it.name == interfaceName } ?: continue
-            val item = NetworkInterface().apply {
-                name = interfaceName
-                index = javaInterface.index
-                mtu = runCatching { javaInterface.mtu }.getOrDefault(DEFAULT_TUN_MTU)
-                addresses = StringArray(
-                    javaInterface.interfaceAddresses.mapNotNull { it.toPrefixOrNull() },
-                )
-                dnsServer = StringArray(linkProperties.dnsServers.mapNotNull { it.hostAddress })
-                type =
-                    when {
-                        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> Libbox.InterfaceTypeWIFI
-                        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> Libbox.InterfaceTypeCellular
-                        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> Libbox.InterfaceTypeEthernet
-                        else -> Libbox.InterfaceTypeOther
-                    }
-                flags = dumpFlags(javaInterface)
-                metered = !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+        val interfaces =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                // Once the system VPN is active, activeNetwork can point at tun0 even though libbox still
+                // needs the real upstream network for interface binding and reconnect logic.
+                resolveUnderlyingDefaultNetwork(connectivity)
+                    ?.let { network -> buildPlatformInterface(connectivity, javaInterfaces, network) }
+                    ?.let(::listOf)
+                    .orEmpty()
+            } else {
+                listLegacyPlatformInterfaces(connectivity, javaInterfaces)
             }
-            interfaces.add(item)
-        }
         return NetworkInterfaceArray(interfaces)
+    }
+
+    private fun buildPlatformInterface(
+        connectivity: ConnectivityManager,
+        javaInterfaces: List<JavaNetworkInterface>,
+        network: android.net.Network,
+    ): NetworkInterface? {
+        val linkProperties = connectivity.getLinkProperties(network) ?: return null
+        val capabilities = connectivity.getNetworkCapabilities(network) ?: return null
+        val interfaceName = linkProperties.interfaceName ?: return null
+        val javaInterface = javaInterfaces.firstOrNull { it.name == interfaceName } ?: return null
+        return NetworkInterface().apply {
+            name = interfaceName
+            index = javaInterface.index
+            mtu = runCatching { javaInterface.mtu }.getOrDefault(DEFAULT_TUN_MTU)
+            addresses = StringArray(
+                javaInterface.interfaceAddresses.mapNotNull { it.toPrefixOrNull() },
+            )
+            dnsServer = StringArray(linkProperties.dnsServers.mapNotNull { it.hostAddress })
+            type =
+                when {
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> Libbox.InterfaceTypeWIFI
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> Libbox.InterfaceTypeCellular
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> Libbox.InterfaceTypeEthernet
+                    else -> Libbox.InterfaceTypeOther
+                }
+            flags = dumpFlags(javaInterface)
+            metered = !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun listLegacyPlatformInterfaces(
+        connectivity: ConnectivityManager,
+        javaInterfaces: List<JavaNetworkInterface>,
+    ): List<NetworkInterface> =
+        connectivity.allNetworks.mapNotNull { network ->
+            buildPlatformInterface(connectivity, javaInterfaces, network)
+        }
+
+    @Suppress("DEPRECATION")
+    fun resolveUnderlyingDefaultNetwork(connectivity: ConnectivityManager): android.net.Network? {
+        val active = connectivity.activeNetwork
+        if (active != null && isUsableUnderlyingNetwork(connectivity, active)) {
+            return active
+        }
+
+        return connectivity.allNetworks
+            .mapNotNull { network ->
+                val capabilities = connectivity.getNetworkCapabilities(network) ?: return@mapNotNull null
+                if (!isUsableUnderlyingNetwork(capabilities)) {
+                    return@mapNotNull null
+                }
+                network to scoreUnderlyingNetwork(capabilities)
+            }.maxByOrNull { (_, score) -> score }
+            ?.first
+    }
+
+    private fun isUsableUnderlyingNetwork(
+        connectivity: ConnectivityManager,
+        network: android.net.Network,
+    ): Boolean = connectivity.getNetworkCapabilities(network)?.let(::isUsableUnderlyingNetwork) == true
+
+    private fun isUsableUnderlyingNetwork(capabilities: NetworkCapabilities): Boolean =
+        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+
+    private fun scoreUnderlyingNetwork(capabilities: NetworkCapabilities): Int {
+        var score = 0
+        if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+            score += 100
+        }
+        if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_TRUSTED)) {
+            score += 40
+        }
+        if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED)) {
+            score += 20
+        }
+        if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) {
+            score += 10
+        }
+        score +=
+            when {
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 30
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 25
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 20
+                else -> 5
+            }
+        return score
     }
 
     fun readWifiState(context: Context): WIFIState? {
@@ -550,90 +745,557 @@ object VpnRuntimeLibbox {
     private fun buildRealityConfig(
         socksPort: Int,
         reality: RealitySettings,
+        options: RealityRuntimeOptions,
     ): String =
-        """
-        {
-          "log": {
-            "level": "warn"
-          },
-          "dns": {
-            "servers": [
-              {
-                "tag": "resolver",
-                "type": "udp",
-                "server": "1.1.1.1",
-                "server_port": 53
-              }
-            ],
-            "final": "resolver",
-            "strategy": "prefer_ipv4"
-          },
-          "inbounds": [
-            {
-              "type": "tun",
-              "tag": "tun-in",
-              "address": [${
-                  jsonString(DEFAULT_TUN_ADDRESS)
-              }],
-              "mtu": $DEFAULT_TUN_MTU,
-              "auto_route": true,
-              "strict_route": false
-            },
-            {
-              "type": "socks",
-              "tag": "socks-in",
-              "listen": "127.0.0.1",
-              "listen_port": $socksPort
-            }
-          ],
-          "outbounds": [
-            {
-              "type": "vless",
-              "tag": "main-out",
-              "server": ${jsonString(reality.serverHost)},
-              "server_port": ${reality.serverPort},
-              "uuid": ${jsonString(reality.uuid)},
-              "flow": ${jsonString(reality.flow)},
-              "packet_encoding": "xudp",
-              "tls": {
-                "enabled": true,
-                "server_name": ${jsonString(reality.serverName)},
-                "utls": {
-                  "enabled": true,
-                  "fingerprint": "chrome"
-                },
-                "reality": {
-                  "enabled": true,
-                  "public_key": ${jsonString(reality.publicKey)},
-                  "short_id": ${jsonString(reality.shortId)}
-                }
-              }
-            },
-            {
-              "type": "direct",
-              "tag": "direct"
-            }
-          ],
-          "route": {
-            "rules": [
-              {
-                "action": "sniff"
-              },
-              {
-                "protocol": "dns",
-                "action": "hijack-dns"
-              },
-              {
-                "ip_is_private": true,
-                "outbound": "direct"
-              }
-            ],
-            "final": "main-out",
-            "auto_detect_interface": true,
-            "default_domain_resolver": "resolver"
-          }
+        when (options.mode) {
+            REALITY_MODE_EXPERIMENTAL -> buildRealityConfigExperimental(socksPort, reality, options)
+            else -> buildRealityConfigStable(socksPort, reality, options)
         }
-        """.trimIndent()
+
+    fun normalizeRuntimeArgs(args: JSObject): JSObject {
+        val normalized =
+            runCatching { JSObject(args.toString()) }
+                .getOrElse { args }
+        if (normalized.getString("protocol", "vless-reality")?.trim() != "vless-reality") {
+            return normalized
+        }
+
+        val rawProfile = normalized.getString("profileJson", "{}") ?: "{}"
+        val profile =
+            runCatching { JSObject(rawProfile) }
+                .getOrElse { return normalized }
+        val options = readRealityRuntimeOptions(normalized, profile)
+        normalized.put("configMode", options.mode)
+        normalized.put("dnsMode", options.dnsMode)
+        normalized.put("strictRoute", options.strictRoute)
+        normalized.put("disableMultiplex", options.disableMultiplex)
+        normalized.put("tlsFragment", options.tlsFragment)
+        normalized.put("recordFragment", options.recordFragment)
+        normalized.put("bootRestoreEnabled", options.bootRestoreEnabled)
+        normalized.put("allowPrivateNetworkBypass", options.allowPrivateNetworkBypass)
+        normalized.put("privateBypassCidrs", JSONArray(options.privateBypassCidrs))
+        normalized.put("networkReloadOnChange", options.networkReloadOnChange)
+        normalized.put("networkReloadDebounceMs", options.networkReloadDebounceMs)
+        normalized.put("dnsServer", options.dnsServer)
+        normalized.put("dnsServerPort", options.dnsServerPort)
+        normalized.put("dnsServerName", options.dnsServerName)
+        normalized.put("dnsDohPath", options.dnsDohPath)
+        normalized.put("dnsStrategy", options.dnsStrategy)
+        normalized.put("dnsDisableCache", options.dnsDisableCache)
+        normalized.put("dnsIndependentCache", options.dnsIndependentCache)
+        normalized.put("includePackages", JSONArray(options.includePackages))
+        normalized.put("excludePackages", JSONArray(options.excludePackages))
+        normalized.put("activeFeatures", JSONArray(options.featureLabels()))
+        normalized.put("profileHash", computeRealityProfileHash(normalized, options))
+        return normalized
+    }
+
+    private fun buildRealityConfigStable(
+        socksPort: Int,
+        reality: RealitySettings,
+        options: RealityRuntimeOptions,
+    ): String = buildRealityConfigDocument(socksPort, reality, options, leakHardened = false)
+
+    private fun buildRealityConfigExperimental(
+        socksPort: Int,
+        reality: RealitySettings,
+        options: RealityRuntimeOptions,
+    ): String = buildRealityConfigDocument(socksPort, reality, options, leakHardened = true)
+
+    private fun buildRealityConfigDocument(
+        socksPort: Int,
+        reality: RealitySettings,
+        options: RealityRuntimeOptions,
+        leakHardened: Boolean,
+    ): String {
+        val tls =
+            JSONObject().put("enabled", true)
+                .put("server_name", reality.serverName)
+                .put(
+                    "utls",
+                    JSONObject()
+                        .put("enabled", true)
+                        .put("fingerprint", "chrome"),
+                ).put(
+                    "reality",
+                    JSONObject()
+                        .put("enabled", true)
+                        .put("public_key", reality.publicKey)
+                        .put("short_id", reality.shortId),
+                )
+        if (options.tlsFragment) {
+            tls.put("fragment", true)
+        }
+        if (options.recordFragment) {
+            tls.put("record_fragment", true)
+        }
+
+        val routeRules = JSONArray()
+            .put(JSONObject().put("action", "sniff"))
+            .put(JSONObject().put("protocol", "dns").put("action", "hijack-dns"))
+            .put(
+                JSONObject()
+                    .put("type", "logical")
+                    .put("mode", "and")
+                    .put(
+                        "rules",
+                        JSONArray()
+                            .put(JSONObject().put("ip_cidr", JSONArray().put("$DEFAULT_TUN_DNS_ADDRESS/32")))
+                            .put(JSONObject().put("network", "tcp"))
+                            .put(JSONObject().put("port", 853)),
+                    ).put("action", "hijack-dns"),
+            )
+        if (leakHardened) {
+            routeRules.put(
+                JSONObject()
+                    .put("type", "logical")
+                    .put("mode", "or")
+                    .put(
+                        "rules",
+                        JSONArray()
+                            .put(JSONObject().put("network", "udp").put("port", 53))
+                            .put(JSONObject().put("network", "tcp").put("port", 53))
+                            .put(JSONObject().put("network", "udp").put("port", 853))
+                            .put(JSONObject().put("network", "tcp").put("port", 853))
+                            .put(JSONObject().put("port", 53))
+                            .put(JSONObject().put("port", 853)),
+                    ).put("action", "hijack-dns"),
+            )
+        }
+        if (options.privateBypassCidrs.isNotEmpty()) {
+            routeRules.put(
+                JSONObject()
+                    .put("ip_cidr", JSONArray(options.privateBypassCidrs))
+                    .put("outbound", "direct"),
+            )
+        } else if (options.allowPrivateNetworkBypass) {
+            routeRules.put(
+                JSONObject()
+                    .put("ip_is_private", true)
+                    .put("outbound", "direct"),
+            )
+        }
+
+        val config =
+            JSONObject()
+                .put("log", JSONObject().put("level", "warn"))
+                .put(
+                    "dns",
+                    JSONObject()
+                        .put("servers", JSONArray().put(buildRealityDnsServer(options)))
+                        .put("final", "resolver")
+                        .put("strategy", options.dnsStrategy)
+                        .put("disable_cache", options.dnsDisableCache)
+                        .put("independent_cache", options.dnsIndependentCache),
+                ).put(
+                    "inbounds",
+                    JSONArray()
+                        .put(
+                            JSONObject()
+                                .put("type", "tun")
+                                .put("tag", "tun-in")
+                                .put("address", JSONArray().put(DEFAULT_TUN_ADDRESS))
+                                .put("mtu", DEFAULT_TUN_MTU)
+                                .put("auto_route", true)
+                                .put("strict_route", options.strictRoute)
+                                .apply {
+                                    if (options.includePackages.isNotEmpty()) {
+                                        put("include_package", JSONArray(options.includePackages))
+                                    }
+                                    if (options.excludePackages.isNotEmpty()) {
+                                        put("exclude_package", JSONArray(options.excludePackages))
+                                    }
+                                },
+                        ).put(
+                            JSONObject()
+                                .put("type", "socks")
+                                .put("tag", "socks-in")
+                                .put("listen", "127.0.0.1")
+                                .put("listen_port", socksPort),
+                        ),
+                ).put(
+                    "outbounds",
+                    JSONArray()
+                        .put(
+                            JSONObject()
+                                .put("type", "vless")
+                                .put("tag", "main-out")
+                                .put("server", reality.serverHost)
+                                .put("server_port", reality.serverPort)
+                                .put("uuid", reality.uuid)
+                                .put("flow", reality.flow)
+                                .put("packet_encoding", "xudp")
+                                .put("tls", tls)
+                                .put(
+                                    "multiplex",
+                                    JSONObject().put("enabled", !options.disableMultiplex),
+                                ),
+                        ).put(
+                            JSONObject()
+                                .put("type", "direct")
+                                .put("tag", "direct"),
+                        ),
+                ).put(
+                    "route",
+                    JSONObject()
+                        .put("rules", routeRules)
+                        .put("final", "main-out")
+                        .put("auto_detect_interface", true)
+                        .put("default_domain_resolver", "resolver"),
+                )
+        return config.toString(2)
+    }
+
+    private fun buildRealityDnsServer(options: RealityRuntimeOptions): JSONObject =
+        when (options.dnsMode) {
+            REALITY_DNS_MODE_DOH ->
+                JSONObject()
+                    .put("tag", "resolver")
+                    .put("type", "https")
+                    .put("server", options.dnsServer)
+                    .put("server_port", options.dnsServerPort ?: 443)
+                    .put("path", options.dnsDohPath)
+                    .put(
+                        "tls",
+                        JSONObject().put("server_name", options.dnsServerName),
+                    )
+
+            REALITY_DNS_MODE_DOT ->
+                JSONObject()
+                    .put("tag", "resolver")
+                    .put("type", "tls")
+                    .put("server", options.dnsServer)
+                    .put("server_port", options.dnsServerPort ?: 853)
+                    .put(
+                        "tls",
+                        JSONObject().put("server_name", options.dnsServerName),
+                    )
+
+            else ->
+                JSONObject()
+                    .put("tag", "resolver")
+                    .put("type", "udp")
+                    .put("server", options.dnsServer)
+                    .put("server_port", options.dnsServerPort ?: 53)
+        }
+
+    private fun readRealityRuntimeOptions(
+        args: JSObject,
+        profile: JSObject,
+    ): RealityRuntimeOptions {
+        val profileOptions =
+            profile.optJSONObject("androidRuntime")?.optJSONObject("reality")
+                ?: profile.optJSONObject("runtimeOptions")?.optJSONObject("reality")
+                ?: profile.optJSONObject("androidReality")
+        val mode =
+            normalizeRealityMode(
+                args.getString("configMode", null)
+                    ?: profileOptions?.optString("mode").takeUnless { it.isNullOrBlank() },
+            )
+        val dnsMode =
+            normalizeRealityDnsMode(
+                args.getString("dnsMode", null)
+                    ?: profileOptions?.optString("dnsMode").takeUnless { it.isNullOrBlank() }
+                    ?: if (mode == REALITY_MODE_EXPERIMENTAL) {
+                        REALITY_DNS_MODE_DOT
+                    } else {
+                        REALITY_DNS_MODE_UDP
+                    },
+            )
+        val strictRoute =
+            args.getBoolean(
+                "strictRoute",
+                profileOptions?.optBoolean("strictRoute", mode == REALITY_MODE_EXPERIMENTAL) ?: (mode == REALITY_MODE_EXPERIMENTAL),
+            )
+        val tlsFragment = args.getBoolean("tlsFragment", profileOptions?.optBoolean("tlsFragment", false) ?: false)
+        val recordFragment = args.getBoolean("recordFragment", profileOptions?.optBoolean("recordFragment", false) ?: false)
+        val bootRestoreEnabled =
+            args.getBoolean("bootRestoreEnabled", profileOptions?.optBoolean("autoRestoreOnBoot", false) ?: false)
+        val rawAllowPrivateNetworkBypass =
+            args.getBoolean(
+                "allowPrivateNetworkBypass",
+                profileOptions?.optBoolean("allowPrivateNetworkBypass", true) ?: true,
+            )
+        val privateBypassCidrs = readStringListOption(args, "privateBypassCidrs", profileOptions, "privateBypassCidrs")
+        val allowPrivateNetworkBypass = rawAllowPrivateNetworkBypass && privateBypassCidrs.isEmpty()
+        val networkReloadOnChange =
+            args.getBoolean(
+                "networkReloadOnChange",
+                profileOptions?.optBoolean("networkReloadOnChange", false) ?: false,
+            )
+        val networkReloadDebounceMs =
+            normalizeRealityNetworkReloadDebounceMs(
+                readLongOption(
+                    args = args,
+                    key = "networkReloadDebounceMs",
+                    defaultValue = profileOptions?.optLong("networkReloadDebounceMs", REALITY_NETWORK_RELOAD_DEBOUNCE_DEFAULT_MS)
+                        ?: REALITY_NETWORK_RELOAD_DEBOUNCE_DEFAULT_MS,
+                ),
+            )
+        val dnsServer =
+            args.getString("dnsServer", null)
+                ?.trim()
+                .takeUnless { it.isNullOrBlank() }
+                ?: profileOptions?.optString("dnsServer").takeUnless { it.isNullOrBlank() }
+                ?: REALITY_DNS_DEFAULT_SERVER
+        val dnsServerPort =
+            readNullableIntOption(
+                args = args,
+                key = "dnsServerPort",
+                fallback = profileOptions?.optInt("dnsServerPort"),
+            )
+        val dnsDohPath =
+            normalizeDohPath(
+                args.getString("dnsDohPath", null)
+                    ?.trim()
+                    .takeUnless { it.isNullOrBlank() }
+                    ?: profileOptions?.optString("dnsDohPath").takeUnless { it.isNullOrBlank() }
+                    ?: REALITY_DNS_DEFAULT_DOH_PATH,
+            )
+        val dnsServerName =
+            normalizeRealityDnsServerName(
+                rawValue =
+                    args.getString("dnsServerName", null)
+                        ?.trim()
+                        .takeUnless { it.isNullOrBlank() }
+                        ?: profileOptions?.optString("dnsServerName").takeUnless { it.isNullOrBlank() },
+                dnsServer = dnsServer,
+                dnsMode = dnsMode,
+            )
+        validateRealityDnsServerAddress(
+            dnsServer = dnsServer,
+            dnsMode = dnsMode,
+        )
+        val dnsStrategy =
+            normalizeRealityDnsStrategy(
+                args.getString("dnsStrategy", null)
+                    ?.trim()
+                    .takeUnless { it.isNullOrBlank() }
+                    ?: profileOptions?.optString("dnsStrategy").takeUnless { it.isNullOrBlank() }
+                    ?: REALITY_DNS_STRATEGY_PREFER_IPV4,
+            )
+        val dnsDisableCache =
+            args.getBoolean(
+                "dnsDisableCache",
+                profileOptions?.optBoolean("dnsDisableCache", false) ?: false,
+            )
+        val dnsIndependentCache =
+            args.getBoolean(
+                "dnsIndependentCache",
+                profileOptions?.optBoolean("dnsIndependentCache", false) ?: false,
+            )
+        val includePackages = readStringListOption(args, "includePackages", profileOptions, "includePackages")
+        val excludePackages = readStringListOption(args, "excludePackages", profileOptions, "excludePackages")
+        if (includePackages.isNotEmpty() && excludePackages.isNotEmpty()) {
+            throw IllegalArgumentException("Only one of includePackages or excludePackages may be set for Android REALITY runtime")
+        }
+        return RealityRuntimeOptions(
+            mode = mode,
+            dnsMode = dnsMode,
+            strictRoute = strictRoute,
+            disableMultiplex = true,
+            tlsFragment = tlsFragment,
+            recordFragment = recordFragment,
+            bootRestoreEnabled = bootRestoreEnabled,
+            allowPrivateNetworkBypass = allowPrivateNetworkBypass,
+            privateBypassCidrs = privateBypassCidrs,
+            networkReloadOnChange = networkReloadOnChange,
+            networkReloadDebounceMs = networkReloadDebounceMs,
+            dnsServer = dnsServer,
+            dnsServerPort = dnsServerPort,
+            dnsServerName = dnsServerName,
+            dnsDohPath = dnsDohPath,
+            dnsStrategy = dnsStrategy,
+            dnsDisableCache = dnsDisableCache,
+            dnsIndependentCache = dnsIndependentCache,
+            includePackages = includePackages,
+            excludePackages = excludePackages,
+        )
+    }
+
+    private fun normalizeRealityMode(value: String?): String =
+        if (value?.trim()?.lowercase(Locale.ROOT) == REALITY_MODE_EXPERIMENTAL) {
+            REALITY_MODE_EXPERIMENTAL
+        } else {
+            REALITY_MODE_STABLE
+        }
+
+    private fun normalizeRealityDnsMode(value: String?): String =
+        when (value?.trim()?.lowercase(Locale.ROOT)) {
+            REALITY_DNS_MODE_DOT -> REALITY_DNS_MODE_DOT
+            REALITY_DNS_MODE_DOH -> REALITY_DNS_MODE_DOH
+            else -> REALITY_DNS_MODE_UDP
+        }
+
+    private fun normalizeRealityDnsStrategy(value: String?): String =
+        when (value?.trim()?.lowercase(Locale.ROOT)) {
+            REALITY_DNS_STRATEGY_PREFER_IPV6 -> REALITY_DNS_STRATEGY_PREFER_IPV6
+            REALITY_DNS_STRATEGY_IPV4_ONLY -> REALITY_DNS_STRATEGY_IPV4_ONLY
+            REALITY_DNS_STRATEGY_IPV6_ONLY -> REALITY_DNS_STRATEGY_IPV6_ONLY
+            else -> REALITY_DNS_STRATEGY_PREFER_IPV4
+        }
+
+    private fun normalizeRealityNetworkReloadDebounceMs(value: Long): Long =
+        value.coerceIn(REALITY_NETWORK_RELOAD_DEBOUNCE_MIN_MS, REALITY_NETWORK_RELOAD_DEBOUNCE_MAX_MS)
+
+    private fun normalizeDohPath(value: String): String =
+        when {
+            value.isBlank() -> REALITY_DNS_DEFAULT_DOH_PATH
+            value.startsWith("/") -> value
+            else -> "/$value"
+        }
+
+    private fun normalizeRealityDnsServerName(
+        rawValue: String?,
+        dnsServer: String,
+        dnsMode: String,
+    ): String {
+        val explicit = rawValue?.trim().orEmpty()
+        if (explicit.isNotEmpty()) {
+            return explicit
+        }
+        if (dnsServer == REALITY_DNS_DEFAULT_SERVER) {
+            return REALITY_DNS_DEFAULT_SERVER_NAME
+        }
+        if (looksLikeIpLiteral(dnsServer)) {
+            if (dnsMode == REALITY_DNS_MODE_UDP) {
+                return ""
+            }
+            throw IllegalArgumentException("dnsServerName is required for encrypted DNS when dnsServer is an IP literal")
+        }
+        return dnsServer
+    }
+
+    private fun validateRealityDnsServerAddress(
+        dnsServer: String,
+        dnsMode: String,
+    ) {
+        if (dnsMode == REALITY_DNS_MODE_UDP) {
+            return
+        }
+        if (!looksLikeIpLiteral(dnsServer)) {
+            throw IllegalArgumentException(
+                "Encrypted DNS currently requires dnsServer to be an IP literal and dnsServerName to carry the TLS hostname",
+            )
+        }
+    }
+
+    private fun readLongOption(
+        args: JSObject,
+        key: String,
+        defaultValue: Long,
+    ): Long {
+        if (!args.has(key) || args.isNull(key)) {
+            return defaultValue
+        }
+        return args.optLong(key, defaultValue)
+    }
+
+    private fun readNullableIntOption(
+        args: JSObject,
+        key: String,
+        fallback: Int?,
+    ): Int? {
+        val raw =
+            if (args.has(key) && !args.isNull(key)) {
+                args.optInt(key)
+            } else {
+                fallback
+        }
+        return raw?.takeIf { it > 0 }
+    }
+
+    private fun readStringListOption(
+        args: JSObject,
+        key: String,
+        profileOptions: JSONObject?,
+        profileKey: String,
+    ): List<String> {
+        val fromArgs = args.optJSONArray(key)?.let(::parseJsonStringArray).orEmpty()
+        if (fromArgs.isNotEmpty()) {
+            return fromArgs
+        }
+        val fromProfile = profileOptions?.optJSONArray(profileKey)?.let(::parseJsonStringArray).orEmpty()
+        return fromProfile
+    }
+
+    private fun parseJsonStringArray(array: JSONArray): List<String> =
+        buildList(array.length()) {
+            for (index in 0 until array.length()) {
+                val value = array.optString(index, "").trim()
+                if (value.isNotEmpty()) {
+                    add(value)
+                }
+            }
+        }
+
+    private fun looksLikeIpLiteral(value: String): Boolean = value.all { char ->
+        char.isDigit() || char == '.' || char == ':'
+    }
+
+    private fun computeRealityProfileHash(
+        args: JSObject,
+        options: RealityRuntimeOptions,
+    ): String {
+        val digest =
+            buildString {
+                append(args.getString("serverHost", "")?.trim().orEmpty())
+                append('|')
+                append(args.getString("transport", "")?.trim().orEmpty())
+                append('|')
+                append(args.getString("engine", "")?.trim().orEmpty())
+                append('|')
+                append(args.getString("protocol", "")?.trim().orEmpty())
+                append('|')
+                append(options.mode)
+                append('|')
+                append(options.dnsMode)
+                append('|')
+                append(options.strictRoute)
+                append('|')
+                append(options.disableMultiplex)
+                append('|')
+                append(options.tlsFragment)
+                append('|')
+                append(options.recordFragment)
+                append('|')
+                append(options.bootRestoreEnabled)
+                append('|')
+                append(options.allowPrivateNetworkBypass)
+                append('|')
+                append(options.privateBypassCidrs.joinToString(","))
+                append('|')
+                append(options.networkReloadOnChange)
+                append('|')
+                append(options.networkReloadDebounceMs)
+                append('|')
+                append(options.dnsServer)
+                append('|')
+                append(options.dnsServerPort ?: 0)
+                append('|')
+                append(options.dnsServerName)
+                append('|')
+                append(options.dnsDohPath)
+                append('|')
+                append(options.dnsStrategy)
+                append('|')
+                append(options.dnsDisableCache)
+                append('|')
+                append(options.dnsIndependentCache)
+                append('|')
+                append(options.includePackages.joinToString(","))
+                append('|')
+                append(options.excludePackages.joinToString(","))
+                append('|')
+                append(args.getString("profileJson", "{}") ?: "{}")
+            }
+        return sha256Hex(digest)
+    }
+
+    private fun sha256Hex(value: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { byte -> "%02x".format(byte) }
+    }
 
     private fun buildWireGuardConfig(
         socksPort: Int,

@@ -391,6 +391,10 @@ impl MobileSshSession {
     }
 
     async fn run(&mut self, cmd: &str) -> Result<String, String> {
+        self.run_with_input(cmd, None).await
+    }
+
+    async fn run_with_input(&mut self, cmd: &str, input: Option<&[u8]>) -> Result<String, String> {
         let mut channel = self
             .handle
             .channel_open_session()
@@ -400,6 +404,18 @@ impl MobileSshSession {
             .exec(true, cmd)
             .await
             .map_err(|err| format!("command {cmd:?} failed: {err}"))?;
+
+        if let Some(input_bytes) = input {
+            let cursor = std::io::Cursor::new(input_bytes.to_vec());
+            channel
+                .data(cursor)
+                .await
+                .map_err(|err| format!("command {cmd:?} stdin failed: {err}"))?;
+        }
+        channel
+            .eof()
+            .await
+            .map_err(|err| format!("command {cmd:?} eof failed: {err}"))?;
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -437,15 +453,14 @@ impl MobileSshSession {
     }
 
     async fn upload(&mut self, remote_path: &str, data: &[u8], mode: &str) -> Result<(), String> {
-        let encoded = STANDARD.encode(data);
         let temporary_path = format!("{remote_path}.tmp-upload");
         let command = format!(
-            "mkdir -p {dir} && cat <<'ODIN_ONE_BASE64' | base64 -d > {tmp} && chmod {mode} {tmp} && mv -f {tmp} {target}\n{encoded}\nODIN_ONE_BASE64",
+            "mkdir -p {dir} && cat > {tmp} && chmod {mode} {tmp} && mv -f {tmp} {target}",
             dir = quote_shell(dir_of(remote_path)),
             tmp = quote_shell(&temporary_path),
             target = quote_shell(remote_path),
         );
-        self.run(&command).await.map(|_| ())
+        self.run_with_input(&command, Some(data)).await.map(|_| ())
     }
 
     async fn close(self) -> Result<(), String> {

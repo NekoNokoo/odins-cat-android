@@ -8,6 +8,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.ProxyInfo
 import android.net.VpnService
 import android.os.Build
@@ -15,7 +18,10 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
+import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import app.tauri.plugin.JSObject
 import io.nekohasekai.libbox.CommandServer
 import io.nekohasekai.libbox.CommandServerHandler
@@ -48,15 +54,33 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
     private var shuttingDown = false
     private val lifecycleLock = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var pendingNetworkReload: Runnable? = null
+    @Volatile
+    private var networkReloadInFlight = false
+    @Volatile
+    private var queuedNetworkReloadTrigger: String? = null
+    private var lastDeliveredUnderlyingNetworkHandle: Long? = null
+    private var lastDeliveredUnderlyingInterfaceName: String? = null
 
     private var systemProxyAvailable = false
     private var systemProxyEnabled = false
+    private val defaultInterfaceCallbacks = mutableMapOf<InterfaceUpdateListener, ConnectivityManager.NetworkCallback>()
 
     override fun onCreate() {
         super.onCreate()
         VpnRuntimeLibbox.ensureInitialized(this)
         ensureNotificationChannel()
+        captureRuntimeState(VpnRuntimeStore.snapshot(this))
         appendDiagnostic("VpnRuntimeService created.")
+    }
+
+    override fun onRevoke() {
+        appendDiagnostic("Android VPN permission was revoked by the system.")
+        VpnRuntimeRestoreStore.markResumeEligible(this, false)
+        thread(name = "odin-one-vpn-revoke", isDaemon = true) {
+            handleStop(requestedByUser = false, reason = "VpnService permission revoked")
+        }
+        super.onRevoke()
     }
 
     override fun onStartCommand(
@@ -65,8 +89,9 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         startId: Int,
     ): Int {
         val action = intent?.action
+        val currentSnapshot = VpnRuntimeStore.snapshot(this)
         appendDiagnostic(
-            "onStartCommand action=${action ?: "<null>"} flags=$flags startId=$startId currentStatus=${VpnRuntimeStore.snapshot(this).status}",
+            "onStartCommand action=${action ?: "<null>"} flags=$flags startId=$startId currentStatus=${currentSnapshot.status}",
         )
         when (action) {
             ACTION_START -> {
@@ -85,14 +110,44 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             }
 
             null -> {
-                appendDiagnostic("Ignoring null onStartCommand intent to avoid accidental VPN shutdown.")
+                val restoreDecision = classifySystemRestoreAvailability(
+                    resumeEligible = VpnRuntimeRestoreStore.isResumeEligible(this),
+                    request = VpnRuntimeRestoreStore.readStartRequest(this),
+                )
+                if (restoreDecision == "available") {
+                    recordRestoreTelemetry(
+                        source = "system",
+                        action = "attempt",
+                        detail = "available",
+                        message = "Received system-driven onStartCommand without explicit action. Attempting REALITY restore.",
+                    )
+                    thread(name = "odin-one-vpn-system-start", isDaemon = true) {
+                        handleStart(null)
+                    }
+                } else {
+                    recordRestoreTelemetry(
+                        source = "system",
+                        action = "skip",
+                        detail = restoreDecision,
+                        message = "Ignoring null onStartCommand intent because no resume-eligible REALITY request is available. reason=$restoreDecision",
+                    )
+                }
             }
 
             else -> {
                 appendDiagnostic("Ignoring unexpected onStartCommand action=$action to avoid accidental VPN shutdown.")
             }
         }
-        return START_NOT_STICKY
+        val startMode =
+            if (shouldKeepVpnServiceSticky(action, currentSnapshot)) {
+                START_STICKY
+            } else {
+                START_NOT_STICKY
+            }
+        appendDiagnostic(
+            "onStartCommand completed with ${if (startMode == START_STICKY) "START_STICKY" else "START_NOT_STICKY"}.",
+        )
+        return startMode
     }
 
     override fun onDestroy() {
@@ -123,6 +178,10 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
     }
 
     override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
+        val callback = synchronized(defaultInterfaceCallbacks) { defaultInterfaceCallbacks.remove(listener) } ?: return
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+        runCatching { connectivity.unregisterNetworkCallback(callback) }
+            .onFailure { appendDiagnostic("Failed to unregister default interface monitor: ${it.message}") }
     }
 
     override fun closeNeighborMonitor(listener: NeighborUpdateListener) {
@@ -202,16 +261,15 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
 
         val descriptor = builder.establish() ?: error("android: the application is not prepared or is revoked")
         tunDescriptor = descriptor
-        val current = VpnRuntimeStore.snapshot(this)
         val next =
-            VpnRuntimeStore.write(
-                this,
+            captureRuntimeState { current ->
                 current.copy(
                     status = "running",
                     error = null,
+                    lastNetworkEvent = "tun:established",
                     logTail = trimLogTail(current.logTail + "Android VpnService established the system VPN interface."),
-                ),
-            )
+                )
+            }
         runOnMainSync { updateNotification(next) }
         return descriptor.fd
     }
@@ -236,6 +294,10 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
 
     override fun serviceReload() {
         appendDiagnostic("libbox requested serviceReload callback.")
+        captureRuntimeState { current ->
+            current.copy(lastRecoveryAction = "libbox:serviceReload")
+        }
+        scheduleNetworkReloadIfEnabled("libbox:serviceReload")
     }
 
     override fun serviceStop() {
@@ -255,10 +317,54 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
 
     override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
         val connectivity = getSystemService(ConnectivityManager::class.java)
-        val network = connectivity.activeNetwork ?: return
-        val interfaceName = connectivity.getLinkProperties(network)?.interfaceName ?: return
-        val interfaceIndex = runCatching { NetworkInterface.getByName(interfaceName)?.index ?: -1 }.getOrDefault(-1)
-        listener.updateDefaultInterface(interfaceName, interfaceIndex, false, false)
+        closeDefaultInterfaceMonitor(listener)
+        val callback =
+            object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    notifyCurrentUnderlyingInterface(listener, connectivity, "available")
+                }
+
+                override fun onCapabilitiesChanged(
+                    network: Network,
+                    networkCapabilities: android.net.NetworkCapabilities,
+                ) {
+                    notifyCurrentUnderlyingInterface(listener, connectivity, "capabilities")
+                }
+
+                override fun onLinkPropertiesChanged(
+                    network: Network,
+                    linkProperties: android.net.LinkProperties,
+                ) {
+                    notifyCurrentUnderlyingInterface(listener, connectivity, "link-properties")
+                }
+
+                override fun onLost(network: Network) {
+                    val replacement = VpnRuntimeLibbox.resolveUnderlyingDefaultNetwork(connectivity)
+                    if (replacement != null) {
+                        notifyDefaultInterfaceUpdate(listener, replacement, "lost-replaced")
+                    } else {
+                        appendDiagnostic("Default interface monitor observed non-VPN network loss without an active replacement.")
+                    }
+                }
+            }
+        synchronized(defaultInterfaceCallbacks) {
+            defaultInterfaceCallbacks[listener] = callback
+        }
+        val request =
+            NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                .build()
+        runCatching { connectivity.registerNetworkCallback(request, callback) }
+            .onFailure {
+                synchronized(defaultInterfaceCallbacks) {
+                    defaultInterfaceCallbacks.remove(listener)
+                }
+                appendDiagnostic("Failed to register default interface monitor: ${it.message}")
+            }
+        VpnRuntimeLibbox.resolveUnderlyingDefaultNetwork(connectivity)?.let { network ->
+            notifyDefaultInterfaceUpdate(listener, network, "initial")
+        }
     }
 
     override fun startNeighborMonitor(listener: NeighborUpdateListener) {
@@ -281,11 +387,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
 
     private fun handleStart(rawArgs: String?) {
         synchronized(lifecycleLock) {
-            val args = try {
-                JSObject(rawArgs ?: "{}")
-            } catch (_: Exception) {
-                JSObject()
-            }
+            val args = resolveStartArgs(rawArgs)
             val current = VpnRuntimeStore.snapshot(this)
             if (shouldReuseActiveRuntime(current, args)) {
                 val reused =
@@ -301,23 +403,38 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             }
             val base = VpnRuntimeStore.write(
                 this,
-                startSnapshotFromArgs(args, "Android VPN permission granted. Preparing native runtime..."),
+                applyRecoveryCounters(
+                    current = current,
+                    snapshot = startSnapshotFromArgs(args, "Android VPN permission granted. Preparing native runtime..."),
+                    startSource = args.getString("startSource", null),
+                ),
             )
+            val baseWithState = captureRuntimeState(base.copy(lastNetworkEvent = "start:requested"))
 
-            runOnMainSync { startForeground(base) }
+            runOnMainSync { startForeground(baseWithState) }
             acquireWakeLock()
 
             try {
+                var startupStage = "prepare_runtime"
+                val startedAt = SystemClock.elapsedRealtime()
+                updateStartupStage(startupStage)
                 appendDiagnostic("handleStart entered.")
                 closeRuntimeResources("handleStart")
                 appendLog("Initializing libbox runtime.")
                 val prepared = VpnRuntimeLibbox.prepareRuntime(this, args)
+                startupStage = "config_ready"
+                updateStartupStage(startupStage)
                 activeRuntime = prepared
                 appendLog("Validated Android runtime config: ${prepared.configPath}")
+                appendDiagnostic(
+                    "Prepared Android REALITY runtime. source=${args.getString("startSource", "unknown")} mode=${prepared.configMode} profileHash=${prepared.profileHash ?: "n/a"} features=${prepared.activeFeatures.joinToString(",")}",
+                )
                 prepared.remotePeer?.let { appendLog("VK relay remote peer: $it") }
 
                 val server = CommandServer(this, this)
                 server.start()
+                startupStage = "command_server_ready"
+                updateStartupStage(startupStage)
                 commandServer = server
                 appendDiagnostic("CommandServer started.")
 
@@ -337,18 +454,42 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                         autoRedirect = false
                     },
                 )
+                startupStage = "service_started"
+                updateStartupStage(startupStage)
                 appendDiagnostic("libbox startOrReloadService completed.")
                 VpnRuntimeLibbox.waitForLocalSocks(prepared.socksAddress, 20_000)
+                startupStage = "socks_ready"
+                updateStartupStage(startupStage)
                 appendDiagnostic("Local SOCKS endpoint became ready at ${prepared.socksAddress}.")
+                val startupDurationMs = SystemClock.elapsedRealtime() - startedAt
+                appendDiagnostic("Android VPN runtime startup completed in ${startupDurationMs}ms.")
 
                 if (!prepared.vkBinaryPath.isNullOrBlank()) {
-                    val waiting = VpnRuntimeLibbox.newVkWarmupSnapshot(VpnRuntimeStore.snapshot(this), prepared)
-                    VpnRuntimeStore.write(this, waiting)
+                    maybePersistRestorableState(args)
+                    val waiting =
+                        captureRuntimeState(
+                            VpnRuntimeLibbox.newVkWarmupSnapshot(VpnRuntimeStore.snapshot(this), prepared).copy(
+                                lastNetworkEvent = "startup:waiting-for-relay",
+                                lastStartupDurationMs = startupDurationMs,
+                                lastStartupStage = "waiting_for_relay",
+                                lastFailureStage = null,
+                                lastFailureCode = null,
+                            ),
+                        )
                     runOnMainSync { updateNotification(waiting) }
                     appendDiagnostic("Android VPN runtime is waiting for VK relay warmup.")
                 } else {
-                    val running = VpnRuntimeLibbox.newRunningSnapshot(VpnRuntimeStore.snapshot(this), prepared)
-                    VpnRuntimeStore.write(this, running)
+                    maybePersistRestorableState(args)
+                    val running =
+                        captureRuntimeState(
+                            VpnRuntimeLibbox.newRunningSnapshot(VpnRuntimeStore.snapshot(this), prepared).copy(
+                                lastNetworkEvent = "startup:running",
+                                lastStartupDurationMs = startupDurationMs,
+                                lastStartupStage = "running",
+                                lastFailureStage = null,
+                                lastFailureCode = null,
+                            ),
+                        )
                     runOnMainSync { updateNotification(running) }
                     appendDiagnostic("Android VPN runtime transitioned to running state.")
                 }
@@ -356,6 +497,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                 handleFailure(
                     message = error.message ?: "Android VPN runtime failed to start.",
                     extraLogLine = "Android VPN startup aborted before the tunnel became ready.",
+                    stage = VpnRuntimeStore.snapshot(this).lastStartupStage ?: "prepare_runtime",
                 )
             }
         }
@@ -367,14 +509,20 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
     ) {
         synchronized(lifecycleLock) {
             appendDiagnostic("handleStop entered. requestedByUser=$requestedByUser reason=$reason")
+            if (requestedByUser) {
+                VpnRuntimeRestoreStore.markResumeEligible(this, false)
+            }
             closeRuntimeResources("handleStop:$reason")
             val current = VpnRuntimeStore.snapshot(this)
-            VpnRuntimeStore.write(
-                this,
+            persistTerminalState(
                 current.copy(
                     status = "stopped",
                     error = null,
                     lastTest = current.lastTest,
+                    lastNetworkEvent = "stop:$reason",
+                    lastStartupStage = "stopped",
+                    lastFailureStage = null,
+                    lastFailureCode = null,
                     logTail =
                         trimLogTail(
                             current.logTail +
@@ -401,14 +549,19 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
     private fun handleFailure(
         message: String,
         extraLogLine: String? = null,
+        stage: String? = null,
     ) {
         synchronized(lifecycleLock) {
             appendDiagnostic("handleFailure entered. message=$message")
             closeRuntimeResources("handleFailure")
-            val next = VpnRuntimeStore.write(
-                this,
-                failedSnapshot(VpnRuntimeStore.snapshot(this), message, extraLogLine),
-            )
+            val next =
+                persistTerminalState(
+                    failedSnapshot(VpnRuntimeStore.snapshot(this), message, extraLogLine).copy(
+                        lastNetworkEvent = "failure",
+                        lastFailureStage = stage,
+                        lastFailureCode = classifyRuntimeFailureCode(message, stage),
+                    ),
+                )
             runOnMainSync { updateNotification(next) }
             runCatching { runOnMainSync { stopForeground(STOP_FOREGROUND_REMOVE) } }
                 .onFailure { appendDiagnostic("stopForeground failed during handleFailure: ${it.message}") }
@@ -455,6 +608,13 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             }
 
             activeRuntime = null
+            pendingNetworkReload?.let { mainHandler.removeCallbacks(it) }
+            pendingNetworkReload = null
+            networkReloadInFlight = false
+            queuedNetworkReloadTrigger = null
+            lastDeliveredUnderlyingNetworkHandle = null
+            lastDeliveredUnderlyingInterfaceName = null
+            closeAllDefaultInterfaceMonitors()
             releaseWakeLock()
             appendDiagnostic("Runtime resources closed. origin=$origin")
         } finally {
@@ -491,7 +651,13 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         if (current.status == "running") {
             return
         }
-        val running = VpnRuntimeLibbox.newRunningSnapshot(current, runtime)
+        val running =
+            captureRuntimeState(
+                VpnRuntimeLibbox.newRunningSnapshot(current, runtime).copy(
+                    lastRecoveryAction = "vk-relay:warmup-confirmed",
+                    lastStartupStage = "running",
+                ),
+            )
         VpnRuntimeStore.write(this, running)
         runOnMainSync { updateNotification(running) }
         appendDiagnostic("VK relay warmup confirmed; Android VPN runtime transitioned to running state.")
@@ -527,14 +693,343 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
     }
 
     private fun appendLog(line: String): TunnelSnapshot {
-        val current = VpnRuntimeStore.snapshot(this)
-        val next = current.copy(logTail = trimLogTail(current.logTail + line))
-        return VpnRuntimeStore.write(this, next)
+        return VpnRuntimeStore.update(this) { current ->
+            current.copy(logTail = trimLogTail(current.logTail + line))
+        }
     }
 
     private fun appendDiagnostic(line: String): TunnelSnapshot {
         Log.i(TAG, line)
         return appendLog(line)
+    }
+
+    private fun resolveStartArgs(rawArgs: String?): JSObject {
+        if (!rawArgs.isNullOrBlank()) {
+            val parsed =
+                try {
+                    VpnRuntimeLibbox.normalizeRuntimeArgs(JSObject(rawArgs))
+                } catch (_: Exception) {
+                    JSObject()
+                }
+            if (parsed.getString("startSource", null).isNullOrBlank()) {
+                parsed.put("startSource", "external")
+            }
+            return parsed
+        }
+
+        val restored = VpnRuntimeRestoreStore.readStartRequest(this)
+        if (restored != null && VpnRuntimeRestoreStore.isResumeEligible(this)) {
+            val normalized = VpnRuntimeLibbox.normalizeRuntimeArgs(restored)
+            normalized.put("startSource", "system_restore")
+            appendDiagnostic("Restored Android VPN runtime request from persisted state for system-driven startup.")
+            return normalized
+        }
+        appendDiagnostic("No resume-eligible Android VPN runtime request was available for system-driven startup.")
+        return JSObject()
+    }
+
+    private fun maybePersistRestorableState(args: JSObject) {
+        if (args.getString("protocol", "")?.trim() != "vless-reality") {
+            return
+        }
+        val effectiveArgs =
+            if (args.getBoolean("bootRestoreEnabled", false) || VpnRuntimeRestoreStore.isBootRestoreEnabled(this)) {
+                VpnRuntimeLibbox.normalizeRuntimeArgs(withBootRestoreEnabled(args, true))
+            } else {
+                args
+            }
+        VpnRuntimeRestoreStore.persistStartRequest(this, effectiveArgs)
+        VpnRuntimeRestoreStore.markResumeEligible(this, true)
+    }
+
+    private fun notifyDefaultInterfaceUpdate(
+        listener: InterfaceUpdateListener,
+        network: Network,
+        reason: String,
+    ) {
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+        val interfaceName = connectivity.getLinkProperties(network)?.interfaceName
+        if (interfaceName.isNullOrBlank()) {
+            appendDiagnostic("Default interface monitor skipped update because the interface name was empty. reason=$reason")
+            return
+        }
+        val interfaceIndex = runCatching { NetworkInterface.getByName(interfaceName)?.index ?: -1 }.getOrDefault(-1)
+        val networkHandle = networkHandleForComparison(network)
+        val shouldProcess =
+            synchronized(lifecycleLock) {
+                val process =
+                    shouldProcessUnderlyingInterfaceUpdate(
+                        previousNetworkHandle = lastDeliveredUnderlyingNetworkHandle,
+                        previousInterfaceName = lastDeliveredUnderlyingInterfaceName,
+                        currentNetworkHandle = networkHandle,
+                        currentInterfaceName = interfaceName,
+                        reason = reason,
+                    )
+                if (process) {
+                    lastDeliveredUnderlyingNetworkHandle = networkHandle
+                    lastDeliveredUnderlyingInterfaceName = interfaceName
+                }
+                process
+            }
+        if (!shouldProcess) {
+            return
+        }
+        listener.updateDefaultInterface(interfaceName, interfaceIndex, false, false)
+        val event = "default-interface:$reason:$interfaceName"
+        captureRuntimeState { current ->
+            current.copy(
+                lastNetworkEvent = event,
+                networkChangeCount = current.networkChangeCount + 1,
+                sessionNetworkChangeCount = current.sessionNetworkChangeCount + 1,
+            )
+        }
+        if (reason != "initial") {
+            scheduleNetworkReloadIfEnabled(event)
+        }
+        appendDiagnostic("Default interface update delivered. reason=$reason interface=$interfaceName index=$interfaceIndex")
+    }
+
+    private fun notifyCurrentUnderlyingInterface(
+        listener: InterfaceUpdateListener,
+        connectivity: ConnectivityManager,
+        reason: String,
+    ) {
+        val underlying = VpnRuntimeLibbox.resolveUnderlyingDefaultNetwork(connectivity)
+        if (underlying == null) {
+            appendDiagnostic("Default interface monitor skipped update because no eligible non-VPN network was available. reason=$reason")
+            return
+        }
+        notifyDefaultInterfaceUpdate(listener, underlying, reason)
+    }
+
+    private fun captureRuntimeState(snapshot: TunnelSnapshot): TunnelSnapshot {
+        val next =
+            snapshot.copy(
+                lastStartupStage = normalizeRunningStartupStage(snapshot.status, snapshot.lastStartupStage),
+                alwaysOnEnabled = readAlwaysOnEnabled(),
+                lockdownEnabled = readLockdownEnabled(),
+                resumeEligible = VpnRuntimeRestoreStore.isResumeEligible(this),
+            )
+        return VpnRuntimeStore.write(this, next, sync = true)
+    }
+
+    private fun captureRuntimeState(update: (TunnelSnapshot) -> TunnelSnapshot): TunnelSnapshot =
+        VpnRuntimeStore.update(this, sync = true) { current ->
+            update(current).let { next ->
+                next.copy(
+                    lastStartupStage = normalizeRunningStartupStage(next.status, next.lastStartupStage),
+                alwaysOnEnabled = readAlwaysOnEnabled(),
+                lockdownEnabled = readLockdownEnabled(),
+                resumeEligible = VpnRuntimeRestoreStore.isResumeEligible(this),
+                )
+            }
+        }
+
+    private fun persistTerminalState(snapshot: TunnelSnapshot): TunnelSnapshot =
+        VpnRuntimeStore.write(
+            this,
+            snapshot.copy(
+                resumeEligible = VpnRuntimeRestoreStore.isResumeEligible(this),
+            ),
+            sync = true,
+        )
+
+    private fun updateStartupStage(stage: String) {
+        captureRuntimeState { current ->
+            current.copy(
+                lastStartupStage = stage,
+                lastFailureStage = null,
+                lastFailureCode = null,
+            )
+        }
+    }
+
+    private fun readAlwaysOnEnabled(): Boolean? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return null
+        }
+        val platformValue = runCatching { isAlwaysOn }.getOrNull()
+        if (platformValue == true) {
+            return true
+        }
+        return readAlwaysOnPackageSetting()?.let { it == packageName } ?: platformValue
+    }
+
+    private fun readLockdownEnabled(): Boolean? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return null
+        }
+        val platformValue = runCatching { isLockdownEnabled }.getOrNull()
+        if (platformValue == true) {
+            return true
+        }
+        return readAlwaysOnLockdownSetting() ?: platformValue
+    }
+
+    private fun readAlwaysOnPackageSetting(): String? =
+        runCatching {
+            Settings.Secure.getString(contentResolver, "always_on_vpn_app")
+                ?.trim()
+                ?.takeUnless { it.isBlank() || it.equals("null", ignoreCase = true) }
+        }.getOrNull()
+
+    private fun readAlwaysOnLockdownSetting(): Boolean? =
+        runCatching {
+            when (Settings.Secure.getString(contentResolver, "always_on_vpn_lockdown")?.trim()?.lowercase()) {
+                "1", "true" -> true
+                "0", "false" -> false
+                else -> null
+            }
+        }.getOrNull()
+
+    private fun applyRecoveryCounters(
+        current: TunnelSnapshot,
+        snapshot: TunnelSnapshot,
+        startSource: String?,
+    ): TunnelSnapshot {
+        val restoreStart = startSource == "system_restore" || startSource == "boot_restore"
+        return snapshot.copy(
+            networkChangeCount = current.networkChangeCount,
+            reloadCount = current.reloadCount,
+            restoreCount = current.restoreCount + if (restoreStart) 1 else 0,
+            lastRecoveryAction =
+                if (restoreStart) {
+                    "restore:$startSource"
+                } else {
+                    current.lastRecoveryAction
+                },
+        )
+    }
+
+    private fun recordRestoreTelemetry(
+        source: String,
+        action: String,
+        detail: String,
+        message: String,
+    ) {
+        appendDiagnostic(message)
+        captureRuntimeState { current ->
+            current.copy(
+                lastRecoveryAction = "restore:$action:$source:$detail",
+                lastNetworkEvent = "restore:$source:$detail",
+            )
+        }
+    }
+
+    private fun scheduleNetworkReloadIfEnabled(trigger: String) {
+        val runtime = activeRuntime ?: return
+        if (!runtime.networkReloadOnChange) {
+            return
+        }
+        if (networkReloadInFlight) {
+            queuedNetworkReloadTrigger = trigger
+            captureRuntimeState { current ->
+                current.copy(lastRecoveryAction = "reload:queued:$trigger")
+            }
+            appendDiagnostic("Queued experimental REALITY reload while another reload is already running. trigger=$trigger")
+            return
+        }
+        val current = VpnRuntimeStore.snapshot(this)
+        if (!isActiveTunnelStatus(current.status)) {
+            return
+        }
+        val delayMs = runtime.networkReloadDebounceMs.coerceAtLeast(250L)
+        pendingNetworkReload?.let { mainHandler.removeCallbacks(it) }
+        val task =
+            Runnable {
+                pendingNetworkReload = null
+                thread(name = "odin-one-vpn-network-reload", isDaemon = true) {
+                    performNetworkReload(trigger)
+                }
+            }
+        pendingNetworkReload = task
+        mainHandler.postDelayed(task, delayMs)
+        captureRuntimeState { latest ->
+            latest.copy(lastRecoveryAction = "reload:scheduled:$trigger")
+        }
+        appendDiagnostic("Scheduled experimental REALITY reload in ${delayMs}ms. trigger=$trigger")
+    }
+
+    private fun performNetworkReload(trigger: String) {
+        var nextTrigger: String? = null
+        synchronized(lifecycleLock) {
+            val runtime = activeRuntime ?: return
+            if (!runtime.networkReloadOnChange) {
+                return
+            }
+            val server = commandServer ?: return
+            val current = VpnRuntimeStore.snapshot(this)
+            if (!isActiveTunnelStatus(current.status)) {
+                return
+            }
+            networkReloadInFlight = true
+            captureRuntimeState { latest ->
+                latest.copy(lastRecoveryAction = "reload:attempt:$trigger")
+            }
+            appendDiagnostic("Reloading active Android REALITY runtime after network change. trigger=$trigger")
+            runCatching {
+                server.startOrReloadService(
+                    runtime.configContent,
+                    OverrideOptions().apply {
+                        autoRedirect = false
+                    },
+                )
+                VpnRuntimeLibbox.waitForLocalSocks(runtime.socksAddress, 5_000)
+            }.onSuccess {
+                captureRuntimeState { latest ->
+                    latest.copy(
+                        reloadCount = latest.reloadCount + 1,
+                        sessionReloadCount = latest.sessionReloadCount + 1,
+                        lastRecoveryAction = "reload:success:$trigger",
+                        lastNetworkEvent = "reload:$trigger",
+                    )
+                }
+                appendDiagnostic("Experimental REALITY network reload completed. trigger=$trigger")
+            }.onFailure { error ->
+                captureRuntimeState { latest ->
+                    latest.copy(
+                        lastRecoveryAction = "reload:failed:$trigger",
+                        logTail =
+                            trimLogTail(
+                                latest.logTail +
+                                    "Experimental REALITY reload failed. trigger=$trigger error=${error.message ?: error::class.java.simpleName}",
+                            ),
+                    )
+                }
+                appendDiagnostic("Experimental REALITY network reload failed. trigger=$trigger error=${error.message}")
+            }.also {
+                networkReloadInFlight = false
+                nextTrigger = queuedNetworkReloadTrigger
+                queuedNetworkReloadTrigger = null
+            }
+        }
+        nextTrigger?.let { queuedTrigger ->
+            scheduleNetworkReloadIfEnabled("$queuedTrigger:deferred")
+        }
+    }
+
+    private fun networkHandleForComparison(network: Network): Long =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            network.networkHandle
+        } else {
+            network.hashCode().toLong()
+        }
+
+    private fun closeAllDefaultInterfaceMonitors() {
+        val callbacks =
+            synchronized(defaultInterfaceCallbacks) {
+                val values = defaultInterfaceCallbacks.values.toList()
+                defaultInterfaceCallbacks.clear()
+                values
+            }
+        if (callbacks.isEmpty()) {
+            return
+        }
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+        callbacks.forEach { callback ->
+            runCatching { connectivity.unregisterNetworkCallback(callback) }
+                .onFailure { appendDiagnostic("Failed to unregister default interface callback during shutdown: ${it.message}") }
+        }
     }
 
     private fun runOnMainSync(block: () -> Unit) {
@@ -610,21 +1105,15 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                 )
             }
 
-        val builder =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                AndroidNotification.Builder(this, NOTIFICATION_CHANNEL_ID)
-            } else {
-                AndroidNotification.Builder(this)
-            }
-
-        builder
+        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle(titleOverride ?: "Odin One")
             .setContentText(bodyOverride ?: state.error ?: state.logTail.lastOrNull() ?: "Preparing Android VPN runtime")
             .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-        pendingIntent?.let { builder.setContentIntent(it) }
-        return builder.build()
+            .apply {
+                pendingIntent?.let { setContentIntent(it) }
+            }.build()
     }
 
     private fun addAddresses(
@@ -695,4 +1184,28 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         private const val NOTIFICATION_ID = 7301
         private const val NOTIFICATION_CHANNEL_ID = "odin_one_vpn_runtime"
     }
+}
+
+private fun shouldKeepVpnServiceSticky(
+    action: String?,
+    snapshot: TunnelSnapshot,
+): Boolean =
+    when (action) {
+        VpnRuntimeService.ACTION_STOP -> false
+        VpnRuntimeService.ACTION_START -> true
+        null -> snapshot.resumeEligible == true
+        else -> snapshot.resumeEligible == true || isActiveTunnelStatus(snapshot.status)
+    }
+
+internal fun shouldProcessUnderlyingInterfaceUpdate(
+    previousNetworkHandle: Long?,
+    previousInterfaceName: String?,
+    currentNetworkHandle: Long,
+    currentInterfaceName: String,
+    reason: String,
+): Boolean {
+    if (reason == "initial" || reason == "lost-replaced") {
+        return true
+    }
+    return previousNetworkHandle != currentNetworkHandle || previousInterfaceName != currentInterfaceName
 }

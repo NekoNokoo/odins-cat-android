@@ -160,3 +160,19 @@ Current runtime caveat:
 - The APK now has native `VpnService.prepare(...)`, foreground-service startup, `libbox`-backed Android data plane for `VLESS + REALITY`, and bundled `libvkturn.so` process wiring for `VK relay`.
 - The Android runtime still exposes a localhost SOCKS listener so the shared UI and quick-test flow can stay close to the desktop contracts, while `VpnService` handles device-wide routing.
 - Build verification is complete, but runtime parity is still not fully proven until both modes are exercised on a real Android device with live deploy/imported profiles.
+
+## Current REALITY hardening track
+
+Android `VLESS + REALITY` hardening is now tracked separately in:
+
+- `docs/android-reality-hardening.md`
+
+That document records:
+
+- the stable vs experimental REALITY builder split
+- current low-risk hardening already landed in code
+- hidden profile-local experimental flags
+- opt-in boot restore and persisted REALITY request recovery
+- Always-on / Lockdown telemetry exposed through shared runtime state
+- handset validation guidance for stable and experimental REALITY runs
+- SPI tracking for the Android REALITY path
