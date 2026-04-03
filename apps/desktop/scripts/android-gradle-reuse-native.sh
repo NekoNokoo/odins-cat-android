@@ -5,6 +5,7 @@ SCRIPT_DIR="${0:A:h}"
 ANDROID_DIR="${SCRIPT_DIR}/../src-tauri/gen/android"
 ANDROID_DIR="${ANDROID_DIR:A}"
 DESKTOP_ENV_SCRIPT="${SCRIPT_DIR}/desktop-env.sh"
+VKTURN_HELPER="${SCRIPT_DIR}/build-vkturn-android-client.sh"
 
 usage() {
   cat <<'EOF'
@@ -21,6 +22,7 @@ This helper always:
   - runs Android Gradle through apps/desktop/scripts/desktop-env.sh
   - exports ODIN_ONE_SKIP_RUST_BUILD=true
   - passes -PskipRustBuild=true to Gradle
+  - refreshes bundled Android vk-turn-proxy client when needed
 
 Use it only when Kotlin / Android debug tooling changed and the existing Android
 native outputs should be reused without a fresh Tauri/Rust rebuild.
@@ -40,6 +42,14 @@ fi
 if [[ ! -d "$ANDROID_DIR" ]]; then
   echo "Android Gradle directory not found: ${ANDROID_DIR}" >&2
   exit 1
+fi
+
+if [[ "${ODIN_ONE_SKIP_ANDROID_VKTURN_BUILD:-0}" != "1" ]]; then
+  if [[ ! -x "$VKTURN_HELPER" ]]; then
+    echo "vk-turn Android helper not found: ${VKTURN_HELPER}" >&2
+    exit 1
+  fi
+  "$VKTURN_HELPER"
 fi
 
 cd "$ANDROID_DIR"

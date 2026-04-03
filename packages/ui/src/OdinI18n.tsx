@@ -135,6 +135,9 @@ const dictionaries = {
     guestAccess: "Передача доступа",
     guestAccessIntro: "Здесь можно сгенерировать ключ подключения из уже сохранённого профиля владельца и передать его другому пользователю без SSH и без запуска туннеля.",
     generateShareCode: "Сгенерировать ключ подключения",
+    guestAccessNeedsSecret: "Введите owner secret, чтобы сгенерировать новый ключ подключения.",
+    guestAccessOwnerOnly:
+      "Сейчас это устройство использует импортированный invite key. Новые ключи подключения можно выпускать только с owner device.",
     copyShareCode: "Скопировать share code",
     copyJson: "Скопировать JSON",
     copied: "Скопировано",
@@ -451,6 +454,9 @@ const dictionaries = {
     guestAccess: "Access sharing",
     guestAccessIntro: "Generate a connection key from the saved owner profile and pass it to another user without SSH or starting a tunnel.",
     generateShareCode: "Generate connection key",
+    guestAccessNeedsSecret: "Enter the owner secret to generate a new connection key.",
+    guestAccessOwnerOnly:
+      "This device is using an imported invite key. New connection keys can only be generated on the owner device.",
     copyShareCode: "Copy share code",
     copyJson: "Copy JSON",
     copied: "Copied",

@@ -393,7 +393,7 @@ func ensureVKTurnProxyBinary() ([]byte, error) {
 		return nil, fmt.Errorf("make gopath dir: %w", err)
 	}
 
-	cmd := exec.Command(resolveGoBinary(), "install", "github.com/cacggghp/vk-turn-proxy/server@latest")
+	cmd := exec.Command(resolveGoBinary(), "install", "github.com/cacggghp/vk-turn-proxy/server@v1.3.0")
 	cmd.Env = append(
 		os.Environ(),
 		"GOPATH="+goPathDir,

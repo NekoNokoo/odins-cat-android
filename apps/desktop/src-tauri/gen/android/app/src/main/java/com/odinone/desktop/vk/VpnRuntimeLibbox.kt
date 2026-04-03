@@ -557,7 +557,6 @@ object VpnRuntimeLibbox {
                 val wireGuard = readWireGuardSettings(profile)
                 val bridgePort = selectUdpPort(DEFAULT_VK_BRIDGE_PORT)
                 val vkBinary = File(context.applicationInfo.nativeLibraryDir, "libvkturn.so")
-                val vkCacheFile = File(runtimeDir, "vk-turn-creds.json")
                 if (!vkBinary.exists()) {
                     throw IllegalArgumentException("Missing bundled libvkturn.so in Android runtime")
                 }
@@ -568,7 +567,7 @@ object VpnRuntimeLibbox {
                     bridgeAddress = "127.0.0.1:$bridgePort",
                     remotePeer = "$serverHost:${wireGuard.relayPort}",
                     vkBinaryPath = vkBinary.path,
-                    vkArgs = buildVkTurnArgs(serverHost, wireGuard.relayPort, bridgePort, vkLink, vkCacheFile.path),
+                    vkArgs = buildVkTurnArgs(serverHost, wireGuard.relayPort, bridgePort, vkLink),
                     runtimeFamily = RUNTIME_FAMILY_VK_RELAY,
                     activationState = ACTIVATION_STATE_ACTIVE,
                 )
@@ -4941,7 +4940,6 @@ object VpnRuntimeLibbox {
         relayPort: Int,
         bridgePort: Int,
         link: String,
-        cachePath: String,
     ): List<String> {
         val linkFlag =
             if (link.contains("telemost.yandex", ignoreCase = true) || link.contains("yandex", ignoreCase = true)) {
@@ -4954,10 +4952,6 @@ object VpnRuntimeLibbox {
             "$serverHost:$relayPort",
             linkFlag,
             link,
-            "-cache-file",
-            cachePath,
-            "-fresh-bootstrap-count",
-            "4",
             "-n",
             "16",
             "-listen",

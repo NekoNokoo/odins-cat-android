@@ -386,6 +386,15 @@ export function ControlCenter() {
   );
   const hasLocalAccessProfileForSelectedMode =
     selectedAccessMode === "relay-via-server" ? hasLocalRelayAccessProfile : hasLocalAccessProfile;
+  const canGenerateGuestProfile = Boolean(resolvedDraftHost && ownerProfile?.exists && secret.trim());
+  const guestProfileHint =
+    importedProfile?.localPath && !ownerProfile?.exists
+      ? t("guestAccessOwnerOnly")
+      : ownerProfile?.exists && !secret.trim()
+        ? t("guestAccessNeedsSecret")
+        : !ownerProfile?.exists
+          ? t("noGuestProfile")
+          : "";
   const stageStatusLabels = {
     queued: t("stageQueued"),
     current: t("stageCurrent"),
@@ -1711,7 +1720,12 @@ export function ControlCenter() {
     setPendingAction("refreshOwnerProfile");
     startTransition(async () => {
       try {
-        const data = await fetchOwnerProfile(draft.host);
+        const host = resolvedDraftHost.trim();
+        if (!host) {
+          setError("Host is required");
+          return;
+        }
+        const data = await fetchOwnerProfile(host);
         if (data?.error) {
           setError(data.error);
         }
@@ -1886,14 +1900,20 @@ export function ControlCenter() {
     setError(null);
     startTransition(async () => {
       try {
-        if (draft.host) {
-          await fetchOwnerProfile(draft.host);
+        const host = resolvedDraftHost.trim();
+        if (!host) {
+          setError("Host is required");
+          return;
         }
+        const refreshedOwnerProfile = await fetchOwnerProfile(host);
         const res = await coreApi.generateGuestProfile({
-          server: draft,
+          server: {
+            ...draft,
+            host
+          },
           secret,
-          host: draft.host,
-          name: ownerProfile?.name ?? "Odin One Access Key"
+          host,
+          name: refreshedOwnerProfile?.name ?? ownerProfile?.name ?? "Odin One Access Key"
         });
         const data = res.data;
         setGuestProfile(data);
@@ -2040,7 +2060,7 @@ export function ControlCenter() {
                     className="ghost"
                     type="button"
                     onClick={handleGenerateGuestProfile}
-                    disabled={isPending || !draft.host || !ownerProfile?.exists || !secret.trim()}
+                    disabled={isPending || !canGenerateGuestProfile}
                   >
                     {t("generateShareCode")}
                   </button>
@@ -2061,6 +2081,10 @@ export function ControlCenter() {
                     {t("importProfile")}
                   </button>
                 </div>
+
+                {!canGenerateGuestProfile && guestProfileHint ? (
+                  <p className="compact-note">{guestProfileHint}</p>
+                ) : null}
 
                 {guestProfile?.shareCode ? (
                   <div className="invite-home__result">
@@ -2922,14 +2946,19 @@ export function ControlCenter() {
               <p className="compact-note compact-note--panel">{recoveryHint}</p>
 
               <div className="sheet-actions">
-                <button className="ghost" type="button" onClick={handleRefreshOwnerProfile} disabled={isPending || !draft.host}>
+                <button
+                  className="ghost"
+                  type="button"
+                  onClick={handleRefreshOwnerProfile}
+                  disabled={isPending || !resolvedDraftHost}
+                >
                   {t("refreshProfile")}
                 </button>
                 <button
                   className="ghost"
                   type="button"
                   onClick={handleGenerateGuestProfile}
-                  disabled={isPending || !draft.host || !ownerProfile?.exists || !secret.trim()}
+                  disabled={isPending || !canGenerateGuestProfile}
                 >
                   {t("generateShareCode")}
                 </button>
@@ -2937,6 +2966,10 @@ export function ControlCenter() {
                   {t("importProfile")}
                 </button>
               </div>
+
+              {!canGenerateGuestProfile && guestProfileHint ? (
+                <p className="compact-note compact-note--panel">{guestProfileHint}</p>
+              ) : null}
 
               <label className="input-field input-span">
                 <span>{t("importProfile")}</span>
