@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver
+            android:name=".VpnRuntimeDebugReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.odinone.desktop.vk.action.DEBUG_START_VPN_RUNTIME" />
+                <action android:name="com.odinone.desktop.vk.action.DEBUG_STOP_VPN_RUNTIME" />
+                <action android:name="com.odinone.desktop.vk.action.DEBUG_RUN_VPN_CONNECTIVITY_TEST" />
+                <action android:name="com.odinone.desktop.vk.action.DEBUG_REFRESH_REALITY_RELAY_AUTOSELECT" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

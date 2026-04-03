@@ -166,6 +166,9 @@ Current runtime caveat:
 Android `VLESS + REALITY` hardening is now tracked separately in:
 
 - `docs/android-reality-hardening.md`
+- `docs/android-cdn-anti-whitelist-scaffolding.md`
+- `docs/android-cdn-anti-whitelist-validation.md`
+- `docs/android-reality-whitelist-assisted-scaffolding.md`
 
 That document records:
 
@@ -176,3 +179,5 @@ That document records:
 - Always-on / Lockdown telemetry exposed through shared runtime state
 - handset validation guidance for stable and experimental REALITY runs
 - SPI tracking for the Android REALITY path
+- the first additive scaffolding pass for a separate hidden `cdn-anti-whitelist` Android family
+- the first additive scaffolding pass for a separate hidden `reality-whitelist-assisted` Android family

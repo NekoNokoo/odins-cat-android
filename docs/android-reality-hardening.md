@@ -89,6 +89,15 @@ This means the safest hardening path is:
 - no `vk-turn-proxy` runtime behavior is touched
 - no production default is switched to the experimental builder
 
+Separate third-mode scaffolding for the future Android `CDN / anti-whitelist` family is tracked in:
+
+- `docs/android-cdn-anti-whitelist-scaffolding.md`
+- `docs/android-cdn-anti-whitelist-validation.md`
+
+Separate whitelist-assisted REALITY scaffolding for operator-curated `SNI / CIDR` hints is tracked in:
+
+- `docs/android-reality-whitelist-assisted-scaffolding.md`
+
 ## Hidden experimental REALITY options
 
 The Android runtime now understands an additive profile-local override block.
@@ -399,8 +408,15 @@ Device validation runbook:
 - `docs/android-reality-validation-report-template.md`
 - `apps/desktop/scripts/android-reality-device-dump.sh`
 - `apps/desktop/scripts/android-reality-capture-run.sh`
+- `apps/desktop/scripts/android-runtime-compare-captures.sh`
+- `apps/desktop/scripts/android-runtime-report-draft.sh`
+- `apps/desktop/scripts/android-blocked-direct-checklist.sh`
+- `apps/desktop/scripts/android-cdn-origin-lab.sh`
 - `apps/desktop/scripts/android-reality-profile-preset.sh`
 - `apps/desktop/scripts/android-reality-apply-preset.sh`
+
+The capture helper now writes a sibling `.artifacts/` directory with raw XML/JSON files for each saved handset run.
+Android Gradle commands should be launched through `apps/desktop/scripts/desktop-env.sh` when the host shell defaults to Java 25; the helper now auto-detects a working JDK 21, including IntelliJ IDEA's bundled JBR21 on macOS.
 
 ### Next low-risk work
 

@@ -2,12 +2,14 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
+    time::SystemTime,
 };
 
 fn main() {
     println!("cargo:rerun-if-changed=../../../core/go/cmd/mvpd");
     println!("cargo:rerun-if-changed=../../../core/go/internal");
     println!("cargo:rerun-if-env-changed=GO_BINARY");
+    println!("cargo:rerun-if-env-changed=ODIN_ONE_VK_TURN_PROXY_SERVER_BINARY");
 
     if !matches!(
         env::var("CARGO_CFG_TARGET_OS").ok().as_deref(),
@@ -56,9 +58,14 @@ fn build_mvpd() -> Result<(), String> {
 }
 
 fn build_vk_turn_proxy_server_bundle() -> Result<(), String> {
+    let manifest_dir =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").map_err(|err| err.to_string())?);
     let out_dir = PathBuf::from(env::var("OUT_DIR").map_err(|err| err.to_string())?);
     let output_path = out_dir.join("vk-turn-proxy-server-linux-amd64");
     if output_path.exists() {
+        return Ok(());
+    }
+    if try_reuse_prebuilt_vk_turn_proxy_server_bundle(&manifest_dir, &output_path)? {
         return Ok(());
     }
 
@@ -66,30 +73,38 @@ fn build_vk_turn_proxy_server_bundle() -> Result<(), String> {
     let gopath_dir = out_dir.join("gopath-vk-turn-proxy-server");
     fs::create_dir_all(&gopath_dir).map_err(|err| err.to_string())?;
 
-    let output = Command::new(&go_binary)
-        .arg("install")
-        .arg("github.com/cacggghp/vk-turn-proxy/server@latest")
-        .env("GOPATH", &gopath_dir)
-        .env("GOOS", "linux")
-        .env("GOARCH", "amd64")
-        .env("CGO_ENABLED", "0")
-        .output()
-        .map_err(|err| format!("spawn go install vk-turn-proxy server: {err}"))?;
+    let mut last_error = None;
+    for goproxy in ["https://proxy.golang.org,direct", "direct"] {
+        let output = Command::new(&go_binary)
+            .arg("install")
+            .arg("github.com/cacggghp/vk-turn-proxy/server@latest")
+            .env("GOPATH", &gopath_dir)
+            .env("GOOS", "linux")
+            .env("GOARCH", "amd64")
+            .env("CGO_ENABLED", "0")
+            .env("GOPROXY", goproxy)
+            .output()
+            .map_err(|err| format!("spawn go install vk-turn-proxy server: {err}"))?;
 
-    if !output.status.success() {
-        return Err(format!(
-            "go install vk-turn-proxy server failed: {}",
+        if output.status.success() {
+            let installed_path = gopath_dir.join("bin").join("linux_amd64").join("server");
+            let data = fs::read(&installed_path)
+                .map_err(|err| format!("read built vk-turn-proxy server: {err}"))?;
+            fs::write(&output_path, data)
+                .map_err(|err| format!("cache bundled vk-turn-proxy server: {err}"))?;
+            return Ok(());
+        }
+
+        last_error = Some(format!(
+            "GOPROXY={goproxy}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
 
-    let installed_path = gopath_dir.join("bin").join("linux_amd64").join("server");
-    let data = fs::read(&installed_path)
-        .map_err(|err| format!("read built vk-turn-proxy server: {err}"))?;
-    fs::write(&output_path, data)
-        .map_err(|err| format!("cache bundled vk-turn-proxy server: {err}"))?;
-
-    Ok(())
+    Err(format!(
+        "go install vk-turn-proxy server failed: {}",
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    ))
 }
 
 fn should_reuse_prebuilt_mvpd(output_path: &Path, go_root: &Path) -> bool {
@@ -118,4 +133,92 @@ fn resolve_go_binary() -> String {
         return preferred.display().to_string();
     }
     env::var("GO_BINARY").unwrap_or_else(|_| "go".to_string())
+}
+
+fn try_reuse_prebuilt_vk_turn_proxy_server_bundle(
+    manifest_dir: &Path,
+    output_path: &Path,
+) -> Result<bool, String> {
+    if let Ok(explicit_path) = env::var("ODIN_ONE_VK_TURN_PROXY_SERVER_BINARY") {
+        let explicit_path = PathBuf::from(explicit_path);
+        if explicit_path.exists() {
+            fs::copy(&explicit_path, output_path)
+                .map_err(|err| format!("copy explicit vk-turn-proxy bundle: {err}"))?;
+            return Ok(true);
+        }
+    }
+
+    let target_dir = manifest_dir.join("target");
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
+    for candidate in collect_vk_turn_proxy_bundle_candidates(&target_dir)? {
+        let modified = fs::metadata(&candidate)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        if newest
+            .as_ref()
+            .map(|(current, _)| modified > *current)
+            .unwrap_or(true)
+        {
+            newest = Some((modified, candidate));
+        }
+    }
+
+    if let Some((_, candidate)) = newest {
+        fs::copy(candidate, output_path)
+            .map_err(|err| format!("copy cached vk-turn-proxy bundle: {err}"))?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+fn collect_vk_turn_proxy_bundle_candidates(target_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut candidates = Vec::new();
+    if !target_dir.exists() {
+        return Ok(candidates);
+    }
+
+    collect_vk_turn_proxy_bundle_candidates_from_build_root(
+        &mut candidates,
+        &target_dir.join("debug").join("build"),
+    )?;
+    collect_vk_turn_proxy_bundle_candidates_from_build_root(
+        &mut candidates,
+        &target_dir.join("release").join("build"),
+    )?;
+
+    for target_entry in fs::read_dir(target_dir).map_err(|err| err.to_string())? {
+        let target_entry = target_entry.map_err(|err| err.to_string())?;
+        let target_path = target_entry.path();
+        if !target_path.is_dir() {
+            continue;
+        }
+        collect_vk_turn_proxy_bundle_candidates_from_build_root(
+            &mut candidates,
+            &target_path.join("debug").join("build"),
+        )?;
+        collect_vk_turn_proxy_bundle_candidates_from_build_root(
+            &mut candidates,
+            &target_path.join("release").join("build"),
+        )?;
+    }
+
+    Ok(candidates)
+}
+
+fn collect_vk_turn_proxy_bundle_candidates_from_build_root(
+    candidates: &mut Vec<PathBuf>,
+    build_root: &Path,
+) -> Result<(), String> {
+    if !build_root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(build_root).map_err(|err| err.to_string())? {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let candidate = entry.path().join("out").join("vk-turn-proxy-server-linux-amd64");
+        if candidate.exists() {
+            candidates.push(candidate);
+        }
+    }
+    Ok(())
 }

@@ -8,9 +8,15 @@ ANDROID_SERIAL="${ODIN_ONE_ANDROID_SERIAL:-}"
 LOG_LINES="${ODIN_ONE_ANDROID_LOG_LINES:-200}"
 
 TMP_DIR="${TMPDIR:-/tmp}"
+ARTIFACT_DIR="${ODIN_ONE_ANDROID_ARTIFACT_DIR:-}"
 PREFS_FILE="${TMP_DIR%/}/odin-one-android-vpn-runtime.xml"
 DEVICE_PROTECTED_PREFS_FILE="${TMP_DIR%/}/odin-one-android-vpn-runtime-device-protected.xml"
-CONFIG_FILE="${TMP_DIR%/}/odin-one-android-active-vless-reality.json"
+REALITY_CONFIG_FILE="${TMP_DIR%/}/odin-one-android-active-vless-reality.json"
+REALITY_WHITELIST_SCAFFOLD_FILE="${TMP_DIR%/}/odin-one-android-reality-whitelist-assisted-scaffold.json"
+CDN_ACTIVE_CONFIG_FILE="${TMP_DIR%/}/odin-one-android-active-cdn-anti-whitelist.json"
+CDN_SCAFFOLD_FILE="${TMP_DIR%/}/odin-one-android-cdn-anti-whitelist-scaffold.json"
+VPS_ACTIVE_CONFIG_FILE="${TMP_DIR%/}/odin-one-android-active-vless-reality-vps-lab.json"
+VPS_SCAFFOLD_FILE="${TMP_DIR%/}/odin-one-android-reality-vps-lab-scaffold.json"
 
 section() {
   echo
@@ -39,9 +45,19 @@ adb_cmd() {
 }
 
 cleanup() {
-  rm -f "$PREFS_FILE" "$DEVICE_PROTECTED_PREFS_FILE" "$CONFIG_FILE"
+  rm -f "$PREFS_FILE" "$DEVICE_PROTECTED_PREFS_FILE" "$REALITY_CONFIG_FILE" "$REALITY_WHITELIST_SCAFFOLD_FILE" "$CDN_ACTIVE_CONFIG_FILE" "$CDN_SCAFFOLD_FILE" "$VPS_ACTIVE_CONFIG_FILE" "$VPS_SCAFFOLD_FILE"
 }
 trap cleanup EXIT INT TERM
+
+stage_artifact() {
+  local source_file="$1"
+  local artifact_name="$2"
+  if [[ -z "$ARTIFACT_DIR" ]]; then
+    return 0
+  fi
+  mkdir -p "$ARTIFACT_DIR"
+  cp "$source_file" "${ARTIFACT_DIR%/}/$artifact_name"
+}
 
 capture_run_as_file() {
   local remote_path="$1"
@@ -94,7 +110,27 @@ if snapshot_raw:
         print("Snapshot summary:")
         for key in [
             "status",
+            "runtimeFamily",
+            "activationState",
+            "frontHost",
+            "frontConnectHost",
+            "frontConnectPort",
+            "frontPath",
+            "frontProvider",
+            "frontTag",
+            "cdnRoutingDnsQueryStrategy",
+            "cdnRoutingDomainStrategy",
+            "cdnRoutingDomainMatcher",
+            "cdnRoutingDirectRuleCount",
+            "cdnRoutingBlockRuleCount",
+            "cdnRoutingBlockSelectedFrontHost",
+            "cdnDnsLocalResolverEnabled",
+            "selectedSniHint",
+            "selectedCidrHint",
+            "whitelistHintSource",
+            "whitelistHintTag",
             "startSource",
+            "profileHash",
             "configMode",
             "alwaysOnEnabled",
             "lockdownEnabled",
@@ -125,6 +161,7 @@ else:
     print("Snapshot summary: missing")
 
 last_request_raw = values.get("last_request")
+last_attempted_request_raw = values.get("last_attempted_request")
 print("")
 print(f"resume_eligible: {values.get('resume_eligible', 'missing')}")
 print(f"boot_restore_enabled: {values.get('boot_restore_enabled', 'missing')}")
@@ -139,6 +176,17 @@ if last_request_raw:
         print(last_request_raw)
 else:
     print("Last request JSON: missing")
+print("")
+if last_attempted_request_raw:
+    try:
+        last_attempted_request = json.loads(last_attempted_request_raw)
+        print("Last attempted request JSON:")
+        print(json.dumps(last_attempted_request, indent=2, ensure_ascii=False))
+    except Exception as exc:
+        print(f"Failed to parse last_attempted_request JSON: {exc}")
+        print(last_attempted_request_raw)
+else:
+    print("Last attempted request JSON: missing")
 PY
 }
 
@@ -193,6 +241,7 @@ note "always_on_vpn_lockdown: $(adb_cmd shell settings get secure always_on_vpn_
 
 section "Runtime Shared Prefs"
 if capture_run_as_file "shared_prefs/odin_one_vpn_runtime.xml" "$PREFS_FILE"; then
+  stage_artifact "$PREFS_FILE" "odin-one-vpn-runtime.xml"
   pretty_print_runtime_xml "$PREFS_FILE"
 else
   note "Unable to read shared_prefs/odin_one_vpn_runtime.xml via run-as."
@@ -201,23 +250,77 @@ fi
 
 section "Device-Protected Restore Shared Prefs"
 if capture_run_as_file "/data/user_de/0/${PACKAGE_NAME}/shared_prefs/odin_one_vpn_runtime.xml" "$DEVICE_PROTECTED_PREFS_FILE"; then
+  stage_artifact "$DEVICE_PROTECTED_PREFS_FILE" "odin-one-vpn-runtime-device-protected.xml"
   pretty_print_runtime_xml "$DEVICE_PROTECTED_PREFS_FILE"
 else
   note "Unable to read device-protected odin_one_vpn_runtime prefs via run-as."
   note "Hint: this is expected until the app has mirrored restore state into device-protected storage on a fresh run."
 fi
 
-section "Active REALITY Config"
-if capture_run_as_file "files/vpn-runtime/active-vless-reality.json" "$CONFIG_FILE"; then
-  pretty_print_json_file "$CONFIG_FILE"
+section "Runtime Config Artifacts"
+if capture_run_as_file "files/vpn-runtime/active-vless-reality.json" "$REALITY_CONFIG_FILE"; then
+  note "Artifact: active-vless-reality.json"
+  stage_artifact "$REALITY_CONFIG_FILE" "active-vless-reality.json"
+  pretty_print_json_file "$REALITY_CONFIG_FILE"
 else
   note "No active-vless-reality.json was readable via run-as."
+fi
+
+echo
+if capture_run_as_file "files/vpn-runtime/reality-whitelist-assisted-scaffold.json" "$REALITY_WHITELIST_SCAFFOLD_FILE"; then
+  note "Artifact: reality-whitelist-assisted-scaffold.json"
+  stage_artifact "$REALITY_WHITELIST_SCAFFOLD_FILE" "reality-whitelist-assisted-scaffold.json"
+  pretty_print_json_file "$REALITY_WHITELIST_SCAFFOLD_FILE"
+else
+  note "No reality-whitelist-assisted-scaffold.json was readable via run-as."
+fi
+
+echo
+if capture_run_as_file "files/vpn-runtime/active-cdn-anti-whitelist.json" "$CDN_ACTIVE_CONFIG_FILE"; then
+  note "Artifact: active-cdn-anti-whitelist.json"
+  stage_artifact "$CDN_ACTIVE_CONFIG_FILE" "active-cdn-anti-whitelist.json"
+  pretty_print_json_file "$CDN_ACTIVE_CONFIG_FILE"
+else
+  note "No active-cdn-anti-whitelist.json was readable via run-as."
+fi
+
+echo
+if capture_run_as_file "files/vpn-runtime/cdn-anti-whitelist-scaffold.json" "$CDN_SCAFFOLD_FILE"; then
+  note "Artifact: cdn-anti-whitelist-scaffold.json"
+  stage_artifact "$CDN_SCAFFOLD_FILE" "cdn-anti-whitelist-scaffold.json"
+  pretty_print_json_file "$CDN_SCAFFOLD_FILE"
+else
+  note "No cdn-anti-whitelist-scaffold.json was readable via run-as."
+fi
+
+echo
+if capture_run_as_file "files/vpn-runtime/active-vless-reality-vps-lab.json" "$VPS_ACTIVE_CONFIG_FILE"; then
+  note "Artifact: active-vless-reality-vps-lab.json"
+  stage_artifact "$VPS_ACTIVE_CONFIG_FILE" "active-vless-reality-vps-lab.json"
+  pretty_print_json_file "$VPS_ACTIVE_CONFIG_FILE"
+else
+  note "No active-vless-reality-vps-lab.json was readable via run-as."
+fi
+
+echo
+if capture_run_as_file "files/vpn-runtime/reality-vps-lab-scaffold.json" "$VPS_SCAFFOLD_FILE"; then
+  note "Artifact: reality-vps-lab-scaffold.json"
+  stage_artifact "$VPS_SCAFFOLD_FILE" "reality-vps-lab-scaffold.json"
+  pretty_print_json_file "$VPS_SCAFFOLD_FILE"
+else
+  note "No reality-vps-lab-scaffold.json was readable via run-as."
 fi
 
 section "Filtered Logcat"
 adb_cmd logcat -d -t "$LOG_LINES" -v brief VpnRuntimeService:I '*:S' 2>/dev/null || note "No VpnRuntimeService logcat lines were available."
 
+if [[ -n "$ARTIFACT_DIR" ]]; then
+  section "Saved Raw Artifacts"
+  note "Artifact directory: $ARTIFACT_DIR"
+  /bin/ls -1 "$ARTIFACT_DIR" 2>/dev/null | /usr/bin/sed 's/^/  - /' || note "No raw artifacts were written."
+fi
+
 section "How To Use"
 note "1. Run this after each stable or experimental handset scenario."
-note "2. Save the output together with the exact androidRuntime.reality block used for the run."
-note "3. Compare activeFeatures, lastRecoveryAction, restoreCount, reloadCount, and the rendered active REALITY config."
+note "2. Save the output together with the exact hidden runtime block used for the run."
+note "3. Compare runtimeFamily, front metadata, activeFeatures, lastRecoveryAction, restoreCount, reloadCount, and any rendered runtime artifacts."

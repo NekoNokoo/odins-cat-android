@@ -3,6 +3,7 @@ import type {
   DeployStage,
   InviteProfile,
   LocalTunnelState,
+  OwnerRuntimeLabRequest,
   OwnerAccessProfile,
   ServerDraft,
   SystemProxyState,
@@ -31,6 +32,7 @@ type ProvisionRequest = {
 
 type LocalTunnelStartRequest = ProvisionRequest & {
   vkLink: string;
+  ownerRuntimeLab?: OwnerRuntimeLabRequest;
 };
 
 type SystemProxyEnableRequest = {
@@ -237,6 +239,16 @@ export const coreApi = {
       }
 
       return result;
+    }
+    return postJson<LocalTunnelState>(
+      useRealityStartEndpoint ? "/api/local-tunnel/start-reality" : "/api/local-tunnel/start",
+      payload
+    );
+  },
+
+  async startLocalTunnelFast(payload: LocalTunnelStartRequest, useRealityStartEndpoint = false) {
+    if (await prefersAndroidNativeBridge()) {
+      return invokeNative<LocalTunnelState>("mobile_start_local_tunnel", { payload });
     }
     return postJson<LocalTunnelState>(
       useRealityStartEndpoint ? "/api/local-tunnel/start-reality" : "/api/local-tunnel/start",

@@ -13,8 +13,9 @@ if [[ -z "$NORMALIZED_LABEL" ]]; then
 fi
 
 STAMP="$("$DATE_BIN" '+%Y%m%d-%H%M%S')"
-OUTPUT_DIR="${ODIN_ONE_ANDROID_DUMP_DIR:-$ROOT_DIR/tmp/android-reality-device-dumps}"
+OUTPUT_DIR="${ODIN_ONE_ANDROID_DUMP_DIR:-/tmp/odin-one-android-device-dumps}"
 OUTPUT_FILE="${OUTPUT_DIR%/}/${STAMP}-${NORMALIZED_LABEL}.txt"
+ARTIFACT_DIR="${OUTPUT_DIR%/}/${STAMP}-${NORMALIZED_LABEL}.artifacts"
 
 section() {
   echo
@@ -32,11 +33,13 @@ require_script() {
 require_script "$DUMP_SCRIPT"
 mkdir -p "$OUTPUT_DIR"
 
-section "Android REALITY Capture"
+section "Android Runtime Capture"
 echo "Scenario: $SCENARIO_LABEL"
 echo "Output: $OUTPUT_FILE"
+echo "Artifacts: $ARTIFACT_DIR"
 
-"$DUMP_SCRIPT" | tee "$OUTPUT_FILE"
+ODIN_ONE_ANDROID_ARTIFACT_DIR="$ARTIFACT_DIR" "$DUMP_SCRIPT" | tee "$OUTPUT_FILE"
 
 section "Saved"
 echo "Wrote handset dump to $OUTPUT_FILE"
+echo "Wrote raw artifacts to $ARTIFACT_DIR"

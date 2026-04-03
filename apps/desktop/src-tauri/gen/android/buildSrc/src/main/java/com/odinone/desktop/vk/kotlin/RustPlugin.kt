@@ -16,6 +16,7 @@ open class RustPlugin : Plugin<Project> {
 
     override fun apply(project: Project) = with(project) {
         config = extensions.create("rust", Config::class.java)
+        val skipRustBuild = resolveSkipRustBuild(project)
 
         val defaultAbiList = listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64");
         val abiList = (findProperty("abiList") as? String)?.split(',') ?: defaultAbiList
@@ -63,16 +64,28 @@ open class RustPlugin : Plugin<Project> {
                     val targetName = targetPair.value
                     val targetArch = archList[targetPair.index]
                     val targetArchCapitalized = targetArch.replaceFirstChar { it.uppercase() }
-                    val targetBuildTask = project.tasks.maybeCreate(
-                        "rustBuild$targetArchCapitalized$profileCapitalized",
-                        BuildTask::class.java
-                    ).apply {
-                        group = TASK_GROUP
-                        description = "Build dynamic library in $profile mode for $targetArch"
-                        rootDirRel = config.rootDirRel
-                        target = targetName
-                        release = profile == "release"
-                    }
+                    val targetTaskName = "rustBuild$targetArchCapitalized$profileCapitalized"
+                    val targetBuildTask =
+                        if (skipRustBuild) {
+                            project.tasks.maybeCreate(
+                                targetTaskName,
+                                DefaultTask::class.java,
+                            ).apply {
+                                group = TASK_GROUP
+                                description = "Skip Rust rebuild in $profile mode for $targetArch and reuse checked-in jniLibs"
+                            }
+                        } else {
+                            project.tasks.maybeCreate(
+                                targetTaskName,
+                                BuildTask::class.java
+                            ).apply {
+                                group = TASK_GROUP
+                                description = "Build dynamic library in $profile mode for $targetArch"
+                                rootDirRel = config.rootDirRel
+                                target = targetName
+                                release = profile == "release"
+                            }
+                        }
 
                     buildTask.dependsOn(targetBuildTask)
                     tasks["merge$targetArchCapitalized${profileCapitalized}JniLibFolders"].dependsOn(
@@ -81,5 +94,21 @@ open class RustPlugin : Plugin<Project> {
                 }
             }
         }
+    }
+
+    private fun resolveSkipRustBuild(project: Project): Boolean {
+        val propertyValue = (project.findProperty("skipRustBuild") as? String)?.trim()
+        if (propertyValue != null && propertyValue.equals("true", ignoreCase = true)) {
+            project.logger.lifecycle("Rust rebuild disabled via -PskipRustBuild=true; reusing checked-in Android jniLibs.")
+            return true
+        }
+
+        val envValue = System.getenv("ODIN_ONE_SKIP_RUST_BUILD")?.trim()
+        if (!envValue.isNullOrEmpty() && envValue != "0" && !envValue.equals("false", ignoreCase = true)) {
+            project.logger.lifecycle("Rust rebuild disabled via ODIN_ONE_SKIP_RUST_BUILD; reusing checked-in Android jniLibs.")
+            return true
+        }
+
+        return false
     }
 }

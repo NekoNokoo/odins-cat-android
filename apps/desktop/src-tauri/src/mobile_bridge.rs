@@ -53,11 +53,28 @@ const DEFAULT_PROBE_HTTP_URL: &str = "http://example.com";
 const DEFAULT_PROBE_HTTPS_URL: &str = "https://example.com";
 const DEFAULT_REALITY_SERVER_NAME: &str = "www.cloudflare.com";
 const DEFAULT_REALITY_DEST: &str = "www.cloudflare.com:443";
+const OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_SCAFFOLD: &str = "reality-whitelist-scaffold";
+const OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_LAB: &str = "reality-whitelist-lab";
+const OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD: &str = "reality-vps-scaffold";
+const OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB: &str = "reality-vps-lab";
+const OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB: &str = "reality-vps-relay-lab";
+const OWNER_RUNTIME_LAB_VPS_TRANSPORT_TCP: &str = "tcp";
+const OWNER_RUNTIME_LAB_VPS_TRANSPORT_GRPC: &str = "grpc";
+const OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL: &str =
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Vless-Reality-White-Lists-Rus-Mobile.txt";
+const OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL: &str = "igareck-mobile-hourly";
+const OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_INTERVAL_HOURS: u64 = 1;
+const OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_THRESHOLD_MS: u64 = 300;
+const OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_TIMEOUT_MS: u64 = 1200;
+const OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_CANDIDATE_LIMIT: u64 = 8;
+const OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_MAX_PER_SNI: u64 = 2;
 const XRAY_RELEASE_URL: &str =
     "https://github.com/XTLS/Xray-core/releases/download/v25.8.3/Xray-linux-64.zip";
 const SING_BOX_LINUX_RELEASE_URL: &str = "https://github.com/SagerNet/sing-box/releases/download/v1.12.22/sing-box-1.12.22-linux-amd64.tar.gz";
-const BUNDLED_VK_TURN_PROXY_SERVER_LINUX_AMD64: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/vk-turn-proxy-server-linux-amd64"));
+const BUNDLED_VK_TURN_PROXY_SERVER_LINUX_AMD64: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/vk-turn-proxy-server-linux-amd64"
+));
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -243,6 +260,56 @@ pub(crate) struct LocalTunnelStartPayload {
     secret: String,
     #[serde(default)]
     vk_link: String,
+    #[serde(default)]
+    owner_runtime_lab: Option<OwnerRuntimeLabPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OwnerRuntimeLabRelayAutoselectPayload {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    subscription_url: String,
+    #[serde(default)]
+    source_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OwnerRuntimeLabPayload {
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    hint_server_name: String,
+    #[serde(default)]
+    hint_cidr_bucket: String,
+    #[serde(default)]
+    hint_source: String,
+    #[serde(default)]
+    hint_tag: String,
+    #[serde(default)]
+    vps_server_name: String,
+    #[serde(default)]
+    vps_port: u16,
+    #[serde(default)]
+    vps_transport: String,
+    #[serde(default)]
+    vps_flow: String,
+    #[serde(default)]
+    vps_fingerprint: String,
+    #[serde(default)]
+    vps_grpc_service_name: String,
+    #[serde(default)]
+    vps_grpc_authority: String,
+    #[serde(default)]
+    vps_source: String,
+    #[serde(default)]
+    vps_tag: String,
+    #[serde(default)]
+    vps_owner_reality_egress: bool,
+    #[serde(default)]
+    vps_relay_autoselect: Option<OwnerRuntimeLabRelayAutoselectPayload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -781,8 +848,23 @@ pub fn mobile_get_owner_profile(app: AppHandle, host: String) -> Result<Value, S
 
     let data =
         fs::read_to_string(&target_path).map_err(|err| format!("read owner profile: {err}"))?;
-    let profile: OwnerProfileFile =
+    let mut profile: OwnerProfileFile =
         serde_json::from_str(&data).map_err(|err| format!("parse owner profile: {err}"))?;
+    ensure_reality_relay_direct_fallback(&mut profile.staged_fallbacks);
+    ensure_reality_relay_owner_egress_fallback(&mut profile.staged_fallbacks);
+    profile.protocol_pack = build_protocol_pack_for_transport(
+        &profile.transport,
+        nonzero_u16(profile.endpoint_port),
+        profile
+            .staged_fallbacks
+            .get("vlessReality")
+            .and_then(|value| value.get("port"))
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok()),
+        nonzero_u16(profile.vk_turn_proxy_port),
+    );
+    let normalized_raw_json = serde_json::to_string_pretty(&profile)
+        .map_err(|err| format!("marshal owner profile response: {err}"))?;
 
     Ok(json!({
         "exists": true,
@@ -793,7 +875,7 @@ pub fn mobile_get_owner_profile(app: AppHandle, host: String) -> Result<Value, S
         "vkTurnProxyPort": profile.vk_turn_proxy_port,
         "endpointPort": profile.endpoint_port,
         "localPath": target_path.to_string_lossy(),
-        "rawJson": data,
+        "rawJson": normalized_raw_json,
         "protocolPack": profile.protocol_pack,
         "stagedFallbacks": profile.staged_fallbacks,
         "wireguard": profile.wireguard
@@ -944,8 +1026,11 @@ fn build_invite_response(
         "endpoint": invite.endpoint,
         "fingerprint": effective_invite_fingerprint(invite),
         "vlessReality": invite.vless_reality,
+        "protocolPack": invite_protocol_pack(invite),
+        "stagedFallbacks": invite_effective_staged_fallbacks(invite),
         "supportsReality": invite_supports_reality(invite),
         "supportsVKRelay": invite_supports_vk_relay(invite),
+        "supportsRealityRelay": invite_supports_reality_relay(invite),
         "shareCode": format!("{SHARE_CODE_PREFIX}{}", URL_SAFE_NO_PAD.encode(raw_json.as_bytes())),
         "rawJson": raw_json,
         "createdAt": optional_string(&invite.created_at),
@@ -956,6 +1041,29 @@ fn build_invite_response(
         response["localPath"] = json!(path.to_string_lossy().to_string());
     }
     Ok(response)
+}
+
+fn invite_effective_staged_fallbacks(invite: &InviteProfileFile) -> Value {
+    let mut staged = invite.staged_fallbacks.clone();
+    ensure_reality_relay_direct_fallback(&mut staged);
+    ensure_reality_relay_owner_egress_fallback(&mut staged);
+    staged
+}
+
+fn invite_effective_reality_port(invite: &InviteProfileFile) -> Option<u16> {
+    read_invite_reality_fallback(invite)
+        .map(|reality| reality.port)
+        .ok()
+        .or_else(|| nonzero_u16(invite.vless_reality.port))
+}
+
+fn invite_protocol_pack(invite: &InviteProfileFile) -> Vec<ProtocolPackEntry> {
+    build_protocol_pack_for_transport(
+        &invite.transport,
+        nonzero_u16(invite.wire_guard_port),
+        invite_effective_reality_port(invite),
+        nonzero_u16(invite.vk_turn_proxy_port),
+    )
 }
 
 fn decode_invite(share_code: &str) -> Result<InviteProfileFile, String> {
@@ -982,6 +1090,8 @@ fn decode_invite(share_code: &str) -> Result<InviteProfileFile, String> {
     if invite.fingerprint.trim().is_empty() {
         invite.fingerprint = fallback_fingerprint(&invite);
     }
+    ensure_reality_relay_direct_fallback(&mut invite.staged_fallbacks);
+    ensure_reality_relay_owner_egress_fallback(&mut invite.staged_fallbacks);
 
     validate_invite(&invite)?;
     Ok(invite)
@@ -1048,6 +1158,17 @@ fn invite_supports_vk_relay(invite: &InviteProfileFile) -> bool {
         && !invite.wire_guard.server_public_key.trim().is_empty()
         && !invite.wire_guard.client_private_key.trim().is_empty()
         && !invite.wire_guard.address.trim().is_empty()
+}
+
+fn invite_supports_reality_relay(invite: &InviteProfileFile) -> bool {
+    invite
+        .staged_fallbacks
+        .get("realityRelayOwnerEgress")
+        .and_then(Value::as_object)
+        .is_some_and(|fallback| {
+            !string_field(fallback.get("subscriptionUrl")).is_empty()
+                && !string_field(fallback.get("sourceLabel")).is_empty()
+        })
 }
 
 fn invite_has_wireguard(invite: &InviteProfileFile) -> bool {
@@ -1552,6 +1673,8 @@ async fn load_remote_access_state(
     } else {
         owner.protocol = normalized_invite_protocol(&owner).to_string();
     }
+    ensure_reality_relay_direct_fallback(&mut owner.staged_fallbacks);
+    ensure_reality_relay_owner_egress_fallback(&mut owner.staged_fallbacks);
 
     let xray_text = ssh
         .run(&format!("cat {}", quote_shell(WHITELIST_XRAY_CONFIG_PATH)))
@@ -1820,6 +1943,16 @@ fn enrich_invite_profile(
     if invite.server_host.trim().is_empty() {
         invite.server_host = owner.server_host.clone();
     }
+    if invite.staged_fallbacks.is_null()
+        || invite
+            .staged_fallbacks
+            .as_object()
+            .is_some_and(|value| value.is_empty())
+    {
+        invite.staged_fallbacks = owner.staged_fallbacks.clone();
+    }
+    ensure_reality_relay_direct_fallback(&mut invite.staged_fallbacks);
+    ensure_reality_relay_owner_egress_fallback(&mut invite.staged_fallbacks);
     if invite.vk_turn_proxy_port == 0 {
         invite.vk_turn_proxy_port = owner.vk_turn_proxy_port;
     }
@@ -2529,6 +2662,19 @@ fn build_staged_fallbacks(
             "flow": DEFAULT_REALITY_FLOW,
             "description": reality_description
         },
+        "realityRelayOwnerEgress": {
+            "status": if promoted { "ready" } else { "staged" },
+            "ownerEgressPort": REALITY_FALLBACK_MIN_PORT,
+            "subscriptionUrl": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL,
+            "sourceLabel": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL,
+            "description": "Experimental relay-assisted REALITY mode. The client picks a curated external REALITY relay first, then moves egress back to your Odin One server."
+        },
+        "realityRelayDirect": {
+            "status": "ready",
+            "subscriptionUrl": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL,
+            "sourceLabel": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL,
+            "description": "Experimental direct relay mode. The client picks a curated external REALITY relay from the hourly igareck feed and sends traffic through it without a second hop to your Odin One server."
+        },
         "naive": {
             "status": "staged",
             "port": NAIVE_FALLBACK_PORT,
@@ -2554,6 +2700,22 @@ fn render_staged_fallback_manifest(host: &str, reality_port: u16) -> Result<Stri
                 "port": reality_port,
                 "network": "tcp",
                 "notes": "Controlled direct fallback path exposed alongside the current WireGuard transport for macOS localhost testing."
+            },
+            {
+                "id": "reality-relay-owner-egress",
+                "status": "staged",
+                "engine": "sing-box",
+                "port": REALITY_FALLBACK_MIN_PORT,
+                "network": "tcp",
+                "notes": "Experimental relay-assisted path that enters through a curated external REALITY relay and then returns egress to the Odin One server."
+            },
+            {
+                "id": "reality-relay-direct",
+                "status": "staged",
+                "engine": "sing-box",
+                "port": REALITY_FALLBACK_PORT,
+                "network": "tcp",
+                "notes": "Experimental direct relay path that enters through a curated external REALITY relay from the hourly igareck feed and exits directly through that relay."
             },
             {
                 "id": "naive",
@@ -2697,6 +2859,26 @@ fn build_protocol_pack_for_transport(
             notes: "Legacy direct UDP path kept as a fallback while VLESS + REALITY is the default.".to_string(),
         },
         ProtocolPackEntry {
+            id: "vless-reality-relay".to_string(),
+            label: "white tunel".to_string(),
+            status: "staged".to_string(),
+            engine: "sing-box".to_string(),
+            scheme: "vless+reality-relay".to_string(),
+            network: "tcp".to_string(),
+            port: REALITY_FALLBACK_MIN_PORT,
+            notes: "Experimental relay-assisted path that starts through a curated external REALITY relay and returns internet egress to your server.".to_string(),
+        },
+        ProtocolPackEntry {
+            id: "vless-reality-relay-direct".to_string(),
+            label: "white relay".to_string(),
+            status: "staged".to_string(),
+            engine: "sing-box".to_string(),
+            scheme: "vless+reality-relay-direct".to_string(),
+            network: "tcp".to_string(),
+            port: REALITY_FALLBACK_PORT,
+            notes: "Experimental direct relay path that picks a curated external REALITY relay from the hourly igareck feed and sends traffic through it without returning egress to your server.".to_string(),
+        },
+        ProtocolPackEntry {
             id: "naive".to_string(),
             label: "Naive".to_string(),
             status: "staged".to_string(),
@@ -2739,6 +2921,7 @@ fn resolve_android_runtime_request(
     let protocol = requested_protocol(&payload.server);
     let engine = requested_engine(transport, protocol);
     let use_reality_start_endpoint = transport == "xray" && protocol == "vless-reality";
+    let owner_runtime_lab = requested_owner_runtime_lab(payload);
 
     if payload.secret.trim().is_empty() {
         if let Ok((invite, local_path)) =
@@ -2749,8 +2932,11 @@ fn resolve_android_runtime_request(
                     &invite, host, transport, protocol,
                 ));
             }
-            let raw_json = fs::read_to_string(&local_path)
+            let mut raw_json = fs::read_to_string(&local_path)
                 .map_err(|err| format!("read imported profile: {err}"))?;
+            if let Some(owner_runtime_lab) = owner_runtime_lab {
+                raw_json = apply_owner_runtime_lab_overrides(&raw_json, owner_runtime_lab)?;
+            }
             return Ok(json!({
                 "serverHost": host,
                 "transport": transport,
@@ -2766,7 +2952,7 @@ fn resolve_android_runtime_request(
 
     let owner_path = owner_profile_path(app, host)?;
     if !owner_path.exists() {
-        if payload.secret.trim().is_empty() {
+        if owner_runtime_lab.is_none() && payload.secret.trim().is_empty() {
             return Err(format!(
                 "no local imported access key found for host {host:?}"
             ));
@@ -2776,8 +2962,11 @@ fn resolve_android_runtime_request(
         ));
     }
 
-    let raw_json =
+    let mut raw_json =
         fs::read_to_string(&owner_path).map_err(|err| format!("read owner profile: {err}"))?;
+    if let Some(owner_runtime_lab) = owner_runtime_lab {
+        raw_json = apply_owner_runtime_lab_overrides(&raw_json, owner_runtime_lab)?;
+    }
     let owner: OwnerProfileFile =
         serde_json::from_str(&raw_json).map_err(|err| format!("parse owner profile: {err}"))?;
     if !owner_supports_requested_runtime(&owner, transport, protocol) {
@@ -2796,6 +2985,407 @@ fn resolve_android_runtime_request(
         "profileSource": "owner",
         "useRealityStartEndpoint": use_reality_start_endpoint
     }))
+}
+
+fn requested_owner_runtime_lab(
+    payload: &LocalTunnelStartPayload,
+) -> Option<&OwnerRuntimeLabPayload> {
+    payload.owner_runtime_lab.as_ref().filter(|runtime_lab| {
+        matches!(
+            runtime_lab.mode.trim(),
+            OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_SCAFFOLD
+                | OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_LAB
+                | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD
+                | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB
+                | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB
+        )
+    })
+}
+
+fn apply_owner_runtime_lab_overrides(
+    raw_json: &str,
+    owner_runtime_lab: &OwnerRuntimeLabPayload,
+) -> Result<String, String> {
+    let mut profile: Value =
+        serde_json::from_str(raw_json).map_err(|err| format!("parse owner profile json: {err}"))?;
+    let profile_object = ensure_object_value(&mut profile, "owner profile")?;
+    let bootstrap_server_host = profile_object
+        .get("serverHost")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    let bootstrap_reality = profile_object
+        .get("stagedFallbacks")
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("vlessReality"))
+        .and_then(Value::as_object)
+        .cloned()
+        .or_else(|| {
+            profile_object
+                .get("vlessReality")
+                .and_then(Value::as_object)
+                .cloned()
+        });
+    let android_runtime = ensure_object_value(
+        profile_object
+            .entry("androidRuntime")
+            .or_insert_with(|| json!({})),
+        "androidRuntime",
+    )?;
+    let reality = ensure_object_value(
+        android_runtime
+            .entry("reality")
+            .or_insert_with(|| json!({})),
+        "androidRuntime.reality",
+    )?;
+    reality.insert("mode".to_string(), Value::String("stable".to_string()));
+
+    match owner_runtime_lab.mode.trim() {
+        OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_SCAFFOLD
+        | OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_LAB => {
+            let hint_server_name = owner_runtime_lab
+                .hint_server_name
+                .trim()
+                .to_ascii_lowercase();
+            if hint_server_name.is_empty() {
+                return Err("owner runtime lab requires hintServerName".to_string());
+            }
+
+            let hint_source = if owner_runtime_lab.hint_source.trim().is_empty() {
+                "operator-curated".to_string()
+            } else {
+                owner_runtime_lab.hint_source.trim().to_string()
+            };
+            let hint_tag = if owner_runtime_lab.hint_tag.trim().is_empty() {
+                format!("owner-lab-{hint_server_name}")
+            } else {
+                owner_runtime_lab.hint_tag.trim().to_string()
+            };
+            let cidr_bucket = owner_runtime_lab.hint_cidr_bucket.trim();
+            let runtime_mode = match owner_runtime_lab.mode.trim() {
+                OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_LAB => "lab",
+                _ => "scaffold",
+            };
+
+            let whitelist_hints = ensure_object_value(
+                android_runtime
+                    .entry("realityWhitelistHints")
+                    .or_insert_with(|| json!({})),
+                "androidRuntime.realityWhitelistHints",
+            )?;
+            whitelist_hints.insert("enabled".to_string(), Value::Bool(true));
+            whitelist_hints.insert("mode".to_string(), Value::String(runtime_mode.to_string()));
+            whitelist_hints.insert(
+                "selection".to_string(),
+                Value::String("ordered".to_string()),
+            );
+            whitelist_hints.insert(
+                "bootstrap".to_string(),
+                Value::String("direct-reality".to_string()),
+            );
+            whitelist_hints.insert(
+                "hints".to_string(),
+                Value::Array(vec![Value::Object({
+                    let mut hint = serde_json::Map::new();
+                    hint.insert("serverName".to_string(), Value::String(hint_server_name));
+                    hint.insert("source".to_string(), Value::String(hint_source));
+                    hint.insert("tag".to_string(), Value::String(hint_tag));
+                    if !cidr_bucket.is_empty() {
+                        hint.insert(
+                            "cidrBucket".to_string(),
+                            Value::String(cidr_bucket.to_string()),
+                        );
+                    }
+                    hint
+                })]),
+            );
+            if let Some(existing) = android_runtime.get_mut("realityVpsLab") {
+                if let Some(existing_object) = existing.as_object_mut() {
+                    existing_object.insert("enabled".to_string(), Value::Bool(false));
+                    if let Some(existing_relay_autoselect) = existing_object
+                        .get_mut("relayAutoselect")
+                        .and_then(Value::as_object_mut)
+                    {
+                        existing_relay_autoselect.insert("enabled".to_string(), Value::Bool(false));
+                    }
+                }
+            }
+        }
+        OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD
+        | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB
+        | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB => {
+            let server_name = owner_runtime_lab
+                .vps_server_name
+                .trim()
+                .to_ascii_lowercase();
+            if server_name.is_empty() {
+                return Err("owner runtime lab requires vpsServerName".to_string());
+            }
+            if owner_runtime_lab.vps_port == 0 {
+                return Err("owner runtime lab requires a positive vpsPort".to_string());
+            }
+            let transport = match owner_runtime_lab.vps_transport.trim() {
+                OWNER_RUNTIME_LAB_VPS_TRANSPORT_TCP => OWNER_RUNTIME_LAB_VPS_TRANSPORT_TCP,
+                OWNER_RUNTIME_LAB_VPS_TRANSPORT_GRPC => OWNER_RUNTIME_LAB_VPS_TRANSPORT_GRPC,
+                _ => {
+                    return Err(
+                        "owner runtime lab requires vpsTransport to be tcp or grpc".to_string()
+                    )
+                }
+            };
+            let runtime_mode = match owner_runtime_lab.mode.trim() {
+                OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB => "lab",
+                OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB => "lab",
+                _ => "scaffold",
+            };
+            let source = if owner_runtime_lab.vps_source.trim().is_empty() {
+                "operator-curated:vps-lab".to_string()
+            } else {
+                owner_runtime_lab.vps_source.trim().to_string()
+            };
+            let tag = if owner_runtime_lab.vps_tag.trim().is_empty() {
+                format!(
+                    "owner-vps-lab-{server_name}-{transport}-{}",
+                    owner_runtime_lab.vps_port
+                )
+            } else {
+                owner_runtime_lab.vps_tag.trim().to_string()
+            };
+            let fingerprint = if owner_runtime_lab.vps_fingerprint.trim().is_empty() {
+                if transport == OWNER_RUNTIME_LAB_VPS_TRANSPORT_GRPC {
+                    "firefox".to_string()
+                } else {
+                    "chrome".to_string()
+                }
+            } else {
+                owner_runtime_lab.vps_fingerprint.trim().to_string()
+            };
+            let force_relay_owner_mode =
+                owner_runtime_lab.mode.trim() == OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB;
+            let vps_lab = ensure_object_value(
+                android_runtime
+                    .entry("realityVpsLab")
+                    .or_insert_with(|| json!({})),
+                "androidRuntime.realityVpsLab",
+            )?;
+            vps_lab.insert(
+                "ownerRealityEgress".to_string(),
+                Value::Bool(force_relay_owner_mode || owner_runtime_lab.vps_owner_reality_egress),
+            );
+            if let Some(bootstrap_reality) = bootstrap_reality.as_ref() {
+                let bootstrap = ensure_object_value(
+                    vps_lab
+                        .entry("ownerRealityBootstrap")
+                        .or_insert_with(|| json!({})),
+                    "androidRuntime.realityVpsLab.ownerRealityBootstrap",
+                )?;
+                if !bootstrap_server_host.is_empty() {
+                    bootstrap.insert(
+                        "serverHost".to_string(),
+                        Value::String(bootstrap_server_host),
+                    );
+                }
+                if let Some(port) = bootstrap_reality.get("port").and_then(Value::as_u64) {
+                    bootstrap.insert(
+                        "port".to_string(),
+                        Value::Number(serde_json::Number::from(port)),
+                    );
+                }
+                for key in ["uuid", "flow", "serverName", "publicKey", "shortId"] {
+                    if let Some(value) = bootstrap_reality
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        bootstrap.insert(key.to_string(), Value::String(value.to_string()));
+                    }
+                }
+            }
+            vps_lab.insert("enabled".to_string(), Value::Bool(true));
+            vps_lab.insert("mode".to_string(), Value::String(runtime_mode.to_string()));
+            vps_lab.insert("serverName".to_string(), Value::String(server_name));
+            vps_lab.insert(
+                "port".to_string(),
+                Value::Number(serde_json::Number::from(owner_runtime_lab.vps_port)),
+            );
+            vps_lab.insert(
+                "transport".to_string(),
+                Value::String(transport.to_string()),
+            );
+            vps_lab.insert("source".to_string(), Value::String(source));
+            vps_lab.insert("tag".to_string(), Value::String(tag));
+            vps_lab.insert("fingerprint".to_string(), Value::String(fingerprint));
+            if !owner_runtime_lab.vps_flow.trim().is_empty() {
+                vps_lab.insert(
+                    "flow".to_string(),
+                    Value::String(owner_runtime_lab.vps_flow.trim().to_string()),
+                );
+            }
+            if !owner_runtime_lab.vps_grpc_service_name.trim().is_empty() {
+                vps_lab.insert(
+                    "grpcServiceName".to_string(),
+                    Value::String(owner_runtime_lab.vps_grpc_service_name.trim().to_string()),
+                );
+            }
+            if !owner_runtime_lab.vps_grpc_authority.trim().is_empty() {
+                vps_lab.insert(
+                    "grpcAuthority".to_string(),
+                    Value::String(owner_runtime_lab.vps_grpc_authority.trim().to_string()),
+                );
+            }
+            let relay_autoselect_enabled = if force_relay_owner_mode {
+                true
+            } else {
+                owner_runtime_lab
+                    .vps_relay_autoselect
+                    .as_ref()
+                    .map(|value| value.enabled)
+                    .unwrap_or(false)
+            };
+            let relay_autoselect = ensure_object_value(
+                vps_lab
+                    .entry("relayAutoselect")
+                    .or_insert_with(|| json!({})),
+                "androidRuntime.realityVpsLab.relayAutoselect",
+            )?;
+            if relay_autoselect_enabled {
+                let relay_options = owner_runtime_lab.vps_relay_autoselect.as_ref();
+                let subscription_url = if relay_options
+                    .map(|value| value.subscription_url.trim())
+                    .unwrap_or_default()
+                    .is_empty()
+                {
+                    OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL.to_string()
+                } else {
+                    relay_options
+                        .map(|value| value.subscription_url.trim().to_string())
+                        .unwrap_or_else(|| {
+                            OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL.to_string()
+                        })
+                };
+                let source_label = if relay_options
+                    .map(|value| value.source_label.trim())
+                    .unwrap_or_default()
+                    .is_empty()
+                {
+                    OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL.to_string()
+                } else {
+                    relay_options
+                        .map(|value| value.source_label.trim().to_string())
+                        .unwrap_or_else(|| {
+                            OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL.to_string()
+                        })
+                };
+                relay_autoselect.insert("enabled".to_string(), Value::Bool(true));
+                relay_autoselect.insert(
+                    "subscriptionUrl".to_string(),
+                    Value::String(subscription_url),
+                );
+                relay_autoselect.insert("sourceLabel".to_string(), Value::String(source_label));
+                relay_autoselect.insert(
+                    "refreshIntervalHours".to_string(),
+                    Value::Number(serde_json::Number::from(
+                        OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_INTERVAL_HOURS,
+                    )),
+                );
+                relay_autoselect.insert(
+                    "russianLatencyThresholdMs".to_string(),
+                    Value::Number(serde_json::Number::from(
+                        OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_THRESHOLD_MS,
+                    )),
+                );
+                relay_autoselect.insert(
+                    "latencyTimeoutMs".to_string(),
+                    Value::Number(serde_json::Number::from(
+                        OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_TIMEOUT_MS,
+                    )),
+                );
+                relay_autoselect.insert(
+                    "candidateLimit".to_string(),
+                    Value::Number(serde_json::Number::from(
+                        OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_CANDIDATE_LIMIT,
+                    )),
+                );
+                relay_autoselect.insert(
+                    "maxPerSni".to_string(),
+                    Value::Number(serde_json::Number::from(
+                        OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_MAX_PER_SNI,
+                    )),
+                );
+            } else {
+                relay_autoselect.insert("enabled".to_string(), Value::Bool(false));
+            }
+            if let Some(existing) = android_runtime.get_mut("realityWhitelistHints") {
+                if let Some(existing_object) = existing.as_object_mut() {
+                    existing_object.insert("enabled".to_string(), Value::Bool(false));
+                }
+            }
+        }
+        _ => {
+            return Err("unsupported owner runtime lab mode".to_string());
+        }
+    }
+
+    serde_json::to_string(&profile)
+        .map_err(|err| format!("serialize owner runtime lab profile: {err}"))
+}
+
+fn ensure_object_value<'a>(
+    value: &'a mut Value,
+    label: &str,
+) -> Result<&'a mut serde_json::Map<String, Value>, String> {
+    if value.is_null() {
+        *value = json!({});
+    }
+    value
+        .as_object_mut()
+        .ok_or_else(|| format!("{label} must be a JSON object"))
+}
+
+fn ensure_reality_relay_owner_egress_fallback(staged_fallbacks: &mut Value) {
+    if staged_fallbacks.is_null() {
+        *staged_fallbacks = json!({});
+    }
+    let Some(staged_object) = staged_fallbacks.as_object_mut() else {
+        return;
+    };
+    if staged_object.contains_key("realityRelayOwnerEgress") {
+        return;
+    }
+    staged_object.insert(
+        "realityRelayOwnerEgress".to_string(),
+        json!({
+            "status": "ready",
+            "ownerEgressPort": REALITY_FALLBACK_MIN_PORT,
+            "subscriptionUrl": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL,
+            "sourceLabel": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL,
+            "description": "Experimental relay-assisted REALITY mode. The client picks a curated external REALITY relay first, then moves egress back to your Odin One server."
+        }),
+    );
+}
+
+fn ensure_reality_relay_direct_fallback(staged_fallbacks: &mut Value) {
+    if staged_fallbacks.is_null() {
+        *staged_fallbacks = json!({});
+    }
+    let Some(staged_object) = staged_fallbacks.as_object_mut() else {
+        return;
+    };
+    if staged_object.contains_key("realityRelayDirect") {
+        return;
+    }
+    staged_object.insert(
+        "realityRelayDirect".to_string(),
+        json!({
+            "status": "ready",
+            "subscriptionUrl": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL,
+            "sourceLabel": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL,
+            "description": "Experimental direct relay mode. The client picks a curated external REALITY relay from the hourly igareck feed and sends traffic through it without a second hop to your Odin One server."
+        }),
+    );
 }
 
 fn requested_transport(server: &ServerDraftPayload) -> &str {
@@ -3034,5 +3624,452 @@ fn describe_manual_port(port: Option<u16>, fallback: &str) -> String {
     match port {
         Some(value) if value > 0 => value.to_string(),
         _ => fallback.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        apply_owner_runtime_lab_overrides, build_protocol_pack_for_transport,
+        ensure_reality_relay_direct_fallback, OwnerRuntimeLabPayload,
+        OwnerRuntimeLabRelayAutoselectPayload, OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB,
+        OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB, OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD,
+        OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_LAB,
+        OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_SCAFFOLD,
+        OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_INTERVAL_HOURS,
+        OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL,
+        OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL,
+    };
+    use serde_json::Value;
+
+    #[test]
+    fn owner_runtime_lab_patch_adds_hidden_reality_whitelist_block() {
+        let patched = apply_owner_runtime_lab_overrides(
+            r#"{"name":"Owner","stagedFallbacks":{"vlessReality":{"port":443}}}"#,
+            &OwnerRuntimeLabPayload {
+                mode: OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_SCAFFOLD.to_string(),
+                hint_server_name: "max.ru".to_string(),
+                hint_cidr_bucket: "cidr-max".to_string(),
+                hint_source: "operator-curated".to_string(),
+                hint_tag: "candidate-max-ru".to_string(),
+                vps_server_name: String::new(),
+                vps_port: 0,
+                vps_transport: String::new(),
+                vps_flow: String::new(),
+                vps_fingerprint: String::new(),
+                vps_grpc_service_name: String::new(),
+                vps_grpc_authority: String::new(),
+                vps_source: String::new(),
+                vps_tag: String::new(),
+                vps_owner_reality_egress: false,
+                vps_relay_autoselect: None,
+            },
+        )
+        .expect("owner runtime lab patch should succeed");
+
+        let payload: Value =
+            serde_json::from_str(&patched).expect("patched profile should stay valid json");
+        assert_eq!(
+            payload["androidRuntime"]["reality"]["mode"].as_str(),
+            Some("stable")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityWhitelistHints"]["enabled"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityWhitelistHints"]["mode"].as_str(),
+            Some("scaffold")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityWhitelistHints"]["selection"].as_str(),
+            Some("ordered")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityWhitelistHints"]["bootstrap"].as_str(),
+            Some("direct-reality")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityWhitelistHints"]["hints"][0]["serverName"].as_str(),
+            Some("max.ru")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityWhitelistHints"]["hints"][0]["cidrBucket"].as_str(),
+            Some("cidr-max")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityWhitelistHints"]["hints"][0]["source"].as_str(),
+            Some("operator-curated")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityWhitelistHints"]["hints"][0]["tag"].as_str(),
+            Some("candidate-max-ru")
+        );
+    }
+
+    #[test]
+    fn owner_runtime_lab_patch_rejects_empty_server_name() {
+        let result = apply_owner_runtime_lab_overrides(
+            r#"{"name":"Owner"}"#,
+            &OwnerRuntimeLabPayload {
+                mode: OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_SCAFFOLD.to_string(),
+                hint_server_name: "   ".to_string(),
+                hint_cidr_bucket: String::new(),
+                hint_source: String::new(),
+                hint_tag: String::new(),
+                vps_server_name: String::new(),
+                vps_port: 0,
+                vps_transport: String::new(),
+                vps_flow: String::new(),
+                vps_fingerprint: String::new(),
+                vps_grpc_service_name: String::new(),
+                vps_grpc_authority: String::new(),
+                vps_source: String::new(),
+                vps_tag: String::new(),
+                vps_owner_reality_egress: false,
+                vps_relay_autoselect: None,
+            },
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn owner_runtime_lab_patch_supports_whitelist_lab_mode() {
+        let patched = apply_owner_runtime_lab_overrides(
+            r#"{"name":"Owner"}"#,
+            &OwnerRuntimeLabPayload {
+                mode: OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_LAB.to_string(),
+                hint_server_name: "duma.gov.ru".to_string(),
+                hint_cidr_bucket: String::new(),
+                hint_source: "operator-curated".to_string(),
+                hint_tag: "candidate-02-duma-gov-ru".to_string(),
+                vps_server_name: String::new(),
+                vps_port: 0,
+                vps_transport: String::new(),
+                vps_flow: String::new(),
+                vps_fingerprint: String::new(),
+                vps_grpc_service_name: String::new(),
+                vps_grpc_authority: String::new(),
+                vps_source: String::new(),
+                vps_tag: String::new(),
+                vps_owner_reality_egress: false,
+                vps_relay_autoselect: None,
+            },
+        )
+        .expect("owner runtime lab patch should support lab mode");
+
+        let payload: Value =
+            serde_json::from_str(&patched).expect("patched profile should stay valid json");
+        assert_eq!(
+            payload["androidRuntime"]["realityWhitelistHints"]["mode"].as_str(),
+            Some("lab")
+        );
+    }
+
+    #[test]
+    fn owner_runtime_lab_patch_adds_hidden_reality_vps_lab_block() {
+        let patched = apply_owner_runtime_lab_overrides(
+            r#"{"name":"Owner","stagedFallbacks":{"vlessReality":{"port":443}}}"#,
+            &OwnerRuntimeLabPayload {
+                mode: OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB.to_string(),
+                hint_server_name: String::new(),
+                hint_cidr_bucket: String::new(),
+                hint_source: String::new(),
+                hint_tag: String::new(),
+                vps_server_name: "ads.x5.ru".to_string(),
+                vps_port: 20443,
+                vps_transport: "grpc".to_string(),
+                vps_flow: String::new(),
+                vps_fingerprint: "firefox".to_string(),
+                vps_grpc_service_name: String::new(),
+                vps_grpc_authority: String::new(),
+                vps_source: "operator-curated:vps-lab".to_string(),
+                vps_tag: "reality-lab-ads-x5-ru-grpc".to_string(),
+                vps_owner_reality_egress: false,
+                vps_relay_autoselect: None,
+            },
+        )
+        .expect("owner runtime lab patch should support vps lab mode");
+
+        let payload: Value =
+            serde_json::from_str(&patched).expect("patched profile should stay valid json");
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["enabled"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["mode"].as_str(),
+            Some("lab")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["serverName"].as_str(),
+            Some("ads.x5.ru")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["port"].as_u64(),
+            Some(20443)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["transport"].as_str(),
+            Some("grpc")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["fingerprint"].as_str(),
+            Some("firefox")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["tag"].as_str(),
+            Some("reality-lab-ads-x5-ru-grpc")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["ownerRealityEgress"].as_bool(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn owner_runtime_lab_patch_adds_hidden_relay_autoselect_block() {
+        let patched = apply_owner_runtime_lab_overrides(
+            r#"{"name":"Owner","androidRuntime":{"realityVpsLab":{"relayAutoselect":{"enabled":true,"sourceLabel":"stale"}}}}"#,
+            &OwnerRuntimeLabPayload {
+                mode: OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB.to_string(),
+                hint_server_name: String::new(),
+                hint_cidr_bucket: String::new(),
+                hint_source: String::new(),
+                hint_tag: String::new(),
+                vps_server_name: "id.x5.ru".to_string(),
+                vps_port: 443,
+                vps_transport: "tcp".to_string(),
+                vps_flow: "xtls-rprx-vision".to_string(),
+                vps_fingerprint: "chrome".to_string(),
+                vps_grpc_service_name: String::new(),
+                vps_grpc_authority: String::new(),
+                vps_source: String::new(),
+                vps_tag: String::new(),
+                vps_owner_reality_egress: false,
+                vps_relay_autoselect: Some(OwnerRuntimeLabRelayAutoselectPayload {
+                    enabled: true,
+                    subscription_url: String::new(),
+                    source_label: String::new(),
+                }),
+            },
+        )
+        .expect("owner runtime lab patch should support relay autoselect");
+
+        let payload: Value =
+            serde_json::from_str(&patched).expect("patched profile should stay valid json");
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["relayAutoselect"]["enabled"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["relayAutoselect"]["subscriptionUrl"]
+                .as_str(),
+            Some(OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["relayAutoselect"]["sourceLabel"].as_str(),
+            Some(OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["relayAutoselect"]["refreshIntervalHours"]
+                .as_u64(),
+            Some(OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_INTERVAL_HOURS)
+        );
+    }
+
+    #[test]
+    fn owner_runtime_lab_patch_can_enable_owner_reality_egress() {
+        let patched = apply_owner_runtime_lab_overrides(
+            r#"{"name":"Owner","serverHost":"95.81.120.226","stagedFallbacks":{"vlessReality":{"port":52443,"uuid":"fe05feb2-c88c-46bc-b809-ba9eefc5e6ee","flow":"xtls-rprx-vision","serverName":"www.cloudflare.com","publicKey":"EwRrvp8PKSyz5Fb2tgXG-4uv1UJfQw65yRTvoH36aw4","shortId":"2d2812af9d8e4cf4"}}}"#,
+            &OwnerRuntimeLabPayload {
+                mode: OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB.to_string(),
+                hint_server_name: String::new(),
+                hint_cidr_bucket: String::new(),
+                hint_source: String::new(),
+                hint_tag: String::new(),
+                vps_server_name: "id.x5.ru".to_string(),
+                vps_port: 443,
+                vps_transport: "tcp".to_string(),
+                vps_flow: "xtls-rprx-vision".to_string(),
+                vps_fingerprint: "chrome".to_string(),
+                vps_grpc_service_name: String::new(),
+                vps_grpc_authority: String::new(),
+                vps_source: String::new(),
+                vps_tag: String::new(),
+                vps_owner_reality_egress: true,
+                vps_relay_autoselect: None,
+            },
+        )
+        .expect("owner runtime lab patch should support owner reality egress");
+
+        let payload: Value =
+            serde_json::from_str(&patched).expect("patched profile should stay valid json");
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["ownerRealityEgress"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["ownerRealityBootstrap"]["serverHost"]
+                .as_str(),
+            Some("95.81.120.226")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["ownerRealityBootstrap"]["port"].as_u64(),
+            Some(52443)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["ownerRealityBootstrap"]["serverName"]
+                .as_str(),
+            Some("www.cloudflare.com")
+        );
+    }
+
+    #[test]
+    fn owner_runtime_lab_patch_forces_relay_owner_mode() {
+        let patched = apply_owner_runtime_lab_overrides(
+            r#"{"name":"Owner","serverHost":"95.81.120.226","stagedFallbacks":{"vlessReality":{"port":52443,"uuid":"fe05feb2-c88c-46bc-b809-ba9eefc5e6ee","flow":"xtls-rprx-vision","serverName":"www.cloudflare.com","publicKey":"EwRrvp8PKSyz5Fb2tgXG-4uv1UJfQw65yRTvoH36aw4","shortId":"2d2812af9d8e4cf4"}}}"#,
+            &OwnerRuntimeLabPayload {
+                mode: OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB.to_string(),
+                hint_server_name: String::new(),
+                hint_cidr_bucket: String::new(),
+                hint_source: String::new(),
+                hint_tag: String::new(),
+                vps_server_name: "id.x5.ru".to_string(),
+                vps_port: 443,
+                vps_transport: "tcp".to_string(),
+                vps_flow: "xtls-rprx-vision".to_string(),
+                vps_fingerprint: "chrome".to_string(),
+                vps_grpc_service_name: String::new(),
+                vps_grpc_authority: String::new(),
+                vps_source: String::new(),
+                vps_tag: String::new(),
+                vps_owner_reality_egress: false,
+                vps_relay_autoselect: None,
+            },
+        )
+        .expect("owner runtime lab patch should force relay -> owner mode");
+
+        let payload: Value =
+            serde_json::from_str(&patched).expect("patched profile should stay valid json");
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["mode"].as_str(),
+            Some("lab")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["ownerRealityEgress"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["relayAutoselect"]["enabled"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["relayAutoselect"]["subscriptionUrl"]
+                .as_str(),
+            Some(OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL)
+        );
+    }
+
+    #[test]
+    fn owner_runtime_lab_patch_disables_stale_relay_autoselect_for_manual_vps_lab() {
+        let patched = apply_owner_runtime_lab_overrides(
+            r#"{"name":"Owner","androidRuntime":{"realityVpsLab":{"relayAutoselect":{"enabled":true,"sourceLabel":"stale"}}}}"#,
+            &OwnerRuntimeLabPayload {
+                mode: OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB.to_string(),
+                hint_server_name: String::new(),
+                hint_cidr_bucket: String::new(),
+                hint_source: String::new(),
+                hint_tag: String::new(),
+                vps_server_name: "ads.x5.ru".to_string(),
+                vps_port: 20443,
+                vps_transport: "grpc".to_string(),
+                vps_flow: String::new(),
+                vps_fingerprint: "firefox".to_string(),
+                vps_grpc_service_name: String::new(),
+                vps_grpc_authority: String::new(),
+                vps_source: String::new(),
+                vps_tag: String::new(),
+                vps_owner_reality_egress: false,
+                vps_relay_autoselect: None,
+            },
+        )
+        .expect("owner runtime lab patch should disable stale relay autoselect");
+
+        let payload: Value =
+            serde_json::from_str(&patched).expect("patched profile should stay valid json");
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["relayAutoselect"]["enabled"].as_bool(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn owner_runtime_lab_patch_supports_reality_vps_scaffold_defaults() {
+        let patched = apply_owner_runtime_lab_overrides(
+            r#"{"name":"Owner"}"#,
+            &OwnerRuntimeLabPayload {
+                mode: OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD.to_string(),
+                hint_server_name: String::new(),
+                hint_cidr_bucket: String::new(),
+                hint_source: String::new(),
+                hint_tag: String::new(),
+                vps_server_name: "pimg.mycdn.me".to_string(),
+                vps_port: 10443,
+                vps_transport: "tcp".to_string(),
+                vps_flow: "xtls-rprx-vision".to_string(),
+                vps_fingerprint: String::new(),
+                vps_grpc_service_name: String::new(),
+                vps_grpc_authority: String::new(),
+                vps_source: String::new(),
+                vps_tag: String::new(),
+                vps_owner_reality_egress: false,
+                vps_relay_autoselect: None,
+            },
+        )
+        .expect("owner runtime lab patch should support vps scaffold mode");
+
+        let payload: Value =
+            serde_json::from_str(&patched).expect("patched profile should stay valid json");
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["mode"].as_str(),
+            Some("scaffold")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["fingerprint"].as_str(),
+            Some("chrome")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["flow"].as_str(),
+            Some("xtls-rprx-vision")
+        );
+    }
+
+    #[test]
+    fn protocol_pack_includes_white_relay_entry() {
+        let entries = build_protocol_pack_for_transport("xray", Some(51820), Some(443), Some(56080));
+        assert!(
+            entries.iter().any(|entry| {
+                entry.id == "vless-reality-relay-direct" &&
+                    entry.label == "white relay" &&
+                    entry.port == 443
+            }),
+            "protocol pack should expose the direct relay mode for deploy/invite flows",
+        );
+    }
+
+    #[test]
+    fn ensure_reality_relay_direct_fallback_adds_hourly_source() {
+        let mut staged = serde_json::json!({});
+        ensure_reality_relay_direct_fallback(&mut staged);
+        assert_eq!(
+            staged["realityRelayDirect"]["subscriptionUrl"].as_str(),
+            Some(OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL)
+        );
+        assert_eq!(
+            staged["realityRelayDirect"]["sourceLabel"].as_str(),
+            Some(OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL)
+        );
     }
 }

@@ -41,6 +41,97 @@ Available presets:
   - isolated stricter route posture with private bypass disabled while DNS and reload stay on stable defaults
 - `per-app-captive-bypass`
   - experimental captive portal bypass via `excludePackages`
+- `reality-whitelist-scaffold`
+  - hidden operator-facing scaffold for the separate `reality-whitelist-assisted` family
+  - carries an ordered hidden `hints` pool with `serverName`, `cidrBucket`, `source`, and `tag`
+  - keeps stable `direct-reality` as the control sample and forces boot restore out of scope
+  - supports env overrides for first owner-only hint curation:
+    - `ODIN_ONE_REALITY_BASE_MODE`
+    - `ODIN_ONE_REALITY_HINTS_FILE`
+    - `ODIN_ONE_REALITY_HINT_SELECTION`
+    - `ODIN_ONE_REALITY_HINT_BOOTSTRAP`
+    - `ODIN_ONE_REALITY_HINT_SELECT_TAG`
+    - `ODIN_ONE_REALITY_HINT_SELECT_INDEX`
+    - `ODIN_ONE_REALITY_HINT_SERVER_NAME`
+    - `ODIN_ONE_REALITY_HINT_CIDR_BUCKET`
+    - `ODIN_ONE_REALITY_HINT_SOURCE`
+    - `ODIN_ONE_REALITY_HINT_TAG`
+    - `ODIN_ONE_REALITY_BACKUP_HINT_SERVER_NAME`
+    - `ODIN_ONE_REALITY_BACKUP_HINT_CIDR_BUCKET`
+    - `ODIN_ONE_REALITY_BACKUP_HINT_SOURCE`
+    - `ODIN_ONE_REALITY_BACKUP_HINT_TAG`
+  - pairs with:
+    - `docs/android-reality-whitelist-assisted-scaffolding.md`
+    - `apps/desktop/scripts/android-reality-whitelist-curate.sh`
+    - `apps/desktop/scripts/android-reality-whitelist-curate-community.sh`
+    - `apps/desktop/scripts/android-reality-whitelist-session.sh`
+    - `apps/desktop/scripts/android-reality-whitelist-manual-session.sh`
+    - `apps/desktop/scripts/android-reality-whitelist-manual-batch.sh`
+- `reality-whitelist-lab`
+  - hidden owner-only active preset for the same `reality-whitelist-assisted` family
+  - reuses the stable REALITY builder and overrides only the selected curated `serverName`
+  - intentionally keeps restore / boot restore out of scope for this phase
+  - session helper auto-runs a quick connectivity probe by default so `lastTest` lands in the capture
+  - uses the same hint env overrides as `reality-whitelist-scaffold`
+  - pairs with:
+    - `docs/android-reality-whitelist-assisted-scaffolding.md`
+    - `apps/desktop/scripts/android-reality-whitelist-session.sh --preset reality-whitelist-lab`
+- `cdn-scaffold`
+  - hidden third-mode scaffold for the future `cdn-anti-whitelist` family
+  - carries an ordered hidden `frontPool` so we can validate whitelist-reachable HTTPS fronts without touching the stable default lane
+  - now also accepts a reusable plan file via:
+    - `ODIN_ONE_CDN_PLAN_FILE`
+    - `ODIN_ONE_CDN_PLAN_SELECT_TAG`
+    - `ODIN_ONE_CDN_PLAN_SELECT_INDEX`
+  - front entries now also carry future `WS + TLS` blueprint fields such as `port`, `tlsServerName`, and `hostHeader`, plus optional `connectHost` / `connectPort` dial-target overrides and a hidden nested `origin` block
+  - now also seeds a hidden `routingPolicy` scaffold inspired by a working whitelist config:
+    - `dnsQueryStrategy = use_ip`
+    - `domainStrategy = ip_if_non_match`
+    - `domainMatcher = hybrid`
+    - direct local-service keyword families
+    - `blockSelectedFrontHost = true`
+  - supports env overrides for policy scaffolding:
+    - `ODIN_ONE_CDN_ROUTING_DNS_QUERY_STRATEGY`
+    - `ODIN_ONE_CDN_ROUTING_DOMAIN_STRATEGY`
+    - `ODIN_ONE_CDN_ROUTING_DOMAIN_MATCHER`
+    - `ODIN_ONE_CDN_ROUTING_DIRECT_KEYWORDS`
+    - `ODIN_ONE_CDN_ROUTING_DIRECT_DOMAINS`
+    - `ODIN_ONE_CDN_ROUTING_BLOCK_KEYWORDS`
+    - `ODIN_ONE_CDN_ROUTING_BLOCK_DOMAINS`
+    - `ODIN_ONE_CDN_ROUTING_BLOCK_SELECTED_FRONT_HOST`
+  - pairs with:
+    - `docs/android-cdn-anti-whitelist-validation.md`
+  - stays `scaffold_only` and must not replace the stable direct `VLESS + REALITY` control sample
+- `cdn-ws-lab`
+  - hidden owner-only activation preset for the first runnable `cdn-anti-whitelist` transport path
+  - currently enables only `mode = lab` plus `transport = websocket`
+  - still must not replace the stable direct `VLESS + REALITY` control sample
+  - intentionally keeps restore / boot restore out of scope for this phase
+  - can now load reusable owner-lab front/origin plans from:
+    - `ODIN_ONE_CDN_PLAN_FILE`
+    - `ODIN_ONE_CDN_PLAN_SELECT_TAG`
+    - `ODIN_ONE_CDN_PLAN_SELECT_INDEX`
+  - supports env overrides for real owner-lab values:
+    - `ODIN_ONE_CDN_FRONT_HOST`
+    - `ODIN_ONE_CDN_FRONT_PORT`
+    - `ODIN_ONE_CDN_CONNECT_HOST`
+    - `ODIN_ONE_CDN_CONNECT_PORT`
+    - `ODIN_ONE_CDN_FRONT_PATH`
+    - `ODIN_ONE_CDN_TLS_SERVER_NAME`
+    - `ODIN_ONE_CDN_HOST_HEADER`
+    - `ODIN_ONE_CDN_FRONT_TAG`
+    - `ODIN_ONE_CDN_ORIGIN_HOST`
+    - `ODIN_ONE_CDN_ORIGIN_PORT`
+    - `ODIN_ONE_CDN_ORIGIN_SCHEME`
+    - `ODIN_ONE_CDN_ORIGIN_PATH`
+    - `ODIN_ONE_CDN_FRONT_SELECTION`
+    - `ODIN_ONE_CDN_TRANSPORT`
+    - `ODIN_ONE_CDN_BOOTSTRAP`
+    - all `ODIN_ONE_CDN_ROUTING_*` policy-scaffold env overrides from `cdn-scaffold`
+  - pairs well with:
+    - `apps/desktop/scripts/android-cdn-origin-lab.sh --preset cdn-ws-lab --output-dir /tmp/odin-one-android-cdn-origin-lab`
+    - `apps/desktop/scripts/android-cdn-lab-preflight.sh --preset cdn-ws-lab --strict`
+    - `apps/desktop/scripts/android-cdn-lab-session.sh`
 
 Suggested workflow:
 
@@ -61,3 +152,54 @@ apps/desktop/scripts/android-reality-apply-preset.sh dot-google
 
 This patches the persisted Android REALITY request on the connected debug handset,
 then force-stops the package so the next launch validates the preset from a clean process.
+
+Curated whitelist-assisted workflow:
+
+```bash
+apps/desktop/scripts/android-reality-whitelist-curate.sh \
+  --input /tmp/white-sni.txt \
+  --cidr-map /tmp/white-cidr-map.tsv
+
+ODIN_ONE_REALITY_HINTS_FILE=/tmp/odin-one-reality-whitelist-curation/<stamp>/dataset.json \
+  apps/desktop/scripts/android-reality-whitelist-session.sh
+```
+
+Community bootstrap workflow:
+
+```bash
+apps/desktop/scripts/android-reality-whitelist-curate-community.sh \
+  --output-dir /tmp/odin-one-reality-whitelist-community \
+  --limit 12
+```
+
+Single-hint owner-lab run:
+
+```bash
+ODIN_ONE_REALITY_HINTS_FILE=/tmp/odin-one-reality-whitelist-curation/<stamp>/dataset.json \
+  apps/desktop/scripts/android-reality-whitelist-session.sh --hint-tag candidate-01-max-ru
+```
+
+Single-hint owner-lab active run:
+
+```bash
+ODIN_ONE_REALITY_HINTS_FILE=/tmp/odin-one-reality-whitelist-curation/<stamp>/dataset.json \
+  apps/desktop/scripts/android-reality-whitelist-session.sh \
+  --preset reality-whitelist-lab \
+  --hint-tag candidate-01-max-ru
+```
+
+Batch owner-lab run:
+
+```bash
+apps/desktop/scripts/android-reality-whitelist-batch-session.sh \
+  --hints-file /tmp/odin-one-reality-whitelist-curation/<stamp>/dataset.json \
+  --skip-placeholders
+```
+
+Manual batch owner-lab run through the in-app launcher:
+
+```bash
+apps/desktop/scripts/android-reality-whitelist-manual-batch.sh begin \
+  --hints-file /tmp/odin-one-reality-whitelist-curation/<stamp>/dataset.json \
+  --skip-placeholders
+```

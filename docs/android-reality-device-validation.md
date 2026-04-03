@@ -26,10 +26,26 @@ Use this helper after each handset run:
 apps/desktop/scripts/android-reality-device-dump.sh
 ```
 
-Or save a timestamped run automatically under `tmp/`:
+Or save a timestamped run automatically under `/tmp/odin-one-android-device-dumps`:
 
 ```bash
 apps/desktop/scripts/android-reality-capture-run.sh baseline
+```
+
+Compare two saved runs quickly with:
+
+```bash
+apps/desktop/scripts/android-runtime-compare-captures.sh \
+  /tmp/odin-one-android-device-dumps/<control>.txt \
+  /tmp/odin-one-android-device-dumps/<candidate>.txt
+```
+
+Generate a short markdown draft for operator review with:
+
+```bash
+apps/desktop/scripts/android-runtime-report-draft.sh \
+  /tmp/odin-one-android-device-dumps/<control>.txt \
+  /tmp/odin-one-android-device-dumps/<candidate>.txt
 ```
 
 Optional env vars:
@@ -41,6 +57,29 @@ Optional env vars:
 - `ODIN_ONE_ANDROID_LOG_LINES`
   - adjust filtered `VpnRuntimeService` logcat depth
 
+Gradle note:
+
+- if the shell defaults to Java 25, run Android Gradle commands through `apps/desktop/scripts/desktop-env.sh`
+- the helper now auto-detects a valid JDK 21, including IntelliJ IDEA's bundled JBR21 on macOS
+- example:
+
+```bash
+cd apps/desktop/src-tauri/gen/android
+../../../scripts/desktop-env.sh ./gradlew :app:testUniversalDebugUnitTest \
+  --tests com.odinone.desktop.vk.VpnRuntimeLibboxTest
+```
+
+Fresh debug repack note:
+
+- when only Kotlin / Android debug tooling changed and the current Android native outputs can be reused, prefer `apps/desktop/scripts/android-gradle-reuse-native.sh`
+- example:
+
+```bash
+apps/desktop/scripts/android-gradle-reuse-native.sh :app:installUniversalDebug
+```
+
+- this path keeps the Java 21 wrapper and forces `skipRustBuild`, which avoids the current Tauri websocket rebuild dependency during owner-lab handset iterations
+
 What it captures:
 
 - connected device summary
@@ -49,12 +88,15 @@ What it captures:
 - device-protected `odin_one_vpn_runtime` shared prefs summary when available
 - the last persisted REALITY request
 - the rendered `active-vless-reality.json`
+- any readable `cdn-anti-whitelist` scaffold or runtime artifact for comparison
 - filtered `VpnRuntimeService` logcat
+- when run through `android-reality-capture-run.sh`, a sibling `.artifacts/` directory with raw XML/JSON files
 
 Note:
 
 - the helper now reads `VpnRuntimeService` logcat from the host-side `adb logcat` path, which avoids the previous `zsh` quoting issue around `*:S`
 - the helper also attempts to read `/data/user_de/0/<package>/shared_prefs/odin_one_vpn_runtime.xml` via `run-as` so reboot and Always-on restore-state mirroring can be checked explicitly
+- the helper now stages raw XML/JSON artifacts into a per-capture `.artifacts/` directory when used through `android-reality-capture-run.sh`
 - right after updating an existing debug install, that device-protected file may still be absent until the next fresh REALITY start rewrites the mirrored restore state
 - the runtime now also backfills the device-protected mirror when it reads restore-state on an upgraded install, so one normal app interaction should usually be enough to populate it
 - restore-state writes are now committed synchronously, so `last_request` and resume flags are less likely to be lost if the process dies or the device reboots immediately after a start/stop transition
@@ -81,6 +123,48 @@ apps/desktop/scripts/android-reality-apply-preset.sh dot-google
 
 Use this when you want to patch the current debug handset directly instead of
 copying the JSON block by hand.
+
+Owner-lab debug bridge helper:
+
+```bash
+apps/desktop/scripts/android-runtime-service-control.sh start-from-prefs
+apps/desktop/scripts/android-runtime-service-control.sh run-test --url https://example.com
+apps/desktop/scripts/android-runtime-service-control.sh stop
+```
+
+Notes:
+
+- the helper still supports a pure no-wake debug broadcast for simple stable starts
+- on this Xiaomi / Android 15 handset, hidden whitelist-assisted starts need `ODIN_ONE_ANDROID_WAKE_MAIN_ACTIVITY=true` before `start-from-prefs`; otherwise the debug bridge can stay on the stale stable lane
+- the whitelist-assisted session helper now front-loads `ODIN_ONE_ANDROID_WAKE_MAIN_ACTIVITY=true` for hidden candidate starts and stable baseline starts, which avoids an extra restore timeout after scaffold runs on this handset
+- the helper sends the persisted request as base64 in the debug extra, so hidden preset payloads are no longer mangled by `adb shell am --es` when owner-lab runs start from a force-stopped package
+- the helper can now also dispatch the Android VPN connectivity probe through the same debug receiver, which lets owner-only `reality-whitelist-lab` runs record `lastTest` without a UI tap
+- the session helper now hard-stops the runtime before each stable baseline retry and waits for `direct-reality / active / running`, which makes post-lab restore more reliable on this handset
+- current-family starts now clear inactive runtime config artifacts, so fresh captures are easier to read after switching between stable REALITY and hidden `cdn-anti-whitelist`
+
+Owner-lab in-app manual helpers:
+
+```bash
+apps/desktop/scripts/android-reality-whitelist-manual-session.sh begin
+apps/desktop/scripts/android-reality-whitelist-manual-batch.sh begin \
+  --hints-file /tmp/odin-one-reality-whitelist-curation/<stamp>/dataset.json \
+  --skip-placeholders
+```
+
+Use these when the hidden whitelist scaffold should be launched from the normal app UI instead of the older debug-broadcast path. The manual batch helper prepares one current hint at a time, captures stable control automatically, and writes `current-hint.md` with the next handset values to enter before each `advance` step.
+
+For host-driven `adb` queues, `android-reality-whitelist-batch-session.sh` now refreshes its top-level `summary.md` and `results.json` after every completed hint. That makes long owner-only lab batches observable while they are still running. When you want the next queue rather than an immediate rerun of the same hints, pair the batch output with `android-reality-whitelist-curate-community.sh --exclude-results <results.json>` so the next dataset skips already-tested `serverName` and `tag` values. For `reality-whitelist-lab`, add `--exclude-failed-families <results.json> --max-per-family 1` when the previous batch only produced reachability-negative quick probes and you want the next queue to fan out across different registrable domain families instead of revisiting the same provider surface.
+
+For the new owner-only active lane, prefer:
+
+```bash
+ODIN_ONE_REALITY_HINTS_FILE=/tmp/odin-one-reality-whitelist-curation/<stamp>/dataset.json \
+  apps/desktop/scripts/android-reality-whitelist-session.sh \
+  --preset reality-whitelist-lab \
+  --hint-tag candidate-01-max-ru
+```
+
+That single-hint session now auto-runs a quick connectivity probe by default when the preset is `reality-whitelist-lab`, then persists the result into `lastTest` before the capture is taken.
 
 Recommended first-pass presets:
 

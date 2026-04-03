@@ -20,6 +20,7 @@ import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
+import android.util.Base64
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import app.tauri.plugin.JSObject
@@ -97,8 +98,9 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             ACTION_START -> {
                 appendDiagnostic("Received ACTION_START intent.")
                 val rawArgs = intent.getStringExtra(EXTRA_START_ARGS)
+                val encodedArgs = intent.getStringExtra(EXTRA_START_ARGS_BASE64)
                 thread(name = "odin-one-vpn-start", isDaemon = true) {
-                    handleStart(rawArgs)
+                    handleStart(decodeStartArgs(rawArgs, encodedArgs))
                 }
             }
 
@@ -162,9 +164,12 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                 this,
                 latest.copy(
                     status = "stopped",
+                    socksAddress = null,
+                    bridgeAddress = null,
                     error = null,
                     logTail = trimLogTail(latest.logTail + "Android VpnService was destroyed."),
                 ),
+                sync = true,
             )
         }
         super.onDestroy()
@@ -388,6 +393,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
     private fun handleStart(rawArgs: String?) {
         synchronized(lifecycleLock) {
             val args = resolveStartArgs(rawArgs)
+            VpnRuntimeRestoreStore.persistAttemptedStartRequest(this, args)
             val current = VpnRuntimeStore.snapshot(this)
             if (shouldReuseActiveRuntime(current, args)) {
                 val reused =
@@ -427,7 +433,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                 activeRuntime = prepared
                 appendLog("Validated Android runtime config: ${prepared.configPath}")
                 appendDiagnostic(
-                    "Prepared Android REALITY runtime. source=${args.getString("startSource", "unknown")} mode=${prepared.configMode} profileHash=${prepared.profileHash ?: "n/a"} features=${prepared.activeFeatures.joinToString(",")}",
+                    "Prepared Android VPN runtime. source=${args.getString("startSource", "unknown")} family=${prepared.runtimeFamily} activation=${prepared.activationState} mode=${prepared.configMode} profileHash=${prepared.profileHash ?: "n/a"} features=${prepared.activeFeatures.joinToString(",")}",
                 )
                 prepared.remotePeer?.let { appendLog("VK relay remote peer: $it") }
 
@@ -494,10 +500,12 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                     appendDiagnostic("Android VPN runtime transitioned to running state.")
                 }
             } catch (error: Exception) {
+                val failureCurrent = VpnRuntimeStore.snapshot(this)
                 handleFailure(
                     message = error.message ?: "Android VPN runtime failed to start.",
                     extraLogLine = "Android VPN startup aborted before the tunnel became ready.",
-                    stage = VpnRuntimeStore.snapshot(this).lastStartupStage ?: "prepare_runtime",
+                    stage = failureCurrent.lastStartupStage ?: "prepare_runtime",
+                    identitySnapshot = baseWithState,
                 )
             }
         }
@@ -550,13 +558,18 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         message: String,
         extraLogLine: String? = null,
         stage: String? = null,
+        identitySnapshot: TunnelSnapshot? = null,
     ) {
         synchronized(lifecycleLock) {
             appendDiagnostic("handleFailure entered. message=$message")
             closeRuntimeResources("handleFailure")
+            val current = VpnRuntimeStore.snapshot(this)
+            val failureBase =
+                identitySnapshot?.let { applyFailureIdentitySeed(current, it) }
+                    ?: current
             val next =
                 persistTerminalState(
-                    failedSnapshot(VpnRuntimeStore.snapshot(this), message, extraLogLine).copy(
+                    failedSnapshot(failureBase, message, extraLogLine).copy(
                         lastNetworkEvent = "failure",
                         lastFailureStage = stage,
                         lastFailureCode = classifyRuntimeFailureCode(message, stage),
@@ -707,7 +720,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         if (!rawArgs.isNullOrBlank()) {
             val parsed =
                 try {
-                    VpnRuntimeLibbox.normalizeRuntimeArgs(JSObject(rawArgs))
+                    VpnRuntimeLibbox.normalizeRuntimeArgs(this, JSObject(rawArgs), refreshRelayAutoselect = true)
                 } catch (_: Exception) {
                     JSObject()
                 }
@@ -719,7 +732,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
 
         val restored = VpnRuntimeRestoreStore.readStartRequest(this)
         if (restored != null && VpnRuntimeRestoreStore.isResumeEligible(this)) {
-            val normalized = VpnRuntimeLibbox.normalizeRuntimeArgs(restored)
+            val normalized = VpnRuntimeLibbox.normalizeRuntimeArgs(this, restored, refreshRelayAutoselect = true)
             normalized.put("startSource", "system_restore")
             appendDiagnostic("Restored Android VPN runtime request from persisted state for system-driven startup.")
             return normalized
@@ -728,8 +741,33 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         return JSObject()
     }
 
+    private fun decodeStartArgs(
+        rawArgs: String?,
+        encodedArgs: String?,
+    ): String? {
+        if (!encodedArgs.isNullOrBlank()) {
+            val decoded =
+                runCatching {
+                    String(Base64.decode(encodedArgs, Base64.DEFAULT), Charsets.UTF_8)
+                }.getOrNull()
+            if (!decoded.isNullOrBlank()) {
+                return decoded
+            }
+        }
+        return rawArgs
+    }
+
     private fun maybePersistRestorableState(args: JSObject) {
         if (args.getString("protocol", "")?.trim() != "vless-reality") {
+            return
+        }
+        if (args.getString("runtimeFamily", null)?.trim() == "reality-whitelist-assisted" ||
+            args.getString("runtimeFamily", null)?.trim() == "reality-vps-lab"
+        ) {
+            VpnRuntimeRestoreStore.markResumeEligible(this, false)
+            return
+        }
+        if (args.getString("activationState", null)?.trim() == "scaffold_only") {
             return
         }
         val effectiveArgs =
@@ -738,8 +776,11 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             } else {
                 args
             }
+        val runtimeFamily = effectiveArgs.getString("runtimeFamily", null)?.trim().orEmpty()
+        val allowResumeEligibility =
+            runtimeFamily != "cdn-anti-whitelist" || effectiveArgs.getBoolean("bootRestoreEnabled", false)
         VpnRuntimeRestoreStore.persistStartRequest(this, effectiveArgs)
-        VpnRuntimeRestoreStore.markResumeEligible(this, true)
+        VpnRuntimeRestoreStore.markResumeEligible(this, allowResumeEligibility)
     }
 
     private fun notifyDefaultInterfaceUpdate(
@@ -900,6 +941,41 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                 },
         )
     }
+
+    private fun applyFailureIdentitySeed(
+        current: TunnelSnapshot,
+        identity: TunnelSnapshot,
+    ): TunnelSnapshot =
+        current.copy(
+            vkLink = identity.vkLink,
+            serverHost = identity.serverHost,
+            transport = identity.transport,
+            engine = identity.engine,
+            protocol = identity.protocol,
+            runtimeFamily = identity.runtimeFamily,
+            activationState = identity.activationState,
+            frontHost = identity.frontHost,
+            frontPath = identity.frontPath,
+            frontProvider = identity.frontProvider,
+            frontTag = identity.frontTag,
+            cdnRoutingDnsQueryStrategy = identity.cdnRoutingDnsQueryStrategy,
+            cdnRoutingDomainStrategy = identity.cdnRoutingDomainStrategy,
+            cdnRoutingDomainMatcher = identity.cdnRoutingDomainMatcher,
+            cdnRoutingDirectRuleCount = identity.cdnRoutingDirectRuleCount,
+            cdnRoutingBlockRuleCount = identity.cdnRoutingBlockRuleCount,
+            cdnRoutingBlockSelectedFrontHost = identity.cdnRoutingBlockSelectedFrontHost,
+            cdnDnsLocalResolverEnabled = identity.cdnDnsLocalResolverEnabled,
+            selectedSniHint = identity.selectedSniHint,
+            selectedCidrHint = identity.selectedCidrHint,
+            whitelistHintSource = identity.whitelistHintSource,
+            whitelistHintTag = identity.whitelistHintTag,
+            startSource = identity.startSource,
+            profileHash = identity.profileHash,
+            configMode = identity.configMode,
+            sessionId = identity.sessionId ?: current.sessionId,
+            sessionStartedAt = identity.sessionStartedAt ?: current.sessionStartedAt,
+            activeFeatures = identity.activeFeatures,
+        )
 
     private fun recordRestoreTelemetry(
         source: String,
@@ -1180,6 +1256,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         const val ACTION_START = "com.odinone.desktop.vk.action.START_VPN_RUNTIME"
         const val ACTION_STOP = "com.odinone.desktop.vk.action.STOP_VPN_RUNTIME"
         const val EXTRA_START_ARGS = "start_args"
+        const val EXTRA_START_ARGS_BASE64 = "start_args_base64"
 
         private const val NOTIFICATION_ID = 7301
         private const val NOTIFICATION_CHANNEL_ID = "odin_one_vpn_runtime"

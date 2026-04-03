@@ -59,6 +59,9 @@ export interface InviteProfile {
   vlessReality?: InviteRealityProfile;
   supportsReality?: boolean;
   supportsVKRelay?: boolean;
+  supportsRealityRelay?: boolean;
+  protocolPack?: ProtocolPackEntry[];
+  stagedFallbacks?: Record<string, unknown>;
   shareCode: string;
   rawJson: string;
   localPath?: string;
@@ -171,6 +174,41 @@ export interface LocalTunnelStartRequest {
   server: ServerDraft;
   secret: string;
   vkLink: string;
+  ownerRuntimeLab?: OwnerRuntimeLabRequest;
+}
+
+export type OwnerRuntimeLabMode =
+  | "reality-whitelist-scaffold"
+  | "reality-whitelist-lab"
+  | "reality-vps-scaffold"
+  | "reality-vps-lab"
+  | "reality-vps-relay-lab";
+
+export type OwnerRuntimeLabTransport = "tcp" | "grpc";
+
+export interface OwnerRuntimeLabRelayAutoselectRequest {
+  enabled: boolean;
+  subscriptionUrl?: string;
+  sourceLabel?: string;
+}
+
+export interface OwnerRuntimeLabRequest {
+  mode: OwnerRuntimeLabMode;
+  hintServerName: string;
+  hintCidrBucket?: string;
+  hintSource?: string;
+  hintTag?: string;
+  vpsServerName?: string;
+  vpsPort?: number;
+  vpsTransport?: OwnerRuntimeLabTransport;
+  vpsFlow?: string;
+  vpsFingerprint?: string;
+  vpsGrpcServiceName?: string;
+  vpsGrpcAuthority?: string;
+  vpsSource?: string;
+  vpsTag?: string;
+  vpsOwnerRealityEgress?: boolean;
+  vpsRelayAutoselect?: OwnerRuntimeLabRelayAutoselectRequest;
 }
 
 export interface LocalTunnelState {
@@ -182,6 +220,30 @@ export interface LocalTunnelState {
   transport?: string;
   engine?: TunnelEngine;
   protocol?: TunnelProtocol;
+  runtimeFamily?: string;
+  activationState?: string;
+  frontHost?: string;
+  frontConnectHost?: string;
+  frontConnectPort?: number;
+  frontPath?: string;
+  frontProvider?: string;
+  frontTag?: string;
+  relayAutoselectEnabled?: boolean;
+  relayAutoselectStatus?: string;
+  relayAutoselectBestHost?: string;
+  relayAutoselectBestPort?: number;
+  relayAutoselectBestSni?: string;
+  relayAutoselectBestTag?: string;
+  relayAutoselectBestLatencyMs?: number;
+  relayAutoselectSourceLabel?: string;
+  relayAutoselectCandidateCount?: number;
+  relayAutoselectLastRefreshAt?: string;
+  relayAutoselectRefreshIntervalHours?: number;
+  relayAutoselectLastError?: string;
+  selectedSniHint?: string;
+  selectedCidrHint?: string;
+  whitelistHintSource?: string;
+  whitelistHintTag?: string;
   startSource?: string;
   profileHash?: string;
   configMode?: string;

@@ -93,6 +93,10 @@ fi
 
 zsh "$PRESET_HELPER" "$preset" >"$PRESET_FILE"
 
+# Stop the package before touching prefs so a live runtime cannot flush
+# stale stable state over the newly patched hidden preset during shutdown.
+adb_cmd shell am force-stop "$PACKAGE_NAME" >/dev/null || true
+
 credential_remote="/data/data/${PACKAGE_NAME}/shared_prefs/odin_one_vpn_runtime.xml"
 device_remote="/data/user_de/0/${PACKAGE_NAME}/shared_prefs/odin_one_vpn_runtime.xml"
 
@@ -121,6 +125,8 @@ updated_device_path = Path(sys.argv[6])
 
 DERIVED_KEYS = [
     "configMode",
+    "runtimeFamily",
+    "activationState",
     "dnsMode",
     "strictRoute",
     "disableMultiplex",
@@ -143,6 +149,36 @@ DERIVED_KEYS = [
     "activeFeatures",
     "profileHash",
     "startSource",
+    "frontHost",
+    "frontConnectHost",
+    "frontConnectPort",
+    "frontPath",
+    "frontProvider",
+    "frontTag",
+    "selectedSniHint",
+    "selectedCidrHint",
+    "whitelistHintSource",
+    "whitelistHintTag",
+    "whitelistHintSelection",
+    "whitelistHintPoolSize",
+    "whitelistBootstrapMode",
+    "cdnProvider",
+    "cdnTransport",
+    "cdnFrontHost",
+    "cdnFrontPort",
+    "cdnFrontPath",
+    "cdnConnectHost",
+    "cdnConnectPort",
+    "cdnTlsServerName",
+    "cdnHttpHostHeader",
+    "cdnFrontTag",
+    "cdnFrontSelection",
+    "cdnFrontPoolSize",
+    "cdnOriginHost",
+    "cdnOriginPort",
+    "cdnOriginScheme",
+    "cdnOriginPath",
+    "cdnBootstrapMode",
 ]
 
 def load_or_create_map(path: Path):
@@ -186,7 +222,27 @@ def deep_merge(base, overlay):
             result[key] = copy.deepcopy(value)
     return result
 
+def ensure_android_runtime(profile):
+    android_runtime = profile.setdefault("androidRuntime", {})
+    if not isinstance(android_runtime, dict):
+        android_runtime = {}
+        profile["androidRuntime"] = android_runtime
+    return android_runtime
+
 def boot_restore_enabled_from_profile(profile):
+    android_runtime = profile.get("androidRuntime", {})
+    if (
+        isinstance(android_runtime, dict)
+        and isinstance(android_runtime.get("cdnAntiWhitelist"), dict)
+        and android_runtime["cdnAntiWhitelist"].get("enabled", False)
+    ):
+        return False
+    if (
+        isinstance(android_runtime, dict)
+        and isinstance(android_runtime.get("realityWhitelistHints"), dict)
+        and android_runtime["realityWhitelistHints"].get("enabled", False)
+    ):
+        return False
     return bool(
         profile.get("androidRuntime", {})
         .get("reality", {})
@@ -199,6 +255,34 @@ def patch_request(raw_request: str, preset_raw: str):
     profile_raw = request.get("profileJson")
     existing_profile = json.loads(profile_raw) if isinstance(profile_raw, str) and profile_raw.strip() else {}
     merged_profile = deep_merge(existing_profile, preset_profile)
+    android_runtime = ensure_android_runtime(merged_profile)
+    cdn_runtime = android_runtime.setdefault("cdnAntiWhitelist", {})
+    if not isinstance(cdn_runtime, dict):
+        cdn_runtime = {}
+        android_runtime["cdnAntiWhitelist"] = cdn_runtime
+    whitelist_runtime = android_runtime.setdefault("realityWhitelistHints", {})
+    if not isinstance(whitelist_runtime, dict):
+        whitelist_runtime = {}
+        android_runtime["realityWhitelistHints"] = whitelist_runtime
+    if preset_name.startswith("cdn-"):
+        cdn_runtime["enabled"] = True
+        whitelist_runtime["enabled"] = False
+        reality_runtime = android_runtime.setdefault("reality", {})
+        if not isinstance(reality_runtime, dict):
+            reality_runtime = {}
+            android_runtime["reality"] = reality_runtime
+        reality_runtime["autoRestoreOnBoot"] = False
+    elif preset_name.startswith("reality-whitelist-"):
+        whitelist_runtime["enabled"] = True
+        cdn_runtime["enabled"] = False
+        reality_runtime = android_runtime.setdefault("reality", {})
+        if not isinstance(reality_runtime, dict):
+            reality_runtime = {}
+            android_runtime["reality"] = reality_runtime
+        reality_runtime["autoRestoreOnBoot"] = False
+    else:
+        cdn_runtime["enabled"] = False
+        whitelist_runtime["enabled"] = False
     request["profileJson"] = json.dumps(merged_profile, ensure_ascii=False, separators=(",", ":"))
     for key in DERIVED_KEYS:
         request.pop(key, None)
@@ -236,3 +320,38 @@ adb_cmd shell am force-stop "$PACKAGE_NAME" >/dev/null
 
 echo "Applied preset ${preset} to ${PACKAGE_NAME}"
 echo "force-stopped ${PACKAGE_NAME}; launch the app again for a clean validation run."
+
+if [[ "$preset" == cdn-* ]]; then
+  "$PYTHON_BIN" - "$PRESET_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+preset_path = Path(sys.argv[1])
+payload = json.loads(preset_path.read_text(encoding="utf-8"))
+runtime = ((payload.get("androidRuntime") or {}).get("cdnAntiWhitelist") or {})
+front_pool = runtime.get("frontPool") or []
+front_host = ((front_pool[0] or {}).get("host") if front_pool else "") or ""
+origin_host = ((runtime.get("origin") or {}).get("host") or "")
+
+if front_host.endswith(".example.com") or origin_host.endswith(".example.com"):
+    print("warning: cdn preset still uses placeholder front/origin hosts; override them before the real owner-lab network test.", file=sys.stderr)
+PY
+fi
+
+if [[ "$preset" == reality-whitelist-* ]]; then
+  "$PYTHON_BIN" - "$PRESET_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+preset_path = Path(sys.argv[1])
+payload = json.loads(preset_path.read_text(encoding="utf-8"))
+runtime = ((payload.get("androidRuntime") or {}).get("realityWhitelistHints") or {})
+hints = runtime.get("hints") or []
+selected_server_name = ((hints[0] or {}).get("serverName") if hints else "") or ""
+
+if selected_server_name.endswith(".example.com"):
+    print("warning: reality-whitelist preset still uses placeholder SNI hints; override them before the real owner-lab network test.", file=sys.stderr)
+PY
+fi

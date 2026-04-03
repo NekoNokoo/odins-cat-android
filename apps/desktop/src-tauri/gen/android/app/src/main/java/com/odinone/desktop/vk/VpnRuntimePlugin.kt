@@ -49,7 +49,8 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
         argsJson.put("useRealityStartEndpoint", args.useRealityStartEndpoint)
         val normalizedArgs =
             VpnRuntimeLibbox.normalizeRuntimeArgs(
-                mergePersistedRealityOverrides(
+                activity,
+                mergePersistedHiddenRuntimeOverrides(
                     previousRequest = VpnRuntimeRestoreStore.readStartRequest(activity),
                     incomingRequest = argsJson,
                 ),
@@ -192,7 +193,8 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
     private fun launchTunnelService(args: JSObject): TunnelSnapshot {
         val normalizedArgs =
             VpnRuntimeLibbox.normalizeRuntimeArgs(
-                mergePersistedRealityOverrides(
+                activity,
+                mergePersistedHiddenRuntimeOverrides(
                     previousRequest = VpnRuntimeRestoreStore.readStartRequest(activity),
                     incomingRequest = args,
                 ),

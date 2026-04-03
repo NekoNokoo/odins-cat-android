@@ -6,6 +6,7 @@ import type {
   DeployStage,
   InviteProfile,
   LocalTunnelState,
+  OwnerRuntimeLabRequest,
   OwnerAccessProfile,
   ServerDraft,
   SystemProxyState,
@@ -28,7 +29,7 @@ const initialDraft: ServerDraft = {
 type WorkspaceTab = "server" | "access" | "tunnel";
 type AccessTab = "key" | "share" | "import";
 type MobileSheet = "server" | "protocol" | "logs" | "more" | null;
-type AccessMode = "vless-reality" | "vk-relay";
+type AccessMode = "vless-reality" | "vk-relay" | "relay-via-server" | "relay-direct";
 type DeployPortMode = "auto" | "manual";
 type PendingAction =
   | "enableVpn"
@@ -36,6 +37,7 @@ type PendingAction =
   | "validate"
   | "deploy"
   | "startTunnel"
+  | "startOwnerRuntimeLab"
   | "stopTunnel"
   | "refreshTunnel"
   | "runTest"
@@ -44,7 +46,89 @@ type PendingAction =
   | "disableSystemProxy"
   | null;
 
+type OwnerRuntimeLabMode =
+  | "off"
+  | "reality-whitelist-scaffold"
+  | "reality-whitelist-lab"
+  | "reality-vps-scaffold"
+  | "reality-vps-lab"
+  | "reality-vps-relay-lab";
+
+type OwnerRuntimeLabTransport = "tcp" | "grpc";
+
+type OwnerRuntimeLabState = {
+  mode: OwnerRuntimeLabMode;
+  hintServerName: string;
+  hintCidrBucket: string;
+  hintSource: string;
+  hintTag: string;
+  vpsServerName: string;
+  vpsPort: string;
+  vpsTransport: OwnerRuntimeLabTransport;
+  vpsFlow: string;
+  vpsFingerprint: string;
+  vpsGrpcServiceName: string;
+  vpsGrpcAuthority: string;
+  vpsSource: string;
+  vpsTag: string;
+  vpsUseOwnerRealityEgress: boolean;
+  vpsUseRelayAutoselect: boolean;
+  vpsRelaySubscriptionUrl: string;
+  vpsRelaySourceLabel: string;
+};
+
 const storageKey = "odin-one-vk-control-center-v4";
+const ownerRuntimeLabStorageKey = "odin-one-owner-runtime-lab-v1";
+const ownerRuntimeLabUnlockStorageKey = "odin-one-owner-runtime-lab-unlocked-v1";
+const ownerRuntimeLabUnlockTapTarget = 5;
+const defaultOwnerRuntimeLabRelaySubscriptionUrl =
+  "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Vless-Reality-White-Lists-Rus-Mobile.txt";
+const defaultOwnerRuntimeLabRelaySourceLabel = "igareck-mobile-hourly";
+const diagnosticsPreviewMaxLines = 8;
+const diagnosticsPreviewMaxChars = 720;
+const diagnosticsLogPreviewMaxLines = 24;
+const diagnosticsLogPreviewMaxChars = 2800;
+const defaultOwnerRuntimeLabState: OwnerRuntimeLabState = {
+  mode: "off",
+  hintServerName: "max.ru",
+  hintCidrBucket: "cidr-max",
+  hintSource: "operator-curated",
+  hintTag: "candidate-max-ru",
+  vpsServerName: "pimg.mycdn.me",
+  vpsPort: "10443",
+  vpsTransport: "tcp",
+  vpsFlow: "xtls-rprx-vision",
+  vpsFingerprint: "chrome",
+  vpsGrpcServiceName: "",
+  vpsGrpcAuthority: "",
+  vpsSource: "operator-curated:vps-lab",
+  vpsTag: "reality-lab-pimg-mycdn-me-tcp",
+  vpsUseOwnerRealityEgress: true,
+  vpsUseRelayAutoselect: false,
+  vpsRelaySubscriptionUrl: defaultOwnerRuntimeLabRelaySubscriptionUrl,
+  vpsRelaySourceLabel: defaultOwnerRuntimeLabRelaySourceLabel
+};
+
+const withIgareckRelayDefaults = (current: OwnerRuntimeLabState): OwnerRuntimeLabState => ({
+  ...current,
+  vpsUseOwnerRealityEgress: current.vpsUseOwnerRealityEgress,
+  vpsUseRelayAutoselect: true,
+  vpsRelaySubscriptionUrl: current.vpsRelaySubscriptionUrl.trim() || defaultOwnerRuntimeLabRelaySubscriptionUrl,
+  vpsRelaySourceLabel: current.vpsRelaySourceLabel.trim() || defaultOwnerRuntimeLabRelaySourceLabel,
+  vpsServerName: current.vpsServerName.trim() || "id.x5.ru",
+  vpsPort:
+    Number.isInteger(Number.parseInt(current.vpsPort, 10)) && Number.parseInt(current.vpsPort, 10) > 0
+      ? current.vpsPort
+      : "443",
+  vpsTransport: "tcp",
+  vpsFlow: current.vpsFlow.trim() || "xtls-rprx-vision",
+  vpsFingerprint: current.vpsFingerprint.trim() || "chrome"
+});
+
+const isOwnerRuntimeLabVpsMode = (mode: OwnerRuntimeLabMode) =>
+  mode === "reality-vps-scaffold" || mode === "reality-vps-lab" || mode === "reality-vps-relay-lab";
+
+const isOwnerRuntimeLabRelayOwnerMode = (mode: OwnerRuntimeLabMode) => mode === "reality-vps-relay-lab";
 
 const normalizeTransport = (transport: string | undefined): ServerDraft["transport"] =>
   transport === "xray" || transport === "vk-turn-proxy+xray" ? transport : initialDraft.transport;
@@ -78,6 +162,20 @@ const importedProfileHasReality = (profile: InviteProfile | null) =>
 const importedProfileHasVKRelay = (profile: InviteProfile | null) =>
   Boolean(profile?.supportsVKRelay ?? (profile?.vkTurnProxyPort && profile?.wireGuardPort));
 
+const ownerProfileHasRealityRelay = (profile: OwnerAccessProfile | null) =>
+  Boolean(
+    profile?.stagedFallbacks &&
+      (Object.prototype.hasOwnProperty.call(profile.stagedFallbacks, "realityRelayOwnerEgress") ||
+        Object.prototype.hasOwnProperty.call(profile.stagedFallbacks, "vlessReality"))
+  );
+
+const importedProfileHasRealityRelay = (profile: InviteProfile | null) =>
+  Boolean(
+    profile?.supportsRealityRelay ??
+      (profile?.stagedFallbacks &&
+        Object.prototype.hasOwnProperty.call(profile.stagedFallbacks, "realityRelayOwnerEgress"))
+  );
+
 const resolveDraftEngine = (
   transport: ServerDraft["transport"] | undefined,
   protocol: ServerDraft["protocol"] | undefined,
@@ -110,6 +208,36 @@ const applyAccessModeToDraft = (serverDraft: ServerDraft, mode: AccessMode): Ser
     engine: "sing-box",
     protocol: "vless-reality"
   };
+};
+
+const clampDiagnosticText = (value: string, maxLines = diagnosticsPreviewMaxLines, maxChars = diagnosticsPreviewMaxChars) => {
+  const normalized = value.replace(/\r\n/g, "\n").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const lines = normalized.split("\n");
+  const cappedLines = lines.slice(0, maxLines);
+  let output = cappedLines.join("\n");
+
+  if (output.length > maxChars) {
+    output = output.slice(0, maxChars).trimEnd();
+  }
+
+  if (lines.length > cappedLines.length || normalized.length > output.length) {
+    output = `${output}\n...`;
+  }
+
+  return output;
+};
+
+const formatDiagnosticLogTail = (lines: string[], fallback: string) => {
+  if (lines.length === 0) {
+    return fallback;
+  }
+
+  const relevantLines = lines.slice(-diagnosticsLogPreviewMaxLines);
+  return clampDiagnosticText(relevantLines.join("\n"), diagnosticsLogPreviewMaxLines, diagnosticsLogPreviewMaxChars);
 };
 
 const ownerProfileHasRealityFallback = (profile: OwnerAccessProfile | null) =>
@@ -149,12 +277,19 @@ const importedProfileSupportsDraft = (profile: InviteProfile | null, serverDraft
   return importedProfileHasVKRelay(profile);
 };
 
+const ownerProfileSupportsRelayMode = (profile: OwnerAccessProfile | null, serverDraft: ServerDraft) =>
+  ownerProfileSupportsDraft(profile, serverDraft) && ownerProfileHasRealityRelay(profile);
+
+const importedProfileSupportsRelayMode = (profile: InviteProfile | null, serverDraft: ServerDraft) =>
+  importedProfileSupportsDraft(profile, serverDraft) && importedProfileHasRealityRelay(profile);
+
 const importedProfileMatchesHost = (profile: InviteProfile | null, host: string | null | undefined) =>
   Boolean(profile?.localPath && hostsMatch(host, profile?.serverHost));
 
 type PersistedState = {
   activeTab: WorkspaceTab;
   activeAccessTab: AccessTab;
+  accessMode?: AccessMode;
   draft: ServerDraft;
   deployPortMode: DeployPortMode;
   secret: string;
@@ -172,6 +307,7 @@ export function ControlCenter() {
   const [activeAccessTab, setActiveAccessTab] = useState<AccessTab>("key");
   const [activeSheet, setActiveSheet] = useState<MobileSheet>(null);
   const [draft, setDraft] = useState<ServerDraft>(initialDraft);
+  const [selectedAccessMode, setSelectedAccessMode] = useState<AccessMode>("vless-reality");
   const [deployPortMode, setDeployPortMode] = useState<DeployPortMode>("auto");
   const [secret, setSecret] = useState("");
   const [validation, setValidation] = useState<ValidationResponse | null>(null);
@@ -193,10 +329,12 @@ export function ControlCenter() {
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [isPending, startTransition] = useTransition();
   const [androidVpnVisualOverride, setAndroidVpnVisualOverride] = useState(false);
+  const [ownerRuntimeLabUnlocked, setOwnerRuntimeLabUnlocked] = useState(false);
+  const [ownerRuntimeLabUnlockTapCount, setOwnerRuntimeLabUnlockTapCount] = useState(0);
+  const [ownerRuntimeLab, setOwnerRuntimeLab] = useState<OwnerRuntimeLabState>(defaultOwnerRuntimeLabState);
   const isAndroidClient =
     coreHealth?.service === "odin-one-mobile-bridge" ||
     (typeof window !== "undefined" && /Android/i.test(window.navigator.userAgent));
-  const selectedAccessMode = draftAccessMode(draft);
   const curlCommand = localTunnel?.socksAddress
     ? `curl --socks5-hostname ${localTunnel.socksAddress} -I https://example.com`
     : "";
@@ -226,6 +364,12 @@ export function ControlCenter() {
     );
   const runtimeTunnelActive = localTunnel?.status === "running" || androidInterfaceEstablished;
   const vpnModeActive = runtimeTunnelActive && (isAndroidClient || isAndroidVpnRuntime || systemProxyActive);
+  const ownerRuntimeLabRealityDraft: ServerDraft = {
+    ...draft,
+    transport: "xray",
+    engine: "sing-box",
+    protocol: "vless-reality"
+  };
   const hasMatchingOwnerProfile = Boolean(
     ownerProfileSupportsDraft(ownerProfile, draft) && hostsMatch(draft.host, ownerProfile?.serverHost)
   );
@@ -234,6 +378,14 @@ export function ControlCenter() {
   );
   const hasImportedProfileForHost = importedProfileMatchesHost(importedProfile, draft.host || resolvedDraftHost);
   const hasLocalAccessProfile = Boolean(hasMatchingOwnerProfile || hasMatchingImportedProfile || hasImportedProfileForHost);
+  const hasLocalRelayAccessProfile = Boolean(
+    (ownerProfileSupportsRelayMode(ownerProfile, ownerRuntimeLabRealityDraft) &&
+      hostsMatch(draft.host || resolvedDraftHost, ownerProfile?.serverHost)) ||
+      (importedProfileSupportsRelayMode(importedProfile, ownerRuntimeLabRealityDraft) &&
+        hostsMatch(draft.host || resolvedDraftHost, importedProfile?.serverHost))
+  );
+  const hasLocalAccessProfileForSelectedMode =
+    selectedAccessMode === "relay-via-server" ? hasLocalRelayAccessProfile : hasLocalAccessProfile;
   const stageStatusLabels = {
     queued: t("stageQueued"),
     current: t("stageCurrent"),
@@ -330,8 +482,34 @@ export function ControlCenter() {
         ? t("enablingVpn")
         : t("enableVpn");
   const currentHost = localTunnel?.serverHost || draft.host || importedProfile?.serverHost || "—";
+  const relayRuntimeActive = Boolean(
+    localTunnel?.runtimeFamily === "reality-vps-lab" &&
+      localTunnel?.activationState === "active" &&
+      localTunnel?.relayAutoselectEnabled &&
+      localTunnel?.frontConnectHost
+  );
+  const relayOwnerRuntimeActive = Boolean(
+    relayRuntimeActive && localTunnel?.activeFeatures?.includes("reality-vps-owner-egress:on")
+  );
+  const relayDirectRuntimeActive = Boolean(
+    relayRuntimeActive && localTunnel?.activeFeatures?.includes("reality-vps-owner-egress:off")
+  );
   const currentTransport =
-    (localTunnel?.transport ?? draft.transport) === "vk-turn-proxy+xray" ? t("runtimeModeVk") : t("runtimeModeReality");
+    relayOwnerRuntimeActive || selectedAccessMode === "relay-via-server"
+      ? t("runtimeModeRelayOwner")
+      : relayDirectRuntimeActive || selectedAccessMode === "relay-direct"
+        ? t("runtimeModeRelayDirect")
+      : (localTunnel?.transport ?? draft.transport) === "vk-turn-proxy+xray"
+        ? t("runtimeModeVk")
+        : t("runtimeModeReality");
+  const selectedAccessModeHint =
+    selectedAccessMode === "relay-via-server"
+      ? t("runtimeModeRelayOwnerHint")
+      : selectedAccessMode === "relay-direct"
+        ? t("runtimeModeRelayDirectHint")
+      : selectedAccessMode === "vk-relay"
+        ? t("runtimeModeVkHint")
+        : t("runtimeModeRealityHint");
   const currentEngine = localTunnel?.engine ?? deployment?.engine ?? draft.engine ?? "xray";
   const currentProtocol = localTunnel?.protocol ?? deployment?.protocol ?? draft.protocol ?? "vless-reality";
   const deploymentHealthLabel = deployment?.healthChecks?.length
@@ -350,6 +528,10 @@ export function ControlCenter() {
     : t("tunnelStatusIdle");
   const primaryStatusBadge = vpnVisualActive ? t("ready") : tunnelStatusLabel || t("tunnelStatusIdle");
   const primaryStatusText = vpnVisualActive ? t("vpnEnabled") : t("vpnDisabled");
+  const relayOwnerConnectAnimation =
+    (selectedAccessMode === "relay-via-server" || selectedAccessMode === "relay-direct") &&
+    !vpnVisualActive &&
+    (isBusy("enableVpn") || isBusy("startTunnel") || localTunnel?.status === "starting");
   const coreRuntimeLabel = coreHealth?.status === "ok" ? t("runtimeHealthy") : t("runtimeUnavailable");
   const profileCacheLabel = draft.host
     ? ownerProfile?.exists
@@ -368,6 +550,37 @@ export function ControlCenter() {
   const safetyPostureLabel = systemProxyActive ? t("safetySystemProxyOn") : t("safetyLocalhostOnly");
   const runtimeLogTail = localTunnel?.logTail ?? [];
   const runtimeStartSource = localTunnel?.startSource ?? t("diagnosticsEmpty");
+  const runtimeFamily = localTunnel?.runtimeFamily ?? t("diagnosticsEmpty");
+  const runtimeActivationState = localTunnel?.activationState ?? t("diagnosticsEmpty");
+  const runtimeFrontHost = localTunnel?.frontHost ?? t("diagnosticsEmpty");
+  const runtimeFrontPath = localTunnel?.frontPath ?? t("diagnosticsEmpty");
+  const runtimeFrontProvider = localTunnel?.frontProvider ?? t("diagnosticsEmpty");
+  const runtimeFrontTag = localTunnel?.frontTag ?? t("diagnosticsEmpty");
+  const runtimeRelayAutoselectSummary = localTunnel?.relayAutoselectEnabled
+    ? [
+        `status: ${localTunnel.relayAutoselectStatus ?? t("diagnosticsEmpty")}`,
+        `source: ${localTunnel.relayAutoselectSourceLabel ?? t("diagnosticsEmpty")}`,
+        `best: ${localTunnel.relayAutoselectBestSni ?? t("diagnosticsEmpty")} -> ${
+          localTunnel.relayAutoselectBestHost ?? t("diagnosticsEmpty")
+        }${localTunnel.relayAutoselectBestPort ? `:${localTunnel.relayAutoselectBestPort}` : ""}`,
+        `latencyMs: ${
+          typeof localTunnel.relayAutoselectBestLatencyMs === "number"
+            ? localTunnel.relayAutoselectBestLatencyMs.toString()
+            : t("diagnosticsEmpty")
+        }`,
+        `candidates: ${
+          typeof localTunnel.relayAutoselectCandidateCount === "number"
+            ? localTunnel.relayAutoselectCandidateCount.toString()
+            : t("diagnosticsEmpty")
+        }`,
+        `lastRefreshAt: ${localTunnel.relayAutoselectLastRefreshAt ?? t("diagnosticsEmpty")}`,
+        `lastError: ${localTunnel.relayAutoselectLastError ?? t("diagnosticsEmpty")}`
+      ].join("\n")
+    : t("diagnosticsEmpty");
+  const runtimeSelectedSniHint = localTunnel?.selectedSniHint ?? t("diagnosticsEmpty");
+  const runtimeSelectedCidrHint = localTunnel?.selectedCidrHint ?? t("diagnosticsEmpty");
+  const runtimeWhitelistHintSource = localTunnel?.whitelistHintSource ?? t("diagnosticsEmpty");
+  const runtimeWhitelistHintTag = localTunnel?.whitelistHintTag ?? t("diagnosticsEmpty");
   const realityConfigMode = localTunnel?.configMode ?? t("diagnosticsEmpty");
   const runtimeAlwaysOnState =
     typeof localTunnel?.alwaysOnEnabled === "boolean"
@@ -403,6 +616,13 @@ export function ControlCenter() {
     localTunnel?.activeFeatures && localTunnel.activeFeatures.length > 0
       ? localTunnel.activeFeatures.join(" / ")
       : t("diagnosticsEmpty");
+  const runtimeRelayAutoselectSummaryDisplay = clampDiagnosticText(runtimeRelayAutoselectSummary);
+  const runtimeLogDisplay = formatDiagnosticLogTail(runtimeLogTail, t("diagnosticsEmpty"));
+  const runtimeLastTestDisplay = clampDiagnosticText(
+    localTunnel?.lastTest?.output ?? localTunnel?.lastTest?.error ?? t("diagnosticsEmpty"),
+    12,
+    1400
+  );
   const operatorSummary = [
     coreHealth?.status === "ok" ? t("runtimeHealthy") : t("runtimeUnavailable"),
     ownerProfile?.exists ? t("profileCacheReady") : t("profileCacheMissing"),
@@ -431,6 +651,22 @@ export function ControlCenter() {
   const stagedFallbackSummary = stagedProtocolEntries.length > 0
     ? stagedProtocolEntries.map((entry) => formatProtocolEntry(entry)).join("\n")
     : t("diagnosticsEmpty");
+  const ownerRuntimeLabPanelVisible = isAndroidClient && ownerRuntimeLabUnlocked;
+  const ownerRuntimeLabHintInputsVisible =
+    ownerRuntimeLab.mode === "reality-whitelist-scaffold" || ownerRuntimeLab.mode === "reality-whitelist-lab";
+  const ownerRuntimeLabVpsInputsVisible = isOwnerRuntimeLabVpsMode(ownerRuntimeLab.mode);
+  const ownerRuntimeLabVpsRelayOwnerMode = isOwnerRuntimeLabRelayOwnerMode(ownerRuntimeLab.mode);
+  const ownerRuntimeLabVpsManualInputsVisible =
+    ownerRuntimeLabVpsInputsVisible &&
+    !ownerRuntimeLabVpsRelayOwnerMode &&
+    !ownerRuntimeLab.vpsUseRelayAutoselect;
+  const ownerRuntimeLabVpsRelayInputsVisible =
+    ownerRuntimeLabVpsInputsVisible &&
+    (ownerRuntimeLabVpsRelayOwnerMode || ownerRuntimeLab.vpsUseRelayAutoselect);
+  const ownerRuntimeLabRequiresOwnerProfile =
+    !ownerProfileSupportsDraft(ownerProfile, ownerRuntimeLabRealityDraft) ||
+    !hostsMatch(resolvedDraftHost, ownerProfile?.serverHost);
+  const ownerRuntimeLabDisabledReason = ownerRuntimeLabRequiresOwnerProfile ? t("ownerLabNeedsOwnerProfile") : null;
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -469,6 +705,16 @@ export function ControlCenter() {
           vkTurnProxyPort: normalizePortHint(parsed.draft.vkTurnProxyPort),
           realityPort: normalizePortHint(parsed.draft.realityPort)
         });
+        if (
+          parsed.accessMode === "vless-reality" ||
+          parsed.accessMode === "vk-relay" ||
+          parsed.accessMode === "relay-via-server" ||
+          parsed.accessMode === "relay-direct"
+        ) {
+          setSelectedAccessMode(parsed.accessMode);
+        } else {
+          setSelectedAccessMode(draftAccessMode(parsed.draft));
+        }
         setDeployPortMode(
           parsed.deployPortMode === "manual" ||
           normalizePortHint(parsed.draft.vkTurnProxyPort) ||
@@ -497,6 +743,54 @@ export function ControlCenter() {
       window.localStorage.removeItem(storageKey);
     }
 
+    try {
+      const savedOwnerRuntimeLab = window.localStorage.getItem(ownerRuntimeLabStorageKey);
+      if (savedOwnerRuntimeLab) {
+        const parsed = JSON.parse(savedOwnerRuntimeLab) as Partial<OwnerRuntimeLabState>;
+        setOwnerRuntimeLab({
+          mode:
+            parsed.mode === "reality-whitelist-scaffold" ||
+            parsed.mode === "reality-whitelist-lab" ||
+            parsed.mode === "reality-vps-scaffold" ||
+            parsed.mode === "reality-vps-lab" ||
+            parsed.mode === "reality-vps-relay-lab"
+              ? parsed.mode
+              : "off",
+          hintServerName: parsed.hintServerName ?? defaultOwnerRuntimeLabState.hintServerName,
+          hintCidrBucket: parsed.hintCidrBucket ?? defaultOwnerRuntimeLabState.hintCidrBucket,
+          hintSource: parsed.hintSource ?? defaultOwnerRuntimeLabState.hintSource,
+          hintTag: parsed.hintTag ?? defaultOwnerRuntimeLabState.hintTag,
+          vpsServerName: parsed.vpsServerName ?? defaultOwnerRuntimeLabState.vpsServerName,
+          vpsPort: parsed.vpsPort ?? defaultOwnerRuntimeLabState.vpsPort,
+          vpsTransport: parsed.vpsTransport === "grpc" ? "grpc" : defaultOwnerRuntimeLabState.vpsTransport,
+          vpsFlow: parsed.vpsFlow ?? defaultOwnerRuntimeLabState.vpsFlow,
+          vpsFingerprint: parsed.vpsFingerprint ?? defaultOwnerRuntimeLabState.vpsFingerprint,
+          vpsGrpcServiceName: parsed.vpsGrpcServiceName ?? defaultOwnerRuntimeLabState.vpsGrpcServiceName,
+          vpsGrpcAuthority: parsed.vpsGrpcAuthority ?? defaultOwnerRuntimeLabState.vpsGrpcAuthority,
+          vpsSource: parsed.vpsSource ?? defaultOwnerRuntimeLabState.vpsSource,
+          vpsTag: parsed.vpsTag ?? defaultOwnerRuntimeLabState.vpsTag,
+          vpsUseOwnerRealityEgress:
+            typeof parsed.vpsUseOwnerRealityEgress === "boolean"
+              ? parsed.vpsUseOwnerRealityEgress
+              : defaultOwnerRuntimeLabState.vpsUseOwnerRealityEgress,
+          vpsUseRelayAutoselect:
+            typeof parsed.vpsUseRelayAutoselect === "boolean"
+              ? parsed.vpsUseRelayAutoselect
+              : defaultOwnerRuntimeLabState.vpsUseRelayAutoselect,
+          vpsRelaySubscriptionUrl:
+            parsed.vpsRelaySubscriptionUrl ?? defaultOwnerRuntimeLabState.vpsRelaySubscriptionUrl,
+          vpsRelaySourceLabel:
+            parsed.vpsRelaySourceLabel ?? defaultOwnerRuntimeLabState.vpsRelaySourceLabel
+        });
+      }
+    } catch {
+      window.localStorage.removeItem(ownerRuntimeLabStorageKey);
+    }
+
+    if (window.localStorage.getItem(ownerRuntimeLabUnlockStorageKey) === "true") {
+      setOwnerRuntimeLabUnlocked(true);
+    }
+
     void fetchCoreHealth();
     void fetchSystemProxyStatus();
     pollLocalTunnel(true);
@@ -512,10 +806,10 @@ export function ControlCenter() {
 
     const intervalId = window.setInterval(() => {
       void pollLocalTunnel(true);
-    }, 1500);
+    }, activeSheet === "logs" ? 4000 : 1500);
 
     return () => window.clearInterval(intervalId);
-  }, [isAndroidClient, localTunnel?.status]);
+  }, [activeSheet, isAndroidClient, localTunnel?.status]);
 
   useEffect(() => {
     if (!isAndroidClient) {
@@ -534,6 +828,7 @@ export function ControlCenter() {
     const snapshot: PersistedState = {
       activeTab,
       activeAccessTab,
+      accessMode: selectedAccessMode,
       draft,
       deployPortMode,
       secret,
@@ -542,7 +837,25 @@ export function ControlCenter() {
       importedProfile
     };
     window.localStorage.setItem(storageKey, JSON.stringify(snapshot));
-  }, [activeAccessTab, activeTab, deployPortMode, draft, importedProfile, secret, validation, vkLink]);
+  }, [activeAccessTab, activeTab, deployPortMode, draft, importedProfile, secret, selectedAccessMode, validation, vkLink]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(ownerRuntimeLabStorageKey, JSON.stringify(ownerRuntimeLab));
+  }, [ownerRuntimeLab]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    if (ownerRuntimeLabUnlocked) {
+      window.localStorage.setItem(ownerRuntimeLabUnlockStorageKey, "true");
+    } else {
+      window.localStorage.removeItem(ownerRuntimeLabUnlockStorageKey);
+    }
+  }, [ownerRuntimeLabUnlocked]);
 
   const handleValidate = () => {
     setError(null);
@@ -655,6 +968,7 @@ export function ControlCenter() {
     const importedTransport = normalizeTransport(profile.transport);
     const importedProtocol = normalizeInviteProtocol(profile.protocol);
     setImportedProfile(profile);
+    setSelectedAccessMode(draftAccessMode({ ...initialDraft, transport: importedTransport, protocol: importedProtocol }));
     setDraft((current) => ({
       ...current,
       host: profile.serverHost || current.host,
@@ -665,44 +979,232 @@ export function ControlCenter() {
     setSecret("");
   };
 
-  const buildTunnelStartRequest = (baseDraft: ServerDraft = draft) => {
-    const normalizedHost = baseDraft.host.trim() || importedProfile?.serverHost?.trim() || ownerProfile?.serverHost?.trim() || "";
+  const resolveRuntimeIdentity = (serverDraft: ServerDraft, ownerRuntimeLabRequest?: OwnerRuntimeLabRequest) => {
+    const transport = normalizeTransport(serverDraft.transport);
+    const protocol =
+      transport === "xray" ? normalizeProtocol(serverDraft.protocol) : "direct-wireguard";
+    if (transport === "vk-turn-proxy+xray") {
+      return { runtimeFamily: "vk-relay", activationState: "active" };
+    }
+    if (transport === "xray" && protocol === "vless-reality") {
+      if (ownerRuntimeLabRequest?.mode === "reality-vps-scaffold") {
+        return { runtimeFamily: "reality-vps-lab", activationState: "scaffold_only" };
+      }
+      if (
+        ownerRuntimeLabRequest?.mode === "reality-vps-lab" ||
+        ownerRuntimeLabRequest?.mode === "reality-vps-relay-lab"
+      ) {
+        return { runtimeFamily: "reality-vps-lab", activationState: "active" };
+      }
+      if (ownerRuntimeLabRequest?.mode === "reality-whitelist-scaffold") {
+        return { runtimeFamily: "reality-whitelist-assisted", activationState: "scaffold_only" };
+      }
+      if (ownerRuntimeLabRequest?.mode === "reality-whitelist-lab") {
+        return { runtimeFamily: "reality-whitelist-assisted", activationState: "active" };
+      }
+      return { runtimeFamily: "direct-reality", activationState: "active" };
+    }
+    return { runtimeFamily: "", activationState: "" };
+  };
+
+  const buildTunnelStartRequest = (
+    baseDraft: ServerDraft = draft,
+    ownerRuntimeLabMode: OwnerRuntimeLabMode = "off",
+    options?: {
+      allowImportedProfileForOwnerRuntimeLab?: boolean;
+      requireRelaySupport?: boolean;
+      forceRelayAutoselectDefaults?: boolean;
+    }
+  ) => {
+    const allowImportedProfileForOwnerRuntimeLab = options?.allowImportedProfileForOwnerRuntimeLab ?? false;
+    const requireRelaySupport = options?.requireRelaySupport ?? false;
+    const forceRelayAutoselectDefaults = options?.forceRelayAutoselectDefaults ?? false;
+    const effectiveOwnerRuntimeLab =
+      allowImportedProfileForOwnerRuntimeLab &&
+      forceRelayAutoselectDefaults &&
+      (ownerRuntimeLabMode === "reality-vps-relay-lab" || ownerRuntimeLabMode === "reality-vps-lab")
+        ? withIgareckRelayDefaults(ownerRuntimeLab)
+        : ownerRuntimeLab;
+    const effectiveBaseDraft: ServerDraft =
+      ownerRuntimeLabMode === "off"
+        ? baseDraft
+        : {
+            ...baseDraft,
+            transport: "xray",
+            engine: "sing-box",
+            protocol: "vless-reality"
+          };
+    const normalizedHost =
+      effectiveBaseDraft.host.trim() || importedProfile?.serverHost?.trim() || ownerProfile?.serverHost?.trim() || "";
     const ownerProfileAvailable = Boolean(
-      ownerProfileSupportsDraft(ownerProfile, baseDraft) && hostsMatch(normalizedHost, ownerProfile?.serverHost)
+      (requireRelaySupport
+        ? ownerProfileSupportsRelayMode(ownerProfile, effectiveBaseDraft)
+        : ownerProfileSupportsDraft(ownerProfile, effectiveBaseDraft)) &&
+        hostsMatch(normalizedHost, ownerProfile?.serverHost)
     );
     const importedProfileAvailable = Boolean(
-      importedProfileMatchesHost(importedProfile, normalizedHost)
+      importedProfileMatchesHost(importedProfile, normalizedHost) &&
+        (requireRelaySupport
+          ? importedProfileSupportsRelayMode(importedProfile, effectiveBaseDraft)
+          : importedProfileSupportsDraft(importedProfile, effectiveBaseDraft))
     );
-    const usingImportedProfile = Boolean(importedProfileAvailable && !secret.trim() && !ownerProfileAvailable);
+    const usingImportedProfile = Boolean(
+      ((ownerRuntimeLabMode === "off" || allowImportedProfileForOwnerRuntimeLab) &&
+        importedProfileAvailable &&
+        !secret.trim() &&
+        !ownerProfileAvailable)
+    );
     const serverDraft: ServerDraft =
       usingImportedProfile && importedProfile
         ? {
-            ...baseDraft,
+            ...effectiveBaseDraft,
             host: importedProfile.serverHost || normalizedHost || baseDraft.host,
-            engine: resolveDraftEngine(baseDraft.transport, baseDraft.protocol, baseDraft.engine)
+            engine: resolveDraftEngine(effectiveBaseDraft.transport, effectiveBaseDraft.protocol, effectiveBaseDraft.engine)
           }
         : {
-            ...baseDraft,
+            ...effectiveBaseDraft,
             host: normalizedHost || baseDraft.host
           };
     const useRealityStartEndpoint =
       !usingImportedProfile &&
       serverDraft.transport === "xray" &&
       (serverDraft.protocol ?? "vless-reality") === "vless-reality";
-    return { serverDraft, useRealityStartEndpoint, usingImportedProfile };
+    let ownerRuntimeLabRequest: OwnerRuntimeLabRequest | undefined;
+    if (
+      ownerRuntimeLabMode === "reality-whitelist-scaffold" ||
+      ownerRuntimeLabMode === "reality-whitelist-lab" ||
+      ownerRuntimeLabMode === "reality-vps-scaffold" ||
+      ownerRuntimeLabMode === "reality-vps-lab" ||
+      ownerRuntimeLabMode === "reality-vps-relay-lab"
+    ) {
+      if (!isAndroidClient) {
+        throw new Error(t("ownerLabAndroidOnly"));
+      }
+      if (!ownerProfileAvailable && !usingImportedProfile) {
+        throw new Error(
+          allowImportedProfileForOwnerRuntimeLab ? t("ownerLabNeedsAccessProfile") : t("ownerLabNeedsOwnerProfile")
+        );
+      }
+      if (isOwnerRuntimeLabVpsMode(ownerRuntimeLabMode)) {
+        const usingRelayOwnerMode = isOwnerRuntimeLabRelayOwnerMode(ownerRuntimeLabMode);
+        const usingRelayAutoselect = usingRelayOwnerMode || effectiveOwnerRuntimeLab.vpsUseRelayAutoselect;
+        const vpsServerName = (
+          effectiveOwnerRuntimeLab.vpsServerName.trim().toLowerCase() ||
+          (usingRelayAutoselect ? "id.x5.ru" : "")
+        );
+        if (!vpsServerName) {
+          throw new Error(t("ownerLabVpsServerRequired"));
+        }
+        const parsedVpsPort = Number.parseInt(effectiveOwnerRuntimeLab.vpsPort, 10);
+        const vpsPort =
+          Number.isInteger(parsedVpsPort) && parsedVpsPort > 0 && parsedVpsPort <= 65535
+            ? parsedVpsPort
+            : usingRelayAutoselect
+              ? 443
+              : Number.NaN;
+        if (!Number.isInteger(vpsPort) || vpsPort <= 0 || vpsPort > 65535) {
+          throw new Error(t("ownerLabVpsPortRequired"));
+        }
+        ownerRuntimeLabRequest = {
+          mode: ownerRuntimeLabMode,
+          hintServerName: "",
+          vpsServerName,
+          vpsPort,
+          vpsTransport: usingRelayAutoselect ? "tcp" : effectiveOwnerRuntimeLab.vpsTransport,
+          ...((effectiveOwnerRuntimeLab.vpsFlow.trim() || usingRelayAutoselect)
+            ? { vpsFlow: effectiveOwnerRuntimeLab.vpsFlow.trim() || "xtls-rprx-vision" }
+            : {}),
+          ...((effectiveOwnerRuntimeLab.vpsFingerprint.trim() || usingRelayAutoselect)
+            ? { vpsFingerprint: effectiveOwnerRuntimeLab.vpsFingerprint.trim() || "chrome" }
+            : {}),
+          ...(effectiveOwnerRuntimeLab.vpsGrpcServiceName.trim()
+            ? { vpsGrpcServiceName: effectiveOwnerRuntimeLab.vpsGrpcServiceName.trim() }
+            : {}),
+          ...(effectiveOwnerRuntimeLab.vpsGrpcAuthority.trim()
+            ? { vpsGrpcAuthority: effectiveOwnerRuntimeLab.vpsGrpcAuthority.trim() }
+            : {}),
+          ...(effectiveOwnerRuntimeLab.vpsSource.trim() ? { vpsSource: effectiveOwnerRuntimeLab.vpsSource.trim() } : {}),
+          ...(effectiveOwnerRuntimeLab.vpsTag.trim() ? { vpsTag: effectiveOwnerRuntimeLab.vpsTag.trim() } : {}),
+          ...(usingRelayOwnerMode ? { vpsOwnerRealityEgress: true } : {}),
+          ...(usingRelayAutoselect
+            ? {
+                vpsRelayAutoselect: {
+                  enabled: true,
+                  ...(effectiveOwnerRuntimeLab.vpsRelaySubscriptionUrl.trim()
+                    ? { subscriptionUrl: effectiveOwnerRuntimeLab.vpsRelaySubscriptionUrl.trim() }
+                    : {}),
+                  ...(effectiveOwnerRuntimeLab.vpsRelaySourceLabel.trim()
+                    ? { sourceLabel: effectiveOwnerRuntimeLab.vpsRelaySourceLabel.trim() }
+                    : {})
+                }
+              }
+            : {})
+        };
+      } else {
+        const hintServerName = effectiveOwnerRuntimeLab.hintServerName.trim().toLowerCase();
+        if (!hintServerName) {
+          throw new Error(t("ownerLabHintServerRequired"));
+        }
+        ownerRuntimeLabRequest = {
+          mode: ownerRuntimeLabMode,
+          hintServerName,
+          ...(effectiveOwnerRuntimeLab.hintCidrBucket.trim()
+            ? { hintCidrBucket: effectiveOwnerRuntimeLab.hintCidrBucket.trim() }
+            : {}),
+          ...(effectiveOwnerRuntimeLab.hintSource.trim() ? { hintSource: effectiveOwnerRuntimeLab.hintSource.trim() } : {}),
+          ...(effectiveOwnerRuntimeLab.hintTag.trim() ? { hintTag: effectiveOwnerRuntimeLab.hintTag.trim() } : {})
+        };
+      }
+    }
+    return { serverDraft, useRealityStartEndpoint, usingImportedProfile, ownerRuntimeLabRequest };
   };
 
-  const runningTunnelMatchesRequest = (tunnel: LocalTunnelState | null, serverDraft: ServerDraft) => {
+  const buildCurrentTunnelStartRequest = (baseDraft: ServerDraft = draft) => {
+    if (selectedAccessMode === "relay-via-server") {
+      return buildTunnelStartRequest(baseDraft, "reality-vps-relay-lab", {
+        allowImportedProfileForOwnerRuntimeLab: true,
+        requireRelaySupport: true,
+        forceRelayAutoselectDefaults: true
+      });
+    }
+    if (selectedAccessMode === "relay-direct") {
+      return buildTunnelStartRequest(baseDraft, "reality-vps-lab", {
+        allowImportedProfileForOwnerRuntimeLab: true,
+        forceRelayAutoselectDefaults: true
+      });
+    }
+    return buildTunnelStartRequest(baseDraft);
+  };
+
+  const runningTunnelMatchesRequest = (
+    tunnel: LocalTunnelState | null,
+    serverDraft: ServerDraft,
+    ownerRuntimeLabRequest?: OwnerRuntimeLabRequest
+  ) => {
     if (!tunnel || tunnel.status !== "running" || !tunnel.socksAddress) {
       return false;
     }
     const expectedHost = serverDraft.host?.trim();
     const expectedTransport = normalizeTransport(serverDraft.transport);
     const expectedProtocol = normalizeProtocol(serverDraft.protocol);
+    const expectedRuntimeIdentity = resolveRuntimeIdentity(serverDraft, ownerRuntimeLabRequest);
     if (expectedHost && tunnel.serverHost && tunnel.serverHost !== expectedHost) {
       return false;
     }
-    return tunnel.transport === expectedTransport && normalizeProtocol(tunnel.protocol) === expectedProtocol;
+    if (tunnel.transport !== expectedTransport || normalizeProtocol(tunnel.protocol) !== expectedProtocol) {
+      return false;
+    }
+    if (expectedRuntimeIdentity.runtimeFamily && tunnel.runtimeFamily && tunnel.runtimeFamily !== expectedRuntimeIdentity.runtimeFamily) {
+      return false;
+    }
+    if (
+      expectedRuntimeIdentity.activationState &&
+      tunnel.activationState &&
+      tunnel.activationState !== expectedRuntimeIdentity.activationState
+    ) {
+      return false;
+    }
+    return true;
   };
 
   const pollLocalTunnel = (immediate = false) => {
@@ -779,6 +1281,174 @@ export function ControlCenter() {
     }
 
     return tunnelData;
+  };
+
+  const waitForTunnelIdentity = async (
+    serverDraft: ServerDraft,
+    ownerRuntimeLabRequest?: OwnerRuntimeLabRequest,
+    attempts = 18,
+    delayMs = 700
+  ) => {
+    const expectedRuntimeIdentity = resolveRuntimeIdentity(serverDraft, ownerRuntimeLabRequest);
+    let tunnelData = await pollLocalTunnel(true);
+    if (runningTunnelMatchesRequest(tunnelData, serverDraft, ownerRuntimeLabRequest)) {
+      return tunnelData;
+    }
+    if (
+      tunnelData?.runtimeFamily === expectedRuntimeIdentity.runtimeFamily &&
+      tunnelData.activationState === expectedRuntimeIdentity.activationState
+    ) {
+      return tunnelData;
+    }
+    if (tunnelData && (tunnelData.status === "failed" || tunnelData.status === "stopped")) {
+      return tunnelData;
+    }
+
+    for (let i = 0; i < attempts; i += 1) {
+      await sleep(delayMs);
+      tunnelData = await pollLocalTunnel(true);
+      if (runningTunnelMatchesRequest(tunnelData, serverDraft, ownerRuntimeLabRequest)) {
+        return tunnelData;
+      }
+      if (
+        tunnelData?.runtimeFamily === expectedRuntimeIdentity.runtimeFamily &&
+        tunnelData.activationState === expectedRuntimeIdentity.activationState
+      ) {
+        return tunnelData;
+      }
+      if (tunnelData && (tunnelData.status === "failed" || tunnelData.status === "stopped")) {
+        return tunnelData;
+      }
+    }
+
+    return tunnelData;
+  };
+
+  const unlockOwnerRuntimeLab = () => {
+    if (!isAndroidClient || ownerRuntimeLabUnlocked) {
+      return;
+    }
+    setOwnerRuntimeLabUnlockTapCount((current) => {
+      const next = current + 1;
+      if (next >= ownerRuntimeLabUnlockTapTarget) {
+        setOwnerRuntimeLabUnlocked(true);
+        setSuccessNotice(t("ownerLabUnlocked"));
+        return 0;
+      }
+      return next;
+    });
+  };
+
+  const handleStartOwnerRuntimeLab = () => {
+    setError(null);
+    setPendingAction("startOwnerRuntimeLab");
+    startTransition(async () => {
+      try {
+        const { serverDraft, useRealityStartEndpoint, usingImportedProfile, ownerRuntimeLabRequest } = buildTunnelStartRequest(
+          draft,
+          ownerRuntimeLab.mode
+        );
+        let tunnelData = localTunnel;
+        if (
+          tunnelData &&
+          (tunnelData.status === "running" || tunnelData.status === "starting") &&
+          !runningTunnelMatchesRequest(tunnelData, serverDraft, ownerRuntimeLabRequest)
+        ) {
+          const stopRes = await coreApi.stopLocalTunnel();
+          setLocalTunnel(stopRes.data);
+          tunnelData = await waitForStoppedTunnel();
+          setLocalTunnel(tunnelData ?? stopRes.data);
+          setAndroidVpnVisualOverride(false);
+        }
+
+        if (!runningTunnelMatchesRequest(tunnelData, serverDraft, ownerRuntimeLabRequest)) {
+          const startApi =
+            isAndroidClient && ownerRuntimeLabRequest ? coreApi.startLocalTunnelFast : coreApi.startLocalTunnel;
+          const startRes = await startApi(
+            {
+              server: serverDraft,
+              secret: usingImportedProfile ? "" : secret,
+              vkLink,
+              ...(ownerRuntimeLabRequest ? { ownerRuntimeLab: ownerRuntimeLabRequest } : {})
+            },
+            useRealityStartEndpoint
+          );
+          tunnelData = startRes.data;
+          setLocalTunnel(tunnelData);
+          if (!startRes.ok) {
+            setError(tunnelData.error ?? t("tunnelStartFailed"));
+            return;
+          }
+        }
+
+        if (isAndroidClient && ownerRuntimeLabRequest) {
+          void fetchSystemProxyStatus();
+          void pollLocalTunnel();
+          setSuccessNotice(t("ownerLabStartRequested"));
+          return;
+        }
+
+        tunnelData = await waitForTunnelIdentity(serverDraft, ownerRuntimeLabRequest);
+        setLocalTunnel(tunnelData ?? localTunnel);
+
+        if (ownerRuntimeLabRequest) {
+          const whitelistRuntimeReady =
+            tunnelData?.runtimeFamily === "reality-whitelist-assisted" &&
+            ((ownerRuntimeLabRequest.mode === "reality-whitelist-scaffold" && tunnelData.activationState === "scaffold_only") ||
+              (ownerRuntimeLabRequest.mode === "reality-whitelist-lab" &&
+                tunnelData.activationState === "active" &&
+                tunnelData.status === "running" &&
+                Boolean(tunnelData.socksAddress)));
+          const vpsRuntimeReady =
+            tunnelData?.runtimeFamily === "reality-vps-lab" &&
+            ((ownerRuntimeLabRequest.mode === "reality-vps-scaffold" && tunnelData.activationState === "scaffold_only") ||
+              ((ownerRuntimeLabRequest.mode === "reality-vps-lab" ||
+                ownerRuntimeLabRequest.mode === "reality-vps-relay-lab") &&
+                tunnelData.activationState === "active" &&
+                tunnelData.status === "running" &&
+                Boolean(tunnelData.socksAddress)));
+          if (whitelistRuntimeReady || vpsRuntimeReady) {
+            setSuccessNotice(
+              ownerRuntimeLabRequest.mode === "reality-whitelist-lab"
+                ? t("ownerLabWhitelistLabReady")
+                : ownerRuntimeLabRequest.mode === "reality-vps-relay-lab"
+                  ? t("ownerLabVpsRelayLabReady")
+                : ownerRuntimeLabRequest.mode === "reality-vps-lab"
+                  ? t("ownerLabVpsLabReady")
+                  : ownerRuntimeLabRequest.mode === "reality-vps-scaffold"
+                    ? t("ownerLabVpsScaffoldReady")
+                    : t("ownerLabWhitelistReady")
+            );
+            return;
+          }
+          setError(
+            tunnelData?.error ??
+              (ownerRuntimeLabRequest.mode === "reality-whitelist-lab"
+                ? t("ownerLabWhitelistLabFailed")
+                : ownerRuntimeLabRequest.mode === "reality-vps-relay-lab"
+                  ? t("ownerLabVpsRelayLabFailed")
+                : ownerRuntimeLabRequest.mode === "reality-vps-lab"
+                  ? t("ownerLabVpsLabFailed")
+                  : ownerRuntimeLabRequest.mode === "reality-vps-scaffold"
+                    ? t("ownerLabVpsScaffoldFailed")
+                    : t("ownerLabWhitelistFailed"))
+          );
+          return;
+        }
+
+        if (tunnelData?.status === "running" && tunnelData.socksAddress) {
+          setSuccessNotice(t("ownerLabControlReady"));
+          return;
+        }
+
+        setError(tunnelData?.error ?? t("tunnelStartFailed"));
+      } catch (requestError) {
+        const message = requestError instanceof Error ? requestError.message : t("unknownError");
+        setError(message);
+      } finally {
+        setPendingAction(null);
+      }
+    });
   };
 
   const runCurrentTunnelTest = async () => {
@@ -873,6 +1543,7 @@ export function ControlCenter() {
   };
 
   const handleAccessModeChange = (mode: AccessMode) => {
+    setSelectedAccessMode(mode);
     setDraft((current) => {
       if (draftAccessMode(current) === mode) {
         return current;
@@ -901,6 +1572,28 @@ export function ControlCenter() {
       >
         {t("runtimeModeVk")}
       </button>
+      {isAndroidClient ? (
+        <button
+          className={selectedAccessMode === "relay-via-server" ? "lang-button is-active" : "lang-button"}
+          type="button"
+          aria-pressed={selectedAccessMode === "relay-via-server"}
+          title={t("runtimeModeRelayOwnerHint")}
+          onClick={() => handleAccessModeChange("relay-via-server")}
+        >
+          {t("runtimeModeRelayOwner")}
+        </button>
+      ) : null}
+      {isAndroidClient ? (
+        <button
+          className={selectedAccessMode === "relay-direct" ? "lang-button is-active" : "lang-button"}
+          type="button"
+          aria-pressed={selectedAccessMode === "relay-direct"}
+          title={t("runtimeModeRelayDirectHint")}
+          onClick={() => handleAccessModeChange("relay-direct")}
+        >
+          {t("runtimeModeRelayDirect")}
+        </button>
+      ) : null}
     </div>
   );
 
@@ -909,12 +1602,13 @@ export function ControlCenter() {
     setPendingAction("startTunnel");
     startTransition(async () => {
       try {
-        const { serverDraft, useRealityStartEndpoint, usingImportedProfile } = buildTunnelStartRequest();
+        const { serverDraft, useRealityStartEndpoint, usingImportedProfile, ownerRuntimeLabRequest } =
+          buildCurrentTunnelStartRequest();
         if (
           isAndroidClient &&
           localTunnel &&
           (localTunnel.status === "running" || localTunnel.status === "starting") &&
-          !runningTunnelMatchesRequest(localTunnel, serverDraft)
+          !runningTunnelMatchesRequest(localTunnel, serverDraft, ownerRuntimeLabRequest)
         ) {
           const stopRes = await coreApi.stopLocalTunnel();
           setLocalTunnel(stopRes.data);
@@ -922,11 +1616,14 @@ export function ControlCenter() {
           setLocalTunnel(stoppedTunnel ?? stopRes.data);
           setAndroidVpnVisualOverride(false);
         }
-        const res = await coreApi.startLocalTunnel(
+        const startApi =
+          isAndroidClient && ownerRuntimeLabRequest ? coreApi.startLocalTunnelFast : coreApi.startLocalTunnel;
+        const res = await startApi(
           {
             server: serverDraft,
             secret: usingImportedProfile ? "" : secret,
-            vkLink
+            vkLink,
+            ...(ownerRuntimeLabRequest ? { ownerRuntimeLab: ownerRuntimeLabRequest } : {})
           },
           useRealityStartEndpoint
         );
@@ -935,6 +1632,10 @@ export function ControlCenter() {
         void fetchSystemProxyStatus();
         if (!res.ok) {
           setError(data.error ?? t("tunnelStartFailed"));
+          return;
+        }
+        if (isAndroidClient && ownerRuntimeLabRequest) {
+          void pollLocalTunnel();
           return;
         }
         const tunnelData = await waitForRunningTunnel();
@@ -1044,13 +1745,14 @@ export function ControlCenter() {
     setPendingAction("enableVpn");
     startTransition(async () => {
       try {
-        const { serverDraft, useRealityStartEndpoint, usingImportedProfile } = buildTunnelStartRequest();
+        const { serverDraft, useRealityStartEndpoint, usingImportedProfile, ownerRuntimeLabRequest } =
+          buildCurrentTunnelStartRequest();
         let tunnelData = localTunnel;
         if (
           isAndroidClient &&
           tunnelData &&
           (tunnelData.status === "running" || tunnelData.status === "starting") &&
-          !runningTunnelMatchesRequest(tunnelData, serverDraft)
+          !runningTunnelMatchesRequest(tunnelData, serverDraft, ownerRuntimeLabRequest)
         ) {
           const stopRes = await coreApi.stopLocalTunnel();
           setLocalTunnel(stopRes.data);
@@ -1058,12 +1760,15 @@ export function ControlCenter() {
           setLocalTunnel(tunnelData ?? stopRes.data);
           setAndroidVpnVisualOverride(false);
         }
-        if (!runningTunnelMatchesRequest(tunnelData, serverDraft)) {
-          const startRes = await coreApi.startLocalTunnel(
+        if (!runningTunnelMatchesRequest(tunnelData, serverDraft, ownerRuntimeLabRequest)) {
+          const startApi =
+            isAndroidClient && ownerRuntimeLabRequest ? coreApi.startLocalTunnelFast : coreApi.startLocalTunnel;
+          const startRes = await startApi(
             {
               server: serverDraft,
               secret: usingImportedProfile ? "" : secret,
-              vkLink
+              vkLink,
+              ...(ownerRuntimeLabRequest ? { ownerRuntimeLab: ownerRuntimeLabRequest } : {})
             },
             useRealityStartEndpoint
           );
@@ -1071,6 +1776,12 @@ export function ControlCenter() {
           setLocalTunnel(tunnelData);
           if (!startRes.ok) {
             setError(tunnelData.error ?? t("tunnelStartFailed"));
+            return;
+          }
+
+          if (isAndroidClient && ownerRuntimeLabRequest) {
+            void fetchSystemProxyStatus();
+            void pollLocalTunnel();
             return;
           }
 
@@ -1243,6 +1954,7 @@ export function ControlCenter() {
     setActiveAccessTab("key");
     setActiveSheet(null);
     setDraft(initialDraft);
+    setSelectedAccessMode("vless-reality");
     setDeployPortMode("auto");
     setSecret("");
     setValidation(null);
@@ -1278,7 +1990,9 @@ export function ControlCenter() {
                 </div>
 
                 <button
-                  className={`phone-connect ${vpnVisualActive ? "phone-connect--active" : ""}`}
+                  className={`phone-connect ${vpnVisualActive ? "phone-connect--active" : ""} ${
+                    relayOwnerConnectAnimation ? "phone-connect--connecting" : ""
+                  }`}
                   type="button"
                   onClick={vpnActionActive ? handleDisableVPN : handleEnableVPN}
                   disabled={
@@ -1286,11 +2000,13 @@ export function ControlCenter() {
                       ? isBusy("disableVpn")
                       : isPending ||
                         !resolvedDraftHost ||
-                        (!secret.trim() && !hasLocalAccessProfile) ||
+                        (selectedAccessMode === "relay-via-server"
+                          ? !hasLocalAccessProfileForSelectedMode
+                          : !secret.trim() && !hasLocalAccessProfileForSelectedMode) ||
                         (requiresVKLink && (!vkLink.trim() || cooldownMinutes > 0))
                   }
                 >
-                  <span>{vpnButtonLabel}</span>
+                  <span className="phone-connect__label">{vpnButtonLabel}</span>
                 </button>
 
                 {error ? <p className="status-banner status-error">{error}</p> : null}
@@ -1545,7 +2261,7 @@ export function ControlCenter() {
                   {renderAccessModeToggle()}
                 </div>
                 <p className="compact-note">
-                  {selectedAccessMode === "vk-relay" ? t("runtimeModeVkHint") : t("runtimeModeRealityHint")}
+                  {selectedAccessModeHint}
                 </p>
               </label>
 
@@ -1651,7 +2367,17 @@ export function ControlCenter() {
             <div className="sheet-panel__head">
               <div>
                 <span className="section-eyebrow">{t("runtimeLog")}</span>
-                <h3 className="sheet-panel__title">{t("sheetLogsTitle")}</h3>
+                <h3
+                  className="sheet-panel__title"
+                  onClick={unlockOwnerRuntimeLab}
+                  title={
+                    ownerRuntimeLabUnlocked
+                      ? t("ownerLabTitle")
+                      : `${ownerRuntimeLabUnlockTapCount}/${ownerRuntimeLabUnlockTapTarget}`
+                  }
+                >
+                  {t("sheetLogsTitle")}
+                </h3>
               </div>
               <button className="ghost ghost--compact" type="button" onClick={() => setActiveSheet(null)}>
                 {t("close")}
@@ -1668,9 +2394,407 @@ export function ControlCenter() {
                 </button>
               </div>
 
+              {ownerRuntimeLabPanelVisible ? (
+                <div className="command-card">
+                  <strong>{t("ownerLabTitle")}</strong>
+                  <p className="compact-note compact-note--panel">{t("ownerLabText")}</p>
+
+                  <div className="owner-lab-mode-stack" aria-label={t("ownerLabMode")}>
+                    <button
+                      className={ownerRuntimeLab.mode === "off" ? "lang-button owner-lab-mode-button is-active" : "lang-button owner-lab-mode-button"}
+                      type="button"
+                      aria-pressed={ownerRuntimeLab.mode === "off"}
+                      onClick={() => setOwnerRuntimeLab((current) => ({ ...current, mode: "off" }))}
+                    >
+                      {t("ownerLabModeStable")}
+                    </button>
+                    <button
+                      className={
+                        ownerRuntimeLab.mode === "reality-whitelist-scaffold"
+                          ? "lang-button owner-lab-mode-button is-active"
+                          : "lang-button owner-lab-mode-button"
+                      }
+                      type="button"
+                      aria-pressed={ownerRuntimeLab.mode === "reality-whitelist-scaffold"}
+                      onClick={() =>
+                        setOwnerRuntimeLab((current) => ({ ...current, mode: "reality-whitelist-scaffold" }))
+                      }
+                    >
+                      {t("ownerLabModeWhitelist")}
+                    </button>
+                    <button
+                      className={
+                        ownerRuntimeLab.mode === "reality-vps-scaffold"
+                          ? "lang-button owner-lab-mode-button is-active"
+                          : "lang-button owner-lab-mode-button"
+                      }
+                      type="button"
+                      aria-pressed={ownerRuntimeLab.mode === "reality-vps-scaffold"}
+                      onClick={() =>
+                        setOwnerRuntimeLab((current) => ({
+                          ...current,
+                          mode: "reality-vps-scaffold",
+                          vpsUseOwnerRealityEgress: false
+                        }))
+                      }
+                    >
+                      {t("ownerLabModeVpsScaffold")}
+                    </button>
+                    <button
+                      className={
+                        ownerRuntimeLab.mode === "reality-vps-lab"
+                          ? "lang-button owner-lab-mode-button is-active"
+                          : "lang-button owner-lab-mode-button"
+                      }
+                      type="button"
+                      aria-pressed={ownerRuntimeLab.mode === "reality-vps-lab"}
+                      onClick={() =>
+                        setOwnerRuntimeLab((current) => ({
+                          ...current,
+                          mode: "reality-vps-lab",
+                          vpsUseOwnerRealityEgress: false
+                        }))
+                      }
+                    >
+                      {t("ownerLabModeVpsLab")}
+                    </button>
+                    <button
+                      className={
+                        ownerRuntimeLab.mode === "reality-vps-relay-lab"
+                          ? "lang-button owner-lab-mode-button is-active"
+                          : "lang-button owner-lab-mode-button"
+                      }
+                      type="button"
+                      aria-pressed={ownerRuntimeLab.mode === "reality-vps-relay-lab"}
+                      onClick={() =>
+                        setOwnerRuntimeLab((current) => ({
+                          ...withIgareckRelayDefaults(current),
+                          mode: "reality-vps-relay-lab",
+                          vpsUseOwnerRealityEgress: true,
+                          vpsUseRelayAutoselect: true
+                        }))
+                      }
+                    >
+                      {t("ownerLabModeVpsRelayLab")}
+                    </button>
+                  </div>
+
+                  {ownerRuntimeLabHintInputsVisible ? (
+                    <>
+                      <label className="input-field input-span">
+                        <span>{t("ownerLabHintServerName")}</span>
+                        <input
+                          value={ownerRuntimeLab.hintServerName}
+                          onChange={(event) =>
+                            setOwnerRuntimeLab((current) => ({ ...current, hintServerName: event.target.value }))
+                          }
+                          placeholder="max.ru"
+                        />
+                      </label>
+
+                      <label className="input-field input-span">
+                        <span>{t("ownerLabHintCidrBucket")}</span>
+                        <input
+                          value={ownerRuntimeLab.hintCidrBucket}
+                          onChange={(event) =>
+                            setOwnerRuntimeLab((current) => ({ ...current, hintCidrBucket: event.target.value }))
+                          }
+                          placeholder="cidr-max"
+                        />
+                      </label>
+
+                      <label className="input-field input-span">
+                        <span>{t("ownerLabHintSource")}</span>
+                        <input
+                          value={ownerRuntimeLab.hintSource}
+                          onChange={(event) =>
+                            setOwnerRuntimeLab((current) => ({ ...current, hintSource: event.target.value }))
+                          }
+                          placeholder="operator-curated"
+                        />
+                      </label>
+
+                      <label className="input-field input-span">
+                        <span>{t("ownerLabHintTag")}</span>
+                        <input
+                          value={ownerRuntimeLab.hintTag}
+                          onChange={(event) =>
+                            setOwnerRuntimeLab((current) => ({ ...current, hintTag: event.target.value }))
+                          }
+                          placeholder="candidate-max-ru"
+                        />
+                      </label>
+                    </>
+                  ) : null}
+
+                  {ownerRuntimeLabVpsInputsVisible ? (
+                    <>
+                      {!ownerRuntimeLabVpsRelayOwnerMode ? (
+                        <label className="input-field input-span">
+                          <span>{t("ownerLabVpsRelayMode")}</span>
+                          <div className="lang-toggle">
+                            <button
+                              className={!ownerRuntimeLab.vpsUseRelayAutoselect ? "lang-button is-active" : "lang-button"}
+                              type="button"
+                              aria-pressed={!ownerRuntimeLab.vpsUseRelayAutoselect}
+                              onClick={() =>
+                                setOwnerRuntimeLab((current) => ({ ...current, vpsUseRelayAutoselect: false }))
+                              }
+                            >
+                              {t("ownerLabVpsManualRelay")}
+                            </button>
+                            <button
+                              className={ownerRuntimeLab.vpsUseRelayAutoselect ? "lang-button is-active" : "lang-button"}
+                              type="button"
+                              aria-pressed={ownerRuntimeLab.vpsUseRelayAutoselect}
+                              onClick={() => setOwnerRuntimeLab((current) => withIgareckRelayDefaults(current))}
+                            >
+                              {t("ownerLabVpsIgareckRelay")}
+                            </button>
+                          </div>
+                        </label>
+                      ) : (
+                        <p className="compact-note compact-note--panel">{t("ownerLabVpsRelayLockedText")}</p>
+                      )}
+
+                      {ownerRuntimeLabVpsRelayInputsVisible ? (
+                        <>
+                          <p className="compact-note compact-note--panel">{t("ownerLabVpsRelayText")}</p>
+
+                          {ownerRuntimeLabVpsRelayOwnerMode ? (
+                            <p className="compact-note compact-note--panel">{t("ownerLabVpsRelayOwnerText")}</p>
+                          ) : null}
+
+                          <label className="input-field input-span">
+                            <span>{t("ownerLabVpsRelaySubscriptionUrl")}</span>
+                            <input
+                              value={ownerRuntimeLab.vpsRelaySubscriptionUrl}
+                              onChange={(event) =>
+                                setOwnerRuntimeLab((current) => ({
+                                  ...current,
+                                  vpsRelaySubscriptionUrl: event.target.value
+                                }))
+                              }
+                              placeholder={defaultOwnerRuntimeLabRelaySubscriptionUrl}
+                            />
+                          </label>
+
+                          <label className="input-field input-span">
+                            <span>{t("ownerLabVpsRelaySourceLabel")}</span>
+                            <input
+                              value={ownerRuntimeLab.vpsRelaySourceLabel}
+                              onChange={(event) =>
+                                setOwnerRuntimeLab((current) => ({
+                                  ...current,
+                                  vpsRelaySourceLabel: event.target.value
+                                }))
+                              }
+                              placeholder={defaultOwnerRuntimeLabRelaySourceLabel}
+                            />
+                          </label>
+                        </>
+                      ) : null}
+
+                      {ownerRuntimeLabVpsManualInputsVisible ? (
+                        <>
+                      <label className="input-field input-span">
+                        <span>{t("ownerLabVpsServerName")}</span>
+                        <input
+                          value={ownerRuntimeLab.vpsServerName}
+                          onChange={(event) =>
+                            setOwnerRuntimeLab((current) => ({ ...current, vpsServerName: event.target.value }))
+                          }
+                          placeholder="pimg.mycdn.me"
+                        />
+                      </label>
+
+                      <label className="input-field">
+                        <span>{t("ownerLabVpsPort")}</span>
+                        <input
+                          value={ownerRuntimeLab.vpsPort}
+                          onChange={(event) =>
+                            setOwnerRuntimeLab((current) => ({ ...current, vpsPort: event.target.value }))
+                          }
+                          placeholder="10443"
+                          inputMode="numeric"
+                        />
+                      </label>
+
+                      <label className="input-field">
+                        <span>{t("ownerLabVpsTransport")}</span>
+                        <div className="lang-toggle">
+                          <button
+                            className={ownerRuntimeLab.vpsTransport === "tcp" ? "lang-button is-active" : "lang-button"}
+                            type="button"
+                            aria-pressed={ownerRuntimeLab.vpsTransport === "tcp"}
+                            onClick={() => setOwnerRuntimeLab((current) => ({ ...current, vpsTransport: "tcp" }))}
+                          >
+                            TCP
+                          </button>
+                          <button
+                            className={ownerRuntimeLab.vpsTransport === "grpc" ? "lang-button is-active" : "lang-button"}
+                            type="button"
+                            aria-pressed={ownerRuntimeLab.vpsTransport === "grpc"}
+                            onClick={() => setOwnerRuntimeLab((current) => ({ ...current, vpsTransport: "grpc" }))}
+                          >
+                            gRPC
+                          </button>
+                        </div>
+                      </label>
+
+                      <label className="input-field input-span">
+                        <span>{t("ownerLabVpsFlow")}</span>
+                        <input
+                          value={ownerRuntimeLab.vpsFlow}
+                          onChange={(event) =>
+                            setOwnerRuntimeLab((current) => ({ ...current, vpsFlow: event.target.value }))
+                          }
+                          placeholder="xtls-rprx-vision"
+                        />
+                      </label>
+
+                      <label className="input-field input-span">
+                        <span>{t("ownerLabVpsFingerprint")}</span>
+                        <input
+                          value={ownerRuntimeLab.vpsFingerprint}
+                          onChange={(event) =>
+                            setOwnerRuntimeLab((current) => ({ ...current, vpsFingerprint: event.target.value }))
+                          }
+                          placeholder={ownerRuntimeLab.vpsTransport === "grpc" ? "firefox" : "chrome"}
+                        />
+                      </label>
+
+                      <label className="input-field input-span">
+                        <span>{t("ownerLabVpsGrpcServiceName")}</span>
+                        <input
+                          value={ownerRuntimeLab.vpsGrpcServiceName}
+                          onChange={(event) =>
+                            setOwnerRuntimeLab((current) => ({ ...current, vpsGrpcServiceName: event.target.value }))
+                          }
+                          placeholder="grpc serviceName"
+                        />
+                      </label>
+
+                      <label className="input-field input-span">
+                        <span>{t("ownerLabVpsGrpcAuthority")}</span>
+                        <input
+                          value={ownerRuntimeLab.vpsGrpcAuthority}
+                          onChange={(event) =>
+                            setOwnerRuntimeLab((current) => ({ ...current, vpsGrpcAuthority: event.target.value }))
+                          }
+                          placeholder="grpc authority"
+                        />
+                      </label>
+
+                      <label className="input-field input-span">
+                        <span>{t("ownerLabVpsSource")}</span>
+                        <input
+                          value={ownerRuntimeLab.vpsSource}
+                          onChange={(event) =>
+                            setOwnerRuntimeLab((current) => ({ ...current, vpsSource: event.target.value }))
+                          }
+                          placeholder="operator-curated:vps-lab"
+                        />
+                      </label>
+
+                      <label className="input-field input-span">
+                        <span>{t("ownerLabVpsTag")}</span>
+                        <input
+                          value={ownerRuntimeLab.vpsTag}
+                          onChange={(event) =>
+                            setOwnerRuntimeLab((current) => ({ ...current, vpsTag: event.target.value }))
+                          }
+                          placeholder="reality-lab-pimg-mycdn-me-tcp"
+                        />
+                      </label>
+                        </>
+                      ) : null}
+                    </>
+                  ) : null}
+
+                  {ownerRuntimeLabDisabledReason ? (
+                    <p className="compact-note compact-note--panel">{ownerRuntimeLabDisabledReason}</p>
+                  ) : null}
+
+                  <div className="sheet-actions">
+                    <button
+                      className="ghost"
+                      type="button"
+                      onClick={handleStartOwnerRuntimeLab}
+                      disabled={isPending || Boolean(ownerRuntimeLabDisabledReason)}
+                    >
+                      {isBusy("startOwnerRuntimeLab") ? t("startingTunnel") : t("ownerLabStart")}
+                    </button>
+                    <button
+                      className="ghost"
+                      type="button"
+                      onClick={handleStopTunnel}
+                      disabled={isPending || (!localTunnel || localTunnel.status === "idle" || localTunnel.status === "stopped")}
+                    >
+                      {isBusy("stopTunnel") ? t("stoppingTunnel") : t("stopTunnel")}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
               <div className="command-card command-card--compact">
                 <strong>{t("runtimeStartSource")}</strong>
                 <textarea readOnly value={runtimeStartSource} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("runtimeFamily")}</strong>
+                <textarea readOnly value={runtimeFamily} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("runtimeActivationState")}</strong>
+                <textarea readOnly value={runtimeActivationState} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("runtimeFrontHost")}</strong>
+                <textarea readOnly value={runtimeFrontHost} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("runtimeFrontPath")}</strong>
+                <textarea readOnly value={runtimeFrontPath} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("runtimeFrontProvider")}</strong>
+                <textarea readOnly value={runtimeFrontProvider} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("runtimeFrontTag")}</strong>
+                <textarea readOnly value={runtimeFrontTag} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("runtimeRelayAutoselect")}</strong>
+                <pre className="command-card__output">{runtimeRelayAutoselectSummaryDisplay}</pre>
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("runtimeSelectedSniHint")}</strong>
+                <textarea readOnly value={runtimeSelectedSniHint} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("runtimeSelectedCidrHint")}</strong>
+                <textarea readOnly value={runtimeSelectedCidrHint} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("runtimeWhitelistHintSource")}</strong>
+                <textarea readOnly value={runtimeWhitelistHintSource} />
+              </div>
+
+              <div className="command-card command-card--compact">
+                <strong>{t("runtimeWhitelistHintTag")}</strong>
+                <textarea readOnly value={runtimeWhitelistHintTag} />
               </div>
 
               <div className="command-card command-card--compact">
@@ -1735,10 +2859,7 @@ export function ControlCenter() {
 
               <div className="command-card command-card--compact">
                 <strong>{t("runtimeLog")}</strong>
-                <textarea
-                  readOnly
-                  value={runtimeLogTail.length > 0 ? runtimeLogTail.join("\n") : t("diagnosticsEmpty")}
-                />
+                <pre className="command-card__output command-card__output--long">{runtimeLogDisplay}</pre>
               </div>
 
               <div className="command-card command-card--compact">
@@ -1747,10 +2868,7 @@ export function ControlCenter() {
                   {localTunnel?.lastTest?.url ?? "https://example.com"}
                   {localTunnel?.lastTest?.checkedAt ? ` / ${localTunnel.lastTest.checkedAt}` : ""}
                 </p>
-                <textarea
-                  readOnly
-                  value={localTunnel?.lastTest?.output ?? localTunnel?.lastTest?.error ?? t("diagnosticsEmpty")}
-                />
+                <pre className="command-card__output">{runtimeLastTestDisplay}</pre>
               </div>
 
               {curlCommand ? (

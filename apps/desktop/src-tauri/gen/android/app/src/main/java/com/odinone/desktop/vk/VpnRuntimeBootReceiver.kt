@@ -16,6 +16,8 @@ class VpnRuntimeBootReceiver : BroadcastReceiver() {
             return
         }
 
+        RealityRelayAutoselect.syncSchedule(context)
+
         val restoreDecision =
             classifyBootRestoreAvailability(
                 resumeEligible = VpnRuntimeRestoreStore.isResumeEligible(context),
