@@ -13,9 +13,44 @@ val tauriProperties = Properties().apply {
     }
 }
 
+val localReleaseKeystorePath =
+    System.getenv("ODIN_ONE_ANDROID_RELEASE_KEYSTORE")
+        ?.takeIf { it.isNotBlank() }
+        ?: run {
+            val fallback = file("${System.getProperty("user.home")}/.android/debug.keystore")
+            fallback.path.takeIf { fallback.exists() }
+        }
+val localReleaseStorePassword =
+    System.getenv("ODIN_ONE_ANDROID_RELEASE_STORE_PASSWORD")
+        ?.takeIf { it.isNotBlank() }
+        ?: "android"
+val localReleaseKeyAlias =
+    System.getenv("ODIN_ONE_ANDROID_RELEASE_KEY_ALIAS")
+        ?.takeIf { it.isNotBlank() }
+        ?: "androiddebugkey"
+val localReleaseKeyPassword =
+    System.getenv("ODIN_ONE_ANDROID_RELEASE_KEY_PASSWORD")
+        ?.takeIf { it.isNotBlank() }
+        ?: "android"
+val hasLocalReleaseSigning = localReleaseKeystorePath != null
+
 android {
     compileSdk = 36
     namespace = "com.odinone.desktop.vk"
+    signingConfigs {
+        if (hasLocalReleaseSigning) {
+            create("localRelease") {
+                storeFile = file(localReleaseKeystorePath!!)
+                storePassword = localReleaseStorePassword
+                keyAlias = localReleaseKeyAlias
+                keyPassword = localReleaseKeyPassword
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = false
+            }
+        }
+    }
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "com.odinone.desktop.vk"
@@ -43,6 +78,9 @@ android {
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))
                     .toList().toTypedArray()
             )
+            if (hasLocalReleaseSigning) {
+                signingConfig = signingConfigs.getByName("localRelease")
+            }
         }
     }
     kotlinOptions {
