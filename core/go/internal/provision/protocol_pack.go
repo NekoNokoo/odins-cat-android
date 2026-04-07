@@ -1,6 +1,9 @@
 package provision
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 type ProtocolStatus string
 
@@ -30,6 +33,23 @@ type protocolPackManifest struct {
 }
 
 func buildProtocolPack(transport Transport, wireGuardPort, realityPort, vkRelayPort int) []ProtocolPackEntry {
+	return buildProtocolPackWithFallbacks(transport, wireGuardPort, realityPort, vkRelayPort, nil)
+}
+
+func previewProtocolPackFallbacks(edgeHost string, edgePort int) map[string]any {
+	fallbacks := map[string]any{
+		"realityRelayOwnerEgress": map[string]any{},
+		"realityRelayDirect":      map[string]any{},
+	}
+	if strings.TrimSpace(edgeHost) != "" {
+		fallbacks["realityYandexEdge"] = map[string]any{
+			"connectPort": edgePort,
+		}
+	}
+	return fallbacks
+}
+
+func buildProtocolPackWithFallbacks(transport Transport, wireGuardPort, realityPort, vkRelayPort int, stagedFallbacks map[string]any) []ProtocolPackEntry {
 	if wireGuardPort <= 0 {
 		wireGuardPort = whitelistWireGuardPortStart
 	}
@@ -61,7 +81,49 @@ func buildProtocolPack(transport Transport, wireGuardPort, realityPort, vkRelayP
 			Port:    vkRelayPort,
 			Notes:   "VK relay stays deployed on the same server so the client can switch to it without another server rollout.",
 		},
-		{
+	}
+
+	if stagedFallbacks != nil {
+		if _, ok := stagedFallbacks["realityYandexEdge"]; ok {
+			entries = append(entries, ProtocolPackEntry{
+				ID:      "vless-reality-yandex-edge",
+				Label:   "Yandex edge",
+				Status:  ProtocolStatusStaged,
+				Engine:  "sing-box",
+				Scheme:  "vless+reality-edge",
+				Network: "tcp",
+				Port:    protocolPackPortFromFallback(stagedFallbacks["realityYandexEdge"], "connectPort", yandexEdgeDefaultPort),
+				Notes:   "Optional whitelist-facing entry surface that forwards to the live REALITY origin through a dedicated Yandex edge.",
+			})
+		}
+		if _, ok := stagedFallbacks["realityRelayOwnerEgress"]; ok {
+			entries = append(entries, ProtocolPackEntry{
+				ID:      "vless-reality-relay-owner",
+				Label:   "white tunel",
+				Status:  ProtocolStatusStaged,
+				Engine:  "sing-box",
+				Scheme:  "vless+reality-relay",
+				Network: "tcp",
+				Port:    realityFallbackPort,
+				Notes:   "Relay-assisted REALITY path. The client first reaches a curated relay and then exits through your server.",
+			})
+		}
+		if _, ok := stagedFallbacks["realityRelayDirect"]; ok {
+			entries = append(entries, ProtocolPackEntry{
+				ID:      "vless-reality-relay-direct",
+				Label:   "white relay",
+				Status:  ProtocolStatusStaged,
+				Engine:  "sing-box",
+				Scheme:  "vless+reality-relay",
+				Network: "tcp",
+				Port:    realityFallbackPort,
+				Notes:   "Direct relay path. The client uses a curated external REALITY relay without a second hop through your server.",
+			})
+		}
+	}
+
+	entries = append(entries,
+		ProtocolPackEntry{
 			ID:      "direct-wireguard",
 			Label:   "Direct WireGuard-over-xray",
 			Status:  ProtocolStatusStaged,
@@ -71,7 +133,7 @@ func buildProtocolPack(transport Transport, wireGuardPort, realityPort, vkRelayP
 			Port:    wireGuardPort,
 			Notes:   "Legacy direct UDP path kept as a fallback while VLESS + REALITY is the default.",
 		},
-		{
+		ProtocolPackEntry{
 			ID:      "naive",
 			Label:   "Naive",
 			Status:  ProtocolStatusStaged,
@@ -81,7 +143,7 @@ func buildProtocolPack(transport Transport, wireGuardPort, realityPort, vkRelayP
 			Port:    naiveFallbackPort,
 			Notes:   "Planned browser-like HTTPS fallback for restrictive networks once server certificates are provisioned.",
 		},
-		{
+		ProtocolPackEntry{
 			ID:      "hysteria2",
 			Label:   "Hysteria2",
 			Status:  ProtocolStatusStaged,
@@ -91,7 +153,7 @@ func buildProtocolPack(transport Transport, wireGuardPort, realityPort, vkRelayP
 			Port:    hysteria2FallbackPort,
 			Notes:   "Planned high-performance UDP fallback for networks where direct WireGuard is unstable.",
 		},
-	}
+	)
 
 	if transport == TransportVKTurnProxyXray {
 		entries[0].Status = ProtocolStatusStaged
@@ -99,6 +161,21 @@ func buildProtocolPack(transport Transport, wireGuardPort, realityPort, vkRelayP
 	}
 
 	return entries
+}
+
+func protocolPackPortFromFallback(raw any, key string, fallback int) int {
+	entry, ok := raw.(map[string]any)
+	if !ok {
+		return fallback
+	}
+	switch value := entry[key].(type) {
+	case float64:
+		return int(value)
+	case int:
+		return value
+	default:
+		return fallback
+	}
 }
 
 func activeProtocolID(transport Transport) string {
@@ -128,13 +205,17 @@ func realityPortFromStagedFallbacks(stagedFallbacks map[string]any) int {
 }
 
 func renderProtocolPackManifest(host string, transport Transport, wireGuardPort, realityPort, vkRelayPort int) (string, error) {
+	return renderProtocolPackManifestWithFallbacks(host, transport, wireGuardPort, realityPort, vkRelayPort, nil)
+}
+
+func renderProtocolPackManifestWithFallbacks(host string, transport Transport, wireGuardPort, realityPort, vkRelayPort int, stagedFallbacks map[string]any) (string, error) {
 	manifest := protocolPackManifest{
 		Host:            host,
 		Transport:       string(transport),
 		ActiveProtocol:  activeProtocolID(transport),
 		GeneratedAt:     nowRFC3339(),
 		RecommendedPath: activeProtocolID(transport),
-		Entries:         buildProtocolPack(transport, wireGuardPort, realityPort, vkRelayPort),
+		Entries:         buildProtocolPackWithFallbacks(transport, wireGuardPort, realityPort, vkRelayPort, stagedFallbacks),
 	}
 	raw, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {

@@ -21,6 +21,10 @@ const (
 	realityFallbackMaxPort   = 52543
 	naiveFallbackPort        = 8443
 	hysteria2FallbackPort    = 9443
+	yandexEdgeDefaultPort    = 443
+
+	relayAutoselectDefaultURL         = "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Vless-Reality-White-Lists-Rus-Mobile.txt"
+	relayAutoselectDefaultSourceLabel = "igareck-mobile-hourly"
 )
 
 func realityServerName() string {
@@ -246,6 +250,19 @@ func buildStagedFallbacks(realityPort int, realityPublicKey, realityShortID, rea
 			"flow":        "xtls-rprx-vision",
 			"description": realityDescription,
 		},
+		"realityRelayOwnerEgress": map[string]any{
+			"status":          "ready",
+			"ownerEgressPort": realityFallbackMinPort,
+			"subscriptionUrl": relayAutoselectDefaultURL,
+			"sourceLabel":     relayAutoselectDefaultSourceLabel,
+			"description":     "Experimental relay-assisted REALITY mode. The client picks a curated external REALITY relay first, then moves egress back to your Odin One server.",
+		},
+		"realityRelayDirect": map[string]any{
+			"status":          "ready",
+			"subscriptionUrl": relayAutoselectDefaultURL,
+			"sourceLabel":     relayAutoselectDefaultSourceLabel,
+			"description":     "Experimental direct relay mode. The client picks a curated external REALITY relay from the hourly igareck feed and sends traffic through it without a second hop to your Odin One server.",
+		},
 		"naive": map[string]any{
 			"status":      "staged",
 			"port":        naiveFallbackPort,
@@ -257,4 +274,78 @@ func buildStagedFallbacks(realityPort int, realityPublicKey, realityShortID, rea
 			"description": "Reserved for future UDP fallback once client and server configs are promoted from staged mode.",
 		},
 	}
+}
+
+func ensureRealityRelayOwnerEgressFallback(stagedFallbacks map[string]any) {
+	if stagedFallbacks == nil {
+		return
+	}
+	if _, exists := stagedFallbacks["realityRelayOwnerEgress"]; exists {
+		return
+	}
+	stagedFallbacks["realityRelayOwnerEgress"] = map[string]any{
+		"status":          "ready",
+		"ownerEgressPort": realityFallbackMinPort,
+		"subscriptionUrl": relayAutoselectDefaultURL,
+		"sourceLabel":     relayAutoselectDefaultSourceLabel,
+		"description":     "Experimental relay-assisted REALITY mode. The client picks a curated external REALITY relay first, then moves egress back to your Odin One server.",
+	}
+}
+
+func ensureRealityRelayDirectFallback(stagedFallbacks map[string]any) {
+	if stagedFallbacks == nil {
+		return
+	}
+	if _, exists := stagedFallbacks["realityRelayDirect"]; exists {
+		return
+	}
+	stagedFallbacks["realityRelayDirect"] = map[string]any{
+		"status":          "ready",
+		"subscriptionUrl": relayAutoselectDefaultURL,
+		"sourceLabel":     relayAutoselectDefaultSourceLabel,
+		"description":     "Experimental direct relay mode. The client picks a curated external REALITY relay from the hourly igareck feed and sends traffic through it without a second hop to your Odin One server.",
+	}
+}
+
+func buildYandexEdgeFallback(connectHost string, connectPort int, originHost string, originPort int, serverName, publicKey, shortID, uuid, flow string) map[string]any {
+	if connectPort <= 0 {
+		connectPort = yandexEdgeDefaultPort
+	}
+	trimmedFlow := strings.TrimSpace(flow)
+	if trimmedFlow == "" {
+		trimmedFlow = "xtls-rprx-vision"
+	}
+	return map[string]any{
+		"status":      "ready",
+		"connectHost": strings.TrimSpace(connectHost),
+		"connectPort": connectPort,
+		"originHost":  strings.TrimSpace(originHost),
+		"originPort":  originPort,
+		"serverName":  strings.TrimSpace(serverName),
+		"publicKey":   strings.TrimSpace(publicKey),
+		"shortId":     strings.TrimSpace(shortID),
+		"uuid":        strings.TrimSpace(uuid),
+		"flow":        trimmedFlow,
+		"fingerprint": "chrome",
+		"source":      "operator-curated:yandex-edge",
+		"tag":         strings.ReplaceAll(strings.TrimSpace(connectHost), ".", "-"),
+		"description": fmt.Sprintf("Visible Yandex edge mode. The client reaches the stable REALITY origin through %s:%d while preserving the origin path on %s:%d.", strings.TrimSpace(connectHost), connectPort, strings.TrimSpace(originHost), originPort),
+	}
+}
+
+func upsertYandexEdgeFallback(stagedFallbacks map[string]any, connectHost string, connectPort int, originHost string, originPort int, serverName, publicKey, shortID, uuid, flow string) {
+	if stagedFallbacks == nil {
+		return
+	}
+	stagedFallbacks["realityYandexEdge"] = buildYandexEdgeFallback(
+		connectHost,
+		connectPort,
+		originHost,
+		originPort,
+		serverName,
+		publicKey,
+		shortID,
+		uuid,
+		flow,
+	)
 }

@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,6 +26,7 @@ const (
 type Deployment struct {
 	DeploymentID  string              `json:"deploymentId"`
 	ServerHost    string              `json:"serverHost"`
+	DeployFlow    string              `json:"deployFlow,omitempty"`
 	Transport     string              `json:"transport"`
 	Engine        string              `json:"engine,omitempty"`
 	Protocol      string              `json:"protocol,omitempty"`
@@ -33,6 +35,9 @@ type Deployment struct {
 	TurnPort      int                 `json:"turnPort,omitempty"`
 	WireGuardPort int                 `json:"wireGuardPort,omitempty"`
 	RealityPort   int                 `json:"realityPort,omitempty"`
+	EdgeEnabled   bool                `json:"edgeEnabled,omitempty"`
+	EdgeHost      string              `json:"edgeHost,omitempty"`
+	EdgePort      int                 `json:"edgePort,omitempty"`
 	HealthChecks  []Check             `json:"healthChecks,omitempty"`
 	ProtocolPack  []ProtocolPackEntry `json:"protocolPack,omitempty"`
 	Error         string              `json:"error,omitempty"`
@@ -50,6 +55,11 @@ var store = &deploymentStore{
 func StartDeployment(req Request) Deployment {
 	id := fmt.Sprintf("dep_%d", time.Now().UnixNano())
 	plan := BuildPlan(req)
+	flow := normalizedProvisionFlow(req.Flow)
+	protocolPackFallbacks := previewProtocolPackFallbacks("", 0)
+	if req.Edge != nil && req.Edge.Enabled {
+		protocolPackFallbacks = previewProtocolPackFallbacks(req.Edge.Server.Host, normalizedEdgePublicPort(req.Edge))
+	}
 
 	steps := make([]Step, len(plan.Steps))
 	copy(steps, plan.Steps)
@@ -60,12 +70,24 @@ func StartDeployment(req Request) Deployment {
 	deployment := Deployment{
 		DeploymentID: id,
 		ServerHost:   req.Server.Host,
+		DeployFlow:   string(flow),
 		Transport:    string(TransportXray),
 		Engine:       string(EngineSingBox),
 		Protocol:     string(ProtocolVLESSReality),
 		Status:       "running",
 		Steps:        steps,
-		ProtocolPack: buildProtocolPack(TransportXray, 0, req.Server.RealityPort, req.Server.VKTurnProxyPort),
+		ProtocolPack: buildProtocolPackWithFallbacks(
+			TransportXray,
+			0,
+			req.Server.RealityPort,
+			req.Server.VKTurnProxyPort,
+			protocolPackFallbacks,
+		),
+	}
+	if req.Edge != nil && req.Edge.Enabled {
+		deployment.EdgeEnabled = true
+		deployment.EdgeHost = req.Edge.Server.Host
+		deployment.EdgePort = normalizedEdgePublicPort(req.Edge)
 	}
 
 	store.mu.Lock()
@@ -86,7 +108,84 @@ func GetDeployment(id string) (Deployment, bool) {
 }
 
 func BuildPlan(req Request) Response {
-	steps := []Step{
+	flow := normalizedProvisionFlow(req.Flow)
+	steps := buildPlanSteps(flow)
+	warnings := buildPlanWarnings(req, flow)
+	protocolPackFallbacks := previewProtocolPackFallbacks("", 0)
+	if req.Edge != nil && req.Edge.Enabled {
+		protocolPackFallbacks = previewProtocolPackFallbacks(req.Edge.Server.Host, normalizedEdgePublicPort(req.Edge))
+	}
+
+	if flow == ProvisionFlowOrigin && (req.Server.VKTurnProxyPort > 0 || req.Server.RealityPort > 0) {
+		warnings = append(warnings, fmt.Sprintf(
+			"Manual public ports are requested: VK relay %s and REALITY %s. Deploy will fail if either port is already busy on the server.",
+			describeManualPort(req.Server.VKTurnProxyPort, "auto/udp"),
+			describeManualPort(req.Server.RealityPort, "auto/tcp"),
+		))
+	} else {
+		warnings = append(warnings, "Public VK relay and REALITY ports are auto-selected from currently free server ports unless you pin them manually.")
+	}
+	warnings = append(warnings, "Protocol pack staging is enabled: Odin One keeps the current active data path, while preparing Russia-friendly fallback protocols for later rollout without Apple Network Extension entitlements.")
+
+	return Response{
+		ServerHost:   req.Server.Host,
+		DeployFlow:   string(flow),
+		Transport:    string(TransportXray),
+		Steps:        steps,
+		Warnings:     warnings,
+		ProtocolPack: buildProtocolPackWithFallbacks(
+			TransportXray,
+			0,
+			req.Server.RealityPort,
+			req.Server.VKTurnProxyPort,
+			protocolPackFallbacks,
+		),
+	}
+}
+
+func buildPlanSteps(flow ProvisionFlow) []Step {
+	if flow == ProvisionFlowEdgeAttach {
+		return []Step{
+			{
+				ID:          "origin-ssh-check",
+				Label:       "Origin validation",
+				Status:      StatusQueued,
+				Description: "Load the live Odin One origin profile and confirm the current REALITY port and keys.",
+			},
+			{
+				ID:          "edge-ssh-check",
+				Label:       "Edge validation",
+				Status:      StatusQueued,
+				Description: "Validate the Yandex edge host and confirm that privileged setup can run there.",
+			},
+			{
+				ID:          "edge-runtime-prep",
+				Label:       "Edge preparation",
+				Status:      StatusQueued,
+				Description: "Install socat on the edge host and write the passthrough manifest.",
+			},
+			{
+				ID:          "edge-configure",
+				Label:       "Edge wiring",
+				Status:      StatusQueued,
+				Description: "Install the systemd forwarder that exposes the origin REALITY port through the Yandex edge.",
+			},
+			{
+				ID:          "edge-service-start",
+				Label:       "Edge startup",
+				Status:      StatusQueued,
+				Description: "Start the edge passthrough service and verify that it can reach the current origin REALITY port.",
+			},
+			{
+				ID:          "profile-refresh",
+				Label:       "Profile refresh",
+				Status:      StatusQueued,
+				Description: "Patch the owner profile and protocol pack so the extra Yandex edge mode can be exported in a single invite key.",
+			},
+		}
+	}
+
+	return []Step{
 		{
 			ID:          "ssh-check",
 			Label:       "SSH validation",
@@ -124,30 +223,26 @@ func BuildPlan(req Request) Response {
 			Description: "Verify that the server can resolve DNS and complete outbound HTTP and HTTPS probes.",
 		},
 	}
+}
 
+func buildPlanWarnings(req Request, flow ProvisionFlow) []string {
 	warnings := []string{
 		"Odin One uses its own ports and paths so the existing Amnezia stack can remain untouched.",
+		"Odin One keeps the stable direct REALITY path separate from additive access surfaces so stable mode can stay untouched while extra modes are attached later.",
+	}
+	if flow == ProvisionFlowEdgeAttach {
+		warnings = append(warnings,
+			"The Yandex edge step is additive: it only exposes the existing REALITY origin through a second host and does not rotate the origin keys by itself.",
+			"You should re-issue invite keys after the edge is attached so imported profiles receive the extra visible mode.",
+		)
+		return warnings
+	}
+
+	warnings = append(warnings,
 		"Odin One now keeps VLESS + REALITY and the VK relay live on the same server, so the desktop client can switch paths locally without redeploying the node.",
-	}
-
-	if req.Server.VKTurnProxyPort > 0 || req.Server.RealityPort > 0 {
-		warnings = append(warnings, fmt.Sprintf(
-			"Manual public ports are requested: VK relay %s and REALITY %s. Deploy will fail if either port is already busy on the server.",
-			describeManualPort(req.Server.VKTurnProxyPort, "auto/udp"),
-			describeManualPort(req.Server.RealityPort, "auto/tcp"),
-		))
-	} else {
-		warnings = append(warnings, "Public VK relay and REALITY ports are auto-selected from currently free server ports unless you pin them manually.")
-	}
-	warnings = append(warnings, "Protocol pack staging is enabled: Odin One keeps the current active data path, while preparing Russia-friendly fallback protocols for later rollout without Apple Network Extension entitlements.")
-
-	return Response{
-		ServerHost:   req.Server.Host,
-		Transport:    string(TransportXray),
-		Steps:        steps,
-		Warnings:     warnings,
-		ProtocolPack: buildProtocolPack(TransportXray, 0, req.Server.RealityPort, req.Server.VKTurnProxyPort),
-	}
+		"Protocol pack staging is enabled: Odin One keeps the current active data path, while preparing Russia-friendly fallback protocols for later rollout without Apple Network Extension entitlements.",
+	)
+	return warnings
 }
 
 func runDeployment(id string, req Request) {
@@ -164,6 +259,10 @@ func runDeployment(id string, req Request) {
 }
 
 func executeDeployment(id string, req Request) error {
+	if normalizedProvisionFlow(req.Flow) == ProvisionFlowEdgeAttach {
+		return executeEdgeAttach(id, req)
+	}
+
 	client, err := connectSSH(req)
 	if err != nil {
 		return err
@@ -343,6 +442,182 @@ func executeDeployment(id string, req Request) error {
 	completeStep(id, 5)
 
 	return nil
+}
+
+func executeEdgeAttach(id string, req Request) error {
+	if err := validateEdgeAttachRequest(req); err != nil {
+		return err
+	}
+
+	originClient, err := connectSSH(req)
+	if err != nil {
+		return err
+	}
+	defer originClient.Close()
+
+	if _, err := runRemote(originClient, "whoami && uname -a"); err != nil {
+		return err
+	}
+	completeStep(id, 0)
+
+	owner, ownerText, xrayState, err := loadRemoteAccessState(originClient)
+	if err != nil {
+		return err
+	}
+	reality, err := readInviteRealityFallback(owner)
+	if err != nil {
+		return fmt.Errorf("origin owner profile has no usable VLESS + REALITY fallback: %w", err)
+	}
+	setDeploymentPorts(id, owner.VKTurnProxyPort, xrayState.WireGuardPort, reality.Port)
+
+	edgeClient, err := connectSSH(edgeRequest(req))
+	if err != nil {
+		return err
+	}
+	defer edgeClient.Close()
+
+	if _, err := runRemote(edgeClient, "whoami && uname -a"); err != nil {
+		return err
+	}
+	completeStep(id, 1)
+
+	publicPort := normalizedEdgePublicPort(req.Edge)
+	if err := ensureRemoteSocatInstalled(edgeClient); err != nil {
+		return err
+	}
+	manifestText, err := renderYandexEdgeManifest(
+		req.Edge.Server.Host,
+		publicPort,
+		req.Server.Host,
+		reality.Port,
+		reality.ServerName,
+		reality.PublicKey,
+		reality.ShortID,
+		reality.UUID,
+		reality.Flow,
+	)
+	if err != nil {
+		return err
+	}
+	if err := uploadFileWithSudo(edgeClient, whitelistEdgeManifestPath, []byte(manifestText), "0644"); err != nil {
+		return err
+	}
+	completeStep(id, 2)
+
+	unitText := renderYandexEdgeSystemdUnit(req.Server.Host, reality.Port, publicPort)
+	if err := uploadFileWithSudo(edgeClient, whitelistEdgeServicePath, []byte(unitText), "0644"); err != nil {
+		return err
+	}
+	completeStep(id, 3)
+
+	if _, err := runRemote(edgeClient, remoteRootShell("systemctl daemon-reload && systemctl enable whitelist-yandex-edge.service && systemctl restart whitelist-yandex-edge.service && sleep 2")); err != nil {
+		return err
+	}
+	healthCommand := remoteRootShell(fmt.Sprintf(
+		"systemctl is-active whitelist-yandex-edge.service && ss -H -ltn | awk '{print $4}' | grep -Eq '(^|\\]|:)%d$' && timeout 8 bash -lc 'cat </dev/null >/dev/tcp/%s/%d'",
+		publicPort,
+		req.Server.Host,
+		reality.Port,
+	))
+	if _, err := runRemote(edgeClient, healthCommand); err != nil {
+		return err
+	}
+	completeStep(id, 4)
+
+	patchedOwnerProfile, protocolPack, err := patchOwnerProfileWithYandexEdge(ownerText, req.Edge.Server.Host, publicPort, req.Server.Host, reality)
+	if err != nil {
+		return err
+	}
+	if err := uploadFile(originClient, whitelistInvitePath, []byte(patchedOwnerProfile), "0600"); err != nil {
+		return err
+	}
+	if err := saveLocalOwnerProfile(req.Server.Host, []byte(patchedOwnerProfile)); err != nil {
+		return err
+	}
+	fallbackManifest, err := renderStagedFallbackManifest(req.Server.Host, reality.Port)
+	if err != nil {
+		return err
+	}
+	if err := uploadFile(originClient, whitelistFallbacksPath, []byte(fallbackManifest), "0644"); err != nil {
+		return err
+	}
+	protocolPackManifest, err := renderProtocolPackManifestWithFallbacks(
+		req.Server.Host,
+		Transport(owner.Transport),
+		xrayState.WireGuardPort,
+		reality.Port,
+		owner.VKTurnProxyPort,
+		protocolPackFallbacks(protocolPack),
+	)
+	if err != nil {
+		return err
+	}
+	if err := uploadFile(originClient, whitelistProtocolPackPath, []byte(protocolPackManifest), "0644"); err != nil {
+		return err
+	}
+	setDeploymentProtocolPack(id, protocolPack)
+	store.mu.Lock()
+	deployment := store.items[id]
+	deployment.EdgeEnabled = true
+	deployment.EdgeHost = req.Edge.Server.Host
+	deployment.EdgePort = publicPort
+	store.items[id] = deployment
+	store.mu.Unlock()
+	completeStep(id, 5)
+
+	return nil
+}
+
+func patchOwnerProfileWithYandexEdge(rawJSON string, edgeHost string, publicPort int, originHost string, reality realityFallback) (string, []ProtocolPackEntry, error) {
+	var profile ownerProfile
+	if err := json.Unmarshal([]byte(rawJSON), &profile); err != nil {
+		return "", nil, fmt.Errorf("parse owner profile: %w", err)
+	}
+	if profile.StagedFallbacks == nil {
+		profile.StagedFallbacks = map[string]any{}
+	}
+	ensureRealityRelayDirectFallback(profile.StagedFallbacks)
+	ensureRealityRelayOwnerEgressFallback(profile.StagedFallbacks)
+	upsertYandexEdgeFallback(
+		profile.StagedFallbacks,
+		edgeHost,
+		publicPort,
+		originHost,
+		reality.Port,
+		reality.ServerName,
+		reality.PublicKey,
+		reality.ShortID,
+		reality.UUID,
+		reality.Flow,
+	)
+	protocolPack := buildProtocolPackWithFallbacks(
+		Transport(profile.Transport),
+		effectiveOwnerEndpointPort(profile),
+		reality.Port,
+		profile.VKTurnProxyPort,
+		profile.StagedFallbacks,
+	)
+	profile.ProtocolPack = protocolPack
+	normalized, err := json.MarshalIndent(profile, "", "  ")
+	if err != nil {
+		return "", nil, fmt.Errorf("marshal owner profile: %w", err)
+	}
+	return string(normalized), protocolPack, nil
+}
+
+func protocolPackFallbacks(protocolPack []ProtocolPackEntry) map[string]any {
+	fallbacks := map[string]any{}
+	for _, entry := range protocolPack {
+		switch entry.ID {
+		case "vless-reality-yandex-edge":
+			fallbacks["realityYandexEdge"] = map[string]any{"connectPort": entry.Port}
+		case "vless-reality-relay-owner":
+			fallbacks["realityRelayOwnerEgress"] = map[string]any{}
+		case "vless-reality-relay-direct":
+			fallbacks["realityRelayDirect"] = map[string]any{}
+		}
+	}
+	return fallbacks
 }
 
 func saveLocalOwnerProfile(host string, data []byte) error {

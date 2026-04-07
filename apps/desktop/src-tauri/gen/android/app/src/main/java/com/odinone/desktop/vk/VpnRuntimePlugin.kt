@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.VpnService
 import android.util.Log
 import androidx.activity.result.ActivityResult
+import androidx.core.content.FileProvider
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -12,6 +13,7 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import java.io.File
 import kotlin.concurrent.thread
 
 @InvokeArg
@@ -29,6 +31,13 @@ class StartTunnelArgs {
 @InvokeArg
 class ConnectivityTestArgs {
     var url: String = "https://example.com"
+}
+
+@InvokeArg
+class ShareInviteFileArgs {
+    var fileName: String = "odin-one-access.odinone-access.json"
+    var contents: String = ""
+    var mimeType: String = "application/json"
 }
 
 @TauriPlugin
@@ -187,6 +196,57 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
                     )
                 invoke.resolve(failed.toJsObject())
             }
+        }
+    }
+
+    @Command
+    fun shareInviteFile(invoke: Invoke) {
+        val args = invoke.parseArgs(ShareInviteFileArgs::class.java)
+        if (args.contents.isBlank()) {
+            invoke.reject("Invite file contents are required.")
+            return
+        }
+
+        runCatching {
+            val exportsDir = File(activity.cacheDir, "invite-share").apply {
+                mkdirs()
+            }
+            val sanitizedName =
+                args.fileName
+                    .ifBlank { "odin-one-access.odinone-access.json" }
+                    .replace(Regex("[^A-Za-z0-9._-]"), "_")
+            val inviteFile = File(exportsDir, sanitizedName)
+            inviteFile.writeText(args.contents, Charsets.UTF_8)
+
+            val uri =
+                FileProvider.getUriForFile(
+                    activity,
+                    "${activity.packageName}.fileprovider",
+                    inviteFile,
+                )
+
+            val shareIntent =
+                Intent(Intent.ACTION_SEND).apply {
+                    type = args.mimeType.ifBlank { "application/json" }
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    putExtra(Intent.EXTRA_SUBJECT, sanitizedName)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            val chooser = Intent.createChooser(shareIntent, sanitizedName).apply {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            activity.startActivity(chooser)
+
+            JSObject().apply {
+                put("ok", true)
+                put("fileName", sanitizedName)
+                put("cachePath", inviteFile.absolutePath)
+                put("contentUri", uri.toString())
+            }
+        }.onSuccess { payload ->
+            invoke.resolve(payload)
+        }.onFailure { error ->
+            invoke.reject(error.message ?: "Failed to open Android share sheet.")
         }
     }
 

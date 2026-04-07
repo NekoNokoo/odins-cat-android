@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap},
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
     fs,
     hash::{Hash, Hasher},
+    net::Ipv4Addr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -25,9 +26,10 @@ use x25519_dalek::StaticSecret;
 
 const SHARE_CODE_PREFIX: &str = "odin1:";
 const DEFAULT_REALITY_FLOW: &str = "xtls-rprx-vision";
-const REALITY_FALLBACK_PORT: u16 = 443;
+const REALITY_DEPLOY_DEFAULT_PORT: u16 = 52443;
 const REALITY_FALLBACK_MIN_PORT: u16 = 52443;
 const REALITY_FALLBACK_MAX_PORT: u16 = 52543;
+const REALITY_RELAY_DIRECT_PORT: u16 = 443;
 const NAIVE_FALLBACK_PORT: u16 = 8443;
 const HYSTERIA2_FALLBACK_PORT: u16 = 9443;
 const WHITELIST_TURN_PORT_START: u16 = 56080;
@@ -39,6 +41,7 @@ const WHITELIST_BIN_DIR: &str = "/opt/whitelist/bin";
 const WHITELIST_CONFIG_DIR: &str = "/opt/whitelist/config";
 const WHITELIST_PROFILES_DIR: &str = "/opt/whitelist/profiles";
 const WHITELIST_GUEST_PROFILES_DIR: &str = "/opt/whitelist/profiles/guests";
+const WHITELIST_EDGE_MANIFEST_PATH: &str = "/opt/whitelist-edge/config/edge-forward.json";
 const WHITELIST_XRAY_CONFIG_PATH: &str = "/opt/whitelist/config/xray-server.json";
 const WHITELIST_REALITY_CONFIG_PATH: &str = "/opt/whitelist/config/xray-reality-server.json";
 const WHITELIST_FALLBACKS_PATH: &str = "/opt/whitelist/config/fallbacks-staged.json";
@@ -49,15 +52,24 @@ const WHITELIST_SING_BOX_BINARY_PATH: &str = "/opt/whitelist/bin/sing-box";
 const WHITELIST_PROXY_BINARY_PATH: &str = "/opt/whitelist/bin/vk-turn-proxy-server";
 const WHITELIST_XRAY_SERVICE_PATH: &str = "/etc/systemd/system/whitelist-xray.service";
 const WHITELIST_PROXY_SERVICE_PATH: &str = "/etc/systemd/system/whitelist-vk-turn-proxy.service";
+const WHITELIST_YANDEX_EDGE_SERVICE_PATH: &str =
+    "/etc/systemd/system/whitelist-yandex-edge.service";
 const DEFAULT_PROBE_HTTP_URL: &str = "http://example.com";
 const DEFAULT_PROBE_HTTPS_URL: &str = "https://example.com";
 const DEFAULT_REALITY_SERVER_NAME: &str = "www.cloudflare.com";
 const DEFAULT_REALITY_DEST: &str = "www.cloudflare.com:443";
+const MOBILE_SSH_INACTIVITY_TIMEOUT_SECS: u64 = 120;
+const MOBILE_SSH_KEEPALIVE_INTERVAL_SECS: u64 = 10;
+const MOBILE_SSH_KEEPALIVE_MAX: usize = 12;
+const PROVISION_FLOW_ORIGIN: &str = "origin";
+const PROVISION_FLOW_EDGE_ATTACH: &str = "edge-attach";
+const EDGE_PROVIDER_YANDEX: &str = "yandex-edge";
 const OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_SCAFFOLD: &str = "reality-whitelist-scaffold";
 const OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_LAB: &str = "reality-whitelist-lab";
 const OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD: &str = "reality-vps-scaffold";
 const OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB: &str = "reality-vps-lab";
 const OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB: &str = "reality-vps-relay-lab";
+const OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE: &str = "reality-yandex-edge";
 const OWNER_RUNTIME_LAB_VPS_TRANSPORT_TCP: &str = "tcp";
 const OWNER_RUNTIME_LAB_VPS_TRANSPORT_GRPC: &str = "grpc";
 const OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL: &str =
@@ -68,6 +80,34 @@ const OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_THRESHOLD_MS: u64 = 300;
 const OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_TIMEOUT_MS: u64 = 1200;
 const OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_CANDIDATE_LIMIT: u64 = 8;
 const OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_MAX_PER_SNI: u64 = 2;
+const YANDEX_EDGE_CONNECT_HOST: &str = "62.84.123.148";
+const YANDEX_EDGE_CONNECT_PORT: u16 = 443;
+const YANDEX_EDGE_ORIGIN_HOST: &str = "95.81.120.226";
+const YANDEX_EDGE_ORIGIN_PORT: u16 = 52444;
+const YANDEX_EDGE_SERVER_NAME: &str = "www.cloudflare.com";
+const YANDEX_EDGE_FLOW: &str = "xtls-rprx-vision";
+const YANDEX_EDGE_FINGERPRINT: &str = "chrome";
+const YANDEX_EDGE_UUID: &str = "242fde4a-8b68-4e37-ada7-f37fb4f3d1d4";
+const YANDEX_EDGE_PUBLIC_KEY: &str = "akv5dcxO4Gt9Spl_Tx612SnWC9958B4ihXhLRcavwAc";
+const YANDEX_EDGE_SHORT_ID: &str = "5e26013865785390";
+const YANDEX_EDGE_SOURCE: &str = "operator-curated:yandex-edge";
+const YANDEX_EDGE_TAG: &str = "yandex-edge-62-84-123-148";
+const WHITELIST_SOURCE_REPO_URL: &str =
+    "https://github.com/hxehex/russia-mobile-internet-whitelist";
+const WHITELIST_IP_LIST_URL: &str =
+    "https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/ipwhitelist.txt";
+const WHITELIST_CIDR_LIST_URL: &str =
+    "https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/cidrwhitelist.txt";
+const BUNDLED_WHITELIST_IP_LIST: &str =
+    include_str!("../resources/whitelist/ipwhitelist.txt");
+const BUNDLED_WHITELIST_CIDR_LIST: &str =
+    include_str!("../resources/whitelist/cidrwhitelist.txt");
+const WHITELIST_CACHE_DIR_NAME: &str = "whitelist-cache";
+const WHITELIST_CACHE_IP_FILE_NAME: &str = "ipwhitelist.txt";
+const WHITELIST_CACHE_CIDR_FILE_NAME: &str = "cidrwhitelist.txt";
+const WHITELIST_CACHE_META_FILE_NAME: &str = "metadata.json";
+const WHITELIST_CACHE_MAX_AGE_SECS: u64 = 1800;
+const INVITE_EXPORT_EXTENSION: &str = ".odinone-access.json";
 const XRAY_RELEASE_URL: &str =
     "https://github.com/XTLS/Xray-core/releases/download/v25.8.3/Xray-linux-64.zip";
 const SING_BOX_LINUX_RELEASE_URL: &str = "https://github.com/SagerNet/sing-box/releases/download/v1.12.22/sing-box-1.12.22-linux-amd64.tar.gz";
@@ -231,11 +271,43 @@ struct ServerDraftPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+struct EdgeServerPayload {
+    #[serde(default)]
+    host: String,
+    #[serde(default)]
+    port: u16,
+    #[serde(default)]
+    username: String,
+    #[serde(default)]
+    auth_method: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct EdgeAttachPayload {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    server: EdgeServerPayload,
+    #[serde(default)]
+    secret: String,
+    #[serde(default)]
+    public_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ProvisionPayload {
     #[serde(default)]
     server: ServerDraftPayload,
     #[serde(default)]
     secret: String,
+    #[serde(default)]
+    flow: String,
+    #[serde(default)]
+    edge: Option<EdgeAttachPayload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -293,6 +365,10 @@ pub(crate) struct OwnerRuntimeLabPayload {
     #[serde(default)]
     vps_port: u16,
     #[serde(default)]
+    vps_connect_host: String,
+    #[serde(default)]
+    vps_connect_port: u16,
+    #[serde(default)]
     vps_transport: String,
     #[serde(default)]
     vps_flow: String,
@@ -342,6 +418,8 @@ struct PlanEntry {
 struct DeploymentStateEntry {
     deployment_id: String,
     server_host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deploy_flow: Option<String>,
     transport: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     engine: Option<String>,
@@ -355,6 +433,12 @@ struct DeploymentStateEntry {
     wire_guard_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reality_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edge_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edge_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edge_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     health_checks: Vec<CheckEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -394,6 +478,26 @@ pub(crate) struct MobileDeploymentStore {
     items: Arc<Mutex<HashMap<String, DeploymentStateEntry>>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WhitelistCacheMetadata {
+    fetched_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedIpv4Cidr {
+    raw: String,
+    network: u32,
+    prefix: u8,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedWhitelistFiles {
+    exact_ips: HashSet<Ipv4Addr>,
+    cidrs: Vec<ParsedIpv4Cidr>,
+    fetched_at: String,
+}
+
 struct MobileSshClient;
 
 struct MobileSshSession {
@@ -416,7 +520,14 @@ impl MobileSshSession {
     async fn connect(server: &ServerDraftPayload, secret: &str) -> Result<Self, String> {
         let address = format!("{}:{}", server.host.trim(), normalized_port(server.port));
         let config = Arc::new(client::Config {
-            inactivity_timeout: Some(Duration::from_secs(8)),
+            // Android deploy runs long remote commands (binary downloads, systemd restarts,
+            // egress probes). A tiny inactivity timeout can sever the SSH transport mid-rollout
+            // and the next channel_open_session then surfaces as "new session: Disconnected".
+            inactivity_timeout: Some(Duration::from_secs(MOBILE_SSH_INACTIVITY_TIMEOUT_SECS)),
+            keepalive_interval: Some(Duration::from_secs(
+                MOBILE_SSH_KEEPALIVE_INTERVAL_SECS,
+            )),
+            keepalive_max: MOBILE_SSH_KEEPALIVE_MAX,
             ..<_>::default()
         });
         let mut handle = client::connect(config, address.clone(), MobileSshClient)
@@ -538,6 +649,37 @@ impl MobileSshSession {
     }
 }
 
+fn remote_root_shell(cmd: &str) -> String {
+    let quoted = quote_shell(cmd);
+    format!(
+        "if [ \"$(id -u)\" = \"0\" ]; then sh -lc {quoted}; else sudo sh -lc {quoted}; fi"
+    )
+}
+
+async fn upload_with_sudo(
+    ssh: &mut MobileSshSession,
+    remote_path: &str,
+    data: &[u8],
+    mode: &str,
+) -> Result<(), String> {
+    let encoded = STANDARD.encode(data);
+    let command = remote_root_shell(&format!(
+        "mkdir -p {dir} && printf %s {data} | base64 -d > {target} && chmod {mode} {target}",
+        dir = quote_shell(dir_of(remote_path)),
+        data = quote_shell(&encoded),
+        target = quote_shell(remote_path),
+        mode = mode,
+    ));
+    ssh.run(&command).await.map(|_| ())
+}
+
+async fn ensure_remote_socat_installed(ssh: &mut MobileSshSession) -> Result<(), String> {
+    let command = remote_root_shell(
+        "if command -v socat >/dev/null 2>&1; then exit 0; fi; if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y socat; else echo 'socat is required and apt-get was not found' >&2; exit 1; fi",
+    );
+    ssh.run(&command).await.map(|_| ())
+}
+
 impl MobileDeploymentStore {
     fn insert(&self, deployment: DeploymentStateEntry) {
         if let Ok(mut items) = self.items.lock() {
@@ -573,12 +715,73 @@ pub fn mobile_core_health() -> Value {
 }
 
 #[tauri::command]
+pub async fn mobile_check_whitelist_ip(app: AppHandle, ip: String) -> Result<Value, String> {
+    let checked_at = now_rfc3339();
+    let trimmed_ip = ip.trim();
+    let response_meta = json!({
+        "sourceRepo": WHITELIST_SOURCE_REPO_URL,
+        "ipListUrl": WHITELIST_IP_LIST_URL,
+        "cidrListUrl": WHITELIST_CIDR_LIST_URL,
+    });
+
+    let parsed_ip = match trimmed_ip.parse::<Ipv4Addr>() {
+        Ok(address) => address,
+        Err(_) => {
+            let mut response = json!({
+                "ip": trimmed_ip,
+                "valid": false,
+                "matchedIp": false,
+                "matchedCidr": false,
+                "matchedCidrs": Vec::<String>::new(),
+                "checkedAt": checked_at,
+                "cached": false,
+                "error": "enter a valid IPv4 address"
+            });
+            merge_json_object(&mut response, &response_meta);
+            return Ok(response);
+        }
+    };
+
+    let (source, cached, note) = load_whitelist_lookup_source(&app).await?;
+    let matched_ip = source.exact_ips.contains(&parsed_ip);
+    let mut matched_cidrs = source
+        .cidrs
+        .iter()
+        .filter(|cidr| ipv4_in_cidr(parsed_ip, cidr))
+        .map(|cidr| (cidr.prefix, cidr.raw.clone()))
+        .collect::<Vec<_>>();
+    matched_cidrs.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    let matched_cidrs = matched_cidrs
+        .into_iter()
+        .map(|(_, cidr)| cidr)
+        .collect::<Vec<_>>();
+
+    let mut response = json!({
+        "ip": trimmed_ip,
+        "valid": true,
+        "matchedIp": matched_ip,
+        "matchedCidr": !matched_cidrs.is_empty(),
+        "matchedCidrs": matched_cidrs,
+        "checkedAt": checked_at,
+        "listsFetchedAt": source.fetched_at,
+        "cached": cached
+    });
+    if let Some(message) = note {
+        response["note"] = json!(message);
+    }
+    merge_json_object(&mut response, &response_meta);
+    Ok(response)
+}
+
+#[tauri::command]
 pub async fn mobile_validate_provision(payload: ProvisionPayload) -> Result<Value, String> {
-    let protocol_pack = build_protocol_pack(&payload.server);
-    let warnings = vec![
+    let flow = normalized_provision_flow(&payload.flow);
+    let protocol_pack = build_protocol_pack(&payload);
+    let mut warnings = build_plan_warnings(&payload.server, flow);
+    warnings.insert(
+        0,
         "MVP validation currently uses insecure host key acceptance and should be hardened before production use.".to_string(),
-        "Odin One keeps VLESS + REALITY and the VK relay ready on the same server so the client can switch paths locally without redeploy.".to_string(),
-    ];
+    );
 
     if payload.server.host.trim().is_empty()
         || payload.server.username.trim().is_empty()
@@ -596,10 +799,31 @@ pub async fn mobile_validate_provision(payload: ProvisionPayload) -> Result<Valu
         }));
     }
 
+    if flow == PROVISION_FLOW_EDGE_ATTACH {
+        if let Err(error) = validate_edge_attach_payload(&payload) {
+            return Ok(json!({
+                "ok": false,
+                "host": payload.server.host,
+                "deployFlow": flow,
+                "user": payload.server.username,
+                "authMethod": payload.server.auth_method,
+                "edgeEnabled": payload.edge.as_ref().is_some_and(|edge| edge.enabled),
+                "edgeHost": payload.edge.as_ref().map(|edge| edge.server.host.trim()).unwrap_or_default(),
+                "edgePort": payload.edge.as_ref().map(|edge| normalized_edge_public_port(Some(edge))).unwrap_or_default(),
+                "checks": [],
+                "warnings": warnings,
+                "protocolPack": protocol_pack,
+                "error": error
+            }));
+        }
+        return mobile_validate_edge_attach(payload, warnings, protocol_pack).await;
+    }
+
     if let Err(error) = validate_deployment_port_hints(&payload.server) {
         return Ok(json!({
             "ok": false,
             "host": payload.server.host,
+            "deployFlow": flow,
             "user": payload.server.username,
             "authMethod": payload.server.auth_method,
             "checks": [],
@@ -615,6 +839,7 @@ pub async fn mobile_validate_provision(payload: ProvisionPayload) -> Result<Valu
             return Ok(json!({
                 "ok": false,
                 "host": payload.server.host,
+                "deployFlow": flow,
                 "user": payload.server.username,
                 "authMethod": payload.server.auth_method,
                 "checks": [],
@@ -680,6 +905,7 @@ pub async fn mobile_validate_provision(payload: ProvisionPayload) -> Result<Valu
     let mut response = json!({
         "ok": all_ok && egress_ok,
         "host": payload.server.host,
+        "deployFlow": flow,
         "user": payload.server.username,
         "authMethod": payload.server.auth_method,
         "checks": checks,
@@ -695,14 +921,172 @@ pub async fn mobile_validate_provision(payload: ProvisionPayload) -> Result<Valu
     Ok(response)
 }
 
+async fn mobile_validate_edge_attach(
+    payload: ProvisionPayload,
+    warnings: Vec<String>,
+    protocol_pack: Vec<ProtocolPackEntry>,
+) -> Result<Value, String> {
+    let flow = normalized_provision_flow(&payload.flow);
+    let edge = payload
+        .edge
+        .as_ref()
+        .ok_or_else(|| "edge configuration is required".to_string())?;
+    let edge_server = edge_server_payload(edge);
+
+    let mut checks = Vec::new();
+    let mut all_ok = true;
+
+    let mut origin = match MobileSshSession::connect(&payload.server, &payload.secret).await {
+        Ok(ssh) => ssh,
+        Err(error) => {
+            return Ok(json!({
+                "ok": false,
+                "host": payload.server.host,
+                "deployFlow": flow,
+                "user": payload.server.username,
+                "authMethod": payload.server.auth_method,
+                "edgeEnabled": true,
+                "edgeHost": edge.server.host,
+                "edgePort": normalized_edge_public_port(Some(edge)),
+                "checks": checks,
+                "warnings": warnings,
+                "protocolPack": protocol_pack,
+                "error": error
+            }));
+        }
+    };
+    checks.push(CheckEntry {
+        key: "origin-tcp-connect".to_string(),
+        label: "Origin TCP connectivity".to_string(),
+        ok: true,
+        detail: format!(
+            "Connected to {}:{}",
+            payload.server.host.trim(),
+            normalized_port(payload.server.port)
+        ),
+    });
+    match load_remote_access_state(&mut origin).await {
+        Ok(_) => checks.push(CheckEntry {
+            key: "origin-owner-profile".to_string(),
+            label: "Origin owner profile".to_string(),
+            ok: true,
+            detail: "Loaded the live owner profile and REALITY state from the origin host."
+                .to_string(),
+        }),
+        Err(error) => {
+            checks.push(CheckEntry {
+                key: "origin-owner-profile".to_string(),
+                label: "Origin owner profile".to_string(),
+                ok: false,
+                detail: error.clone(),
+            });
+            all_ok = false;
+        }
+    }
+    let _ = origin.close().await;
+
+    let mut edge_ssh = match MobileSshSession::connect(&edge_server, &edge.secret).await {
+        Ok(ssh) => ssh,
+        Err(error) => {
+            return Ok(json!({
+                "ok": false,
+                "host": payload.server.host,
+                "deployFlow": flow,
+                "user": payload.server.username,
+                "authMethod": payload.server.auth_method,
+                "edgeEnabled": true,
+                "edgeHost": edge.server.host,
+                "edgePort": normalized_edge_public_port(Some(edge)),
+                "checks": checks,
+                "warnings": warnings,
+                "protocolPack": protocol_pack,
+                "error": error
+            }));
+        }
+    };
+    checks.push(CheckEntry {
+        key: "edge-tcp-connect".to_string(),
+        label: "Edge TCP connectivity".to_string(),
+        ok: true,
+        detail: format!(
+            "Connected to {}:{}",
+            edge.server.host.trim(),
+            normalized_port(edge.server.port)
+        ),
+    });
+
+    for (key, label, command) in [
+        ("edge-remote-user", "Edge remote user", "whoami"),
+        ("edge-os-release", "Edge operating system", "uname -a"),
+        (
+            "edge-sudo-ready",
+            "Edge sudo readiness",
+            "if [ \"$(id -u)\" = \"0\" ]; then echo root; else sudo -n true && echo sudo-ready; fi",
+        ),
+    ] {
+        let outcome = edge_ssh.run(command).await;
+        let ok = outcome.is_ok();
+        let detail = outcome.unwrap_or_else(|error| error);
+        checks.push(CheckEntry {
+            key: key.to_string(),
+            label: label.to_string(),
+            ok,
+            detail: if detail.trim().is_empty() {
+                "No output".to_string()
+            } else {
+                detail
+            },
+        });
+        all_ok &= ok;
+    }
+
+    let port = normalized_edge_public_port(Some(edge));
+    let port_check_command = format!(
+        "sh -lc {}",
+        quote_shell(&format!(
+            "if command -v ss >/dev/null 2>&1 && ss -ltnH | awk '{{print $4}}' | grep -Eq '(^|:){port}$'; then echo 'port {port} already listens'; exit 1; else echo 'port {port} is free'; fi"
+        ))
+    );
+    let port_check = edge_ssh.run(&port_check_command).await;
+    let port_check_ok = port_check.is_ok();
+    checks.push(CheckEntry {
+        key: "edge-public-port".to_string(),
+        label: "Edge public port".to_string(),
+        ok: port_check_ok,
+        detail: port_check.unwrap_or_else(|error| error),
+    });
+    all_ok &= port_check_ok;
+    let _ = edge_ssh.close().await;
+
+    let mut response = json!({
+        "ok": all_ok,
+        "host": payload.server.host,
+        "deployFlow": flow,
+        "user": payload.server.username,
+        "authMethod": payload.server.auth_method,
+        "edgeEnabled": true,
+        "edgeHost": edge.server.host,
+        "edgePort": port,
+        "checks": checks,
+        "warnings": warnings,
+        "protocolPack": protocol_pack,
+    });
+    if !all_ok {
+        response["error"] = json!("one or more validation checks failed");
+    }
+    Ok(response)
+}
+
 #[tauri::command]
 pub fn mobile_build_provision_plan(payload: ProvisionPayload) -> Value {
+    let flow = normalized_provision_flow(&payload.flow);
     json!({
         "serverHost": payload.server.host,
+        "deployFlow": flow,
         "transport": "xray",
-        "steps": build_plan_steps(),
-        "warnings": build_plan_warnings(&payload.server),
-        "protocolPack": build_protocol_pack(&payload.server)
+        "steps": build_plan_steps(flow),
+        "warnings": build_plan_warnings(&payload.server, flow),
+        "protocolPack": build_protocol_pack(&payload)
     })
 }
 
@@ -713,7 +1097,19 @@ pub fn mobile_start_deployment(
     payload: ProvisionPayload,
 ) -> Value {
     let deployment_id = format!("dep_{}", deployment_timestamp_nanos());
-    let mut steps = build_plan_steps();
+    let flow = normalized_provision_flow(&payload.flow);
+    let edge_enabled = payload.edge.as_ref().is_some_and(|edge| edge.enabled);
+    let edge_host = payload
+        .edge
+        .as_ref()
+        .map(|edge| edge.server.host.trim().to_string())
+        .filter(|host| !host.is_empty());
+    let edge_port = payload
+        .edge
+        .as_ref()
+        .filter(|edge| edge.enabled)
+        .map(|edge| normalized_edge_public_port(Some(edge)));
+    let mut steps = build_plan_steps(flow);
     if let Some(first) = steps.first_mut() {
         first.status = "current".to_string();
     }
@@ -721,6 +1117,7 @@ pub fn mobile_start_deployment(
     let initial = DeploymentStateEntry {
         deployment_id: deployment_id.clone(),
         server_host: payload.server.host.trim().to_string(),
+        deploy_flow: Some(flow.to_string()),
         transport: "xray".to_string(),
         engine: Some("sing-box".to_string()),
         protocol: Some("vless-reality".to_string()),
@@ -729,13 +1126,11 @@ pub fn mobile_start_deployment(
         turn_port: None,
         wire_guard_port: None,
         reality_port: None,
+        edge_enabled: edge_enabled.then_some(true),
+        edge_host,
+        edge_port,
         health_checks: Vec::new(),
-        protocol_pack: build_protocol_pack_for_transport(
-            "xray",
-            None,
-            payload.server.reality_port,
-            payload.server.vk_turn_proxy_port,
-        ),
+        protocol_pack: build_protocol_pack(&payload),
         error: None,
     };
     store.insert(initial.clone());
@@ -852,7 +1247,7 @@ pub fn mobile_get_owner_profile(app: AppHandle, host: String) -> Result<Value, S
         serde_json::from_str(&data).map_err(|err| format!("parse owner profile: {err}"))?;
     ensure_reality_relay_direct_fallback(&mut profile.staged_fallbacks);
     ensure_reality_relay_owner_egress_fallback(&mut profile.staged_fallbacks);
-    profile.protocol_pack = build_protocol_pack_for_transport(
+    profile.protocol_pack = build_protocol_pack_for_transport_with_fallbacks(
         &profile.transport,
         nonzero_u16(profile.endpoint_port),
         profile
@@ -862,6 +1257,7 @@ pub fn mobile_get_owner_profile(app: AppHandle, host: String) -> Result<Value, S
             .and_then(Value::as_u64)
             .and_then(|value| u16::try_from(value).ok()),
         nonzero_u16(profile.vk_turn_proxy_port),
+        Some(&profile.staged_fallbacks),
     );
     let normalized_raw_json = serde_json::to_string_pretty(&profile)
         .map_err(|err| format!("marshal owner profile response: {err}"))?;
@@ -913,6 +1309,50 @@ pub fn mobile_import_profile(app: AppHandle, share_code: String) -> Result<Value
         .map_err(|err| format!("save imported profile: {err}"))?;
 
     build_invite_response(&invite, Some(&local_path), Some(raw_json))
+}
+
+#[tauri::command]
+pub fn mobile_export_invite_file(app: AppHandle, contents: String) -> Result<Value, String> {
+    let invite = decode_invite(&contents)?;
+    let raw_json = serde_json::to_string_pretty(&invite)
+        .map_err(|err| format!("normalize invite file payload: {err}"))?;
+    let file_name = invite_export_file_name(&invite);
+    let export_dir = invite_export_dir(&app)?;
+    let export_path = export_dir.join(&file_name);
+    fs::write(&export_path, raw_json.as_bytes())
+        .map_err(|err| format!("write invite export file: {err}"))?;
+
+    Ok(json!({
+        "fileName": file_name,
+        "exportPath": export_path.to_string_lossy().to_string(),
+        "rawJson": raw_json,
+        "shareCode": format!("{SHARE_CODE_PREFIX}{}", URL_SAFE_NO_PAD.encode(raw_json.as_bytes())),
+    }))
+}
+
+#[tauri::command]
+pub async fn mobile_share_invite_file(
+    app: AppHandle,
+    file_name: String,
+    contents: String,
+) -> Result<Value, String> {
+    if contents.trim().is_empty() {
+        return Err("invite file contents are required".to_string());
+    }
+
+    android_vpn::share_invite_file(
+        &app,
+        json!({
+            "fileName": if file_name.trim().is_empty() {
+                "odin-one-access.odinone-access.json"
+            } else {
+                file_name.trim()
+            },
+            "contents": contents,
+            "mimeType": "application/json"
+        }),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -988,6 +1428,7 @@ pub fn register_mobile_commands(builder: tauri::Builder<tauri::Wry>) -> tauri::B
         .manage(MobileDeploymentStore::default())
         .invoke_handler(tauri::generate_handler![
             mobile_core_health,
+            mobile_check_whitelist_ip,
             mobile_validate_provision,
             mobile_build_provision_plan,
             mobile_start_deployment,
@@ -999,8 +1440,235 @@ pub fn register_mobile_commands(builder: tauri::Builder<tauri::Wry>) -> tauri::B
             mobile_get_owner_profile,
             mobile_get_imported_profile,
             mobile_import_profile,
+            mobile_export_invite_file,
+            mobile_share_invite_file,
             mobile_generate_guest_profile
         ])
+}
+
+fn merge_json_object(target: &mut Value, extra: &Value) {
+    let Some(target_object) = target.as_object_mut() else {
+        return;
+    };
+    let Some(extra_object) = extra.as_object() else {
+        return;
+    };
+    for (key, value) in extra_object {
+        target_object.insert(key.clone(), value.clone());
+    }
+}
+
+async fn load_whitelist_lookup_source(
+    app: &AppHandle,
+) -> Result<(ParsedWhitelistFiles, bool, Option<String>), String> {
+    if whitelist_cache_is_fresh(app)? {
+        if let Some(cached) = read_cached_whitelist_files(app)? {
+            return Ok((cached, true, None));
+        }
+    }
+
+    match fetch_remote_whitelist_files().await {
+        Ok((ip_text, cidr_text, fetched_at)) => {
+            write_cached_whitelist_files(app, &ip_text, &cidr_text, &fetched_at)?;
+            let parsed = parse_whitelist_files(&ip_text, &cidr_text, &fetched_at)?;
+            Ok((parsed, false, None))
+        }
+        Err(fetch_error) => {
+            if let Some(cached) = read_cached_whitelist_files(app)? {
+                return Ok((
+                    cached,
+                    true,
+                    Some(format!(
+                        "GitHub refresh failed, using the saved whitelist cache instead: {fetch_error}"
+                    )),
+                ));
+            }
+            Ok((
+                bundled_whitelist_source()?,
+                true,
+                Some(format!(
+                    "GitHub refresh failed, so the bundled whitelist snapshot is being used instead: {fetch_error}"
+                )),
+            ))
+        }
+    }
+}
+
+fn bundled_whitelist_source() -> Result<ParsedWhitelistFiles, String> {
+    parse_whitelist_files(
+        BUNDLED_WHITELIST_IP_LIST,
+        BUNDLED_WHITELIST_CIDR_LIST,
+        "bundled-snapshot",
+    )
+}
+
+async fn fetch_remote_whitelist_files() -> Result<(String, String, String), String> {
+    let client = reqwest::Client::builder()
+        .user_agent("odin-one-mobile-bridge/0.5.1")
+        .build()
+        .map_err(|err| format!("build whitelist HTTP client: {err}"))?;
+
+    let ip_text = fetch_remote_whitelist_text(&client, WHITELIST_IP_LIST_URL).await?;
+    let cidr_text = fetch_remote_whitelist_text(&client, WHITELIST_CIDR_LIST_URL).await?;
+    Ok((ip_text, cidr_text, now_rfc3339()))
+}
+
+async fn fetch_remote_whitelist_text(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<String, String> {
+    client
+        .get(url)
+        .send()
+        .await
+        .map_err(|err| format!("download {url}: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("download {url}: {err}"))?
+        .text()
+        .await
+        .map_err(|err| format!("read {url}: {err}"))
+}
+
+fn parse_whitelist_files(
+    ip_text: &str,
+    cidr_text: &str,
+    fetched_at: &str,
+) -> Result<ParsedWhitelistFiles, String> {
+    let exact_ips = ip_text
+        .lines()
+        .filter_map(normalized_whitelist_entry)
+        .filter_map(|entry| entry.parse::<Ipv4Addr>().ok())
+        .collect::<HashSet<_>>();
+    let cidrs = cidr_text
+        .lines()
+        .filter_map(normalized_whitelist_entry)
+        .filter_map(parse_ipv4_cidr)
+        .collect::<Vec<_>>();
+
+    if exact_ips.is_empty() {
+        return Err("ipwhitelist.txt did not yield any IPv4 entries".to_string());
+    }
+    if cidrs.is_empty() {
+        return Err("cidrwhitelist.txt did not yield any IPv4 CIDR entries".to_string());
+    }
+
+    Ok(ParsedWhitelistFiles {
+        exact_ips,
+        cidrs,
+        fetched_at: fetched_at.to_string(),
+    })
+}
+
+fn normalized_whitelist_entry(line: &str) -> Option<&str> {
+    let raw = line.split('#').next().unwrap_or_default().trim();
+    (!raw.is_empty()).then_some(raw)
+}
+
+fn parse_ipv4_cidr(entry: &str) -> Option<ParsedIpv4Cidr> {
+    let (ip_text, prefix_text) = entry.split_once('/')?;
+    let ip = ip_text.trim().parse::<Ipv4Addr>().ok()?;
+    let prefix = prefix_text.trim().parse::<u8>().ok()?;
+    if prefix > 32 {
+        return None;
+    }
+    let mask = ipv4_mask(prefix);
+    Some(ParsedIpv4Cidr {
+        raw: entry.trim().to_string(),
+        network: ipv4_to_u32(ip) & mask,
+        prefix,
+    })
+}
+
+fn ipv4_in_cidr(ip: Ipv4Addr, cidr: &ParsedIpv4Cidr) -> bool {
+    ipv4_to_u32(ip) & ipv4_mask(cidr.prefix) == cidr.network
+}
+
+fn ipv4_to_u32(ip: Ipv4Addr) -> u32 {
+    u32::from_be_bytes(ip.octets())
+}
+
+fn ipv4_mask(prefix: u8) -> u32 {
+    if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - u32::from(prefix))
+    }
+}
+
+fn read_cached_whitelist_files(app: &AppHandle) -> Result<Option<ParsedWhitelistFiles>, String> {
+    let ip_path = whitelist_cache_ip_path(app)?;
+    let cidr_path = whitelist_cache_cidr_path(app)?;
+    let meta_path = whitelist_cache_meta_path(app)?;
+    if !ip_path.exists() || !cidr_path.exists() || !meta_path.exists() {
+        return Ok(None);
+    }
+
+    let ip_text = fs::read_to_string(&ip_path)
+        .map_err(|err| format!("read cached ip whitelist: {err}"))?;
+    let cidr_text = fs::read_to_string(&cidr_path)
+        .map_err(|err| format!("read cached cidr whitelist: {err}"))?;
+    let metadata_text = fs::read_to_string(&meta_path)
+        .map_err(|err| format!("read whitelist cache metadata: {err}"))?;
+    let metadata: WhitelistCacheMetadata = serde_json::from_str(&metadata_text)
+        .map_err(|err| format!("parse whitelist cache metadata: {err}"))?;
+    parse_whitelist_files(&ip_text, &cidr_text, &metadata.fetched_at).map(Some)
+}
+
+fn write_cached_whitelist_files(
+    app: &AppHandle,
+    ip_text: &str,
+    cidr_text: &str,
+    fetched_at: &str,
+) -> Result<(), String> {
+    let cache_dir = whitelist_cache_dir(app)?;
+    let ip_path = cache_dir.join(WHITELIST_CACHE_IP_FILE_NAME);
+    let cidr_path = cache_dir.join(WHITELIST_CACHE_CIDR_FILE_NAME);
+    let meta_path = cache_dir.join(WHITELIST_CACHE_META_FILE_NAME);
+    let metadata = serde_json::to_string_pretty(&WhitelistCacheMetadata {
+        fetched_at: fetched_at.to_string(),
+    })
+    .map_err(|err| format!("serialize whitelist cache metadata: {err}"))?;
+
+    fs::write(&ip_path, ip_text).map_err(|err| format!("write cached ip whitelist: {err}"))?;
+    fs::write(&cidr_path, cidr_text)
+        .map_err(|err| format!("write cached cidr whitelist: {err}"))?;
+    fs::write(&meta_path, metadata)
+        .map_err(|err| format!("write whitelist cache metadata: {err}"))?;
+    Ok(())
+}
+
+fn whitelist_cache_is_fresh(app: &AppHandle) -> Result<bool, String> {
+    let meta_path = whitelist_cache_meta_path(app)?;
+    if !meta_path.exists() {
+        return Ok(false);
+    }
+
+    let modified_at = fs::metadata(&meta_path)
+        .map_err(|err| format!("read whitelist cache metadata info: {err}"))?
+        .modified()
+        .map_err(|err| format!("read whitelist cache modified time: {err}"))?;
+    let age = modified_at
+        .elapsed()
+        .map_err(|err| format!("measure whitelist cache age: {err}"))?;
+    Ok(age <= Duration::from_secs(WHITELIST_CACHE_MAX_AGE_SECS))
+}
+
+fn whitelist_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app_root_dir(app)?.join(WHITELIST_CACHE_DIR_NAME);
+    fs::create_dir_all(&dir).map_err(|err| format!("create whitelist cache dir: {err}"))?;
+    Ok(dir)
+}
+
+fn whitelist_cache_ip_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(whitelist_cache_dir(app)?.join(WHITELIST_CACHE_IP_FILE_NAME))
+}
+
+fn whitelist_cache_cidr_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(whitelist_cache_dir(app)?.join(WHITELIST_CACHE_CIDR_FILE_NAME))
+}
+
+fn whitelist_cache_meta_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(whitelist_cache_dir(app)?.join(WHITELIST_CACHE_META_FILE_NAME))
 }
 
 fn build_invite_response(
@@ -1058,11 +1726,12 @@ fn invite_effective_reality_port(invite: &InviteProfileFile) -> Option<u16> {
 }
 
 fn invite_protocol_pack(invite: &InviteProfileFile) -> Vec<ProtocolPackEntry> {
-    build_protocol_pack_for_transport(
+    build_protocol_pack_for_transport_with_fallbacks(
         &invite.transport,
         nonzero_u16(invite.wire_guard_port),
         invite_effective_reality_port(invite),
         nonzero_u16(invite.vk_turn_proxy_port),
+        Some(&invite_effective_staged_fallbacks(invite)),
     )
 }
 
@@ -1276,6 +1945,24 @@ fn imported_profile_path(
         sanitize_host(name),
         sanitize_host(fingerprint)
     )))
+}
+
+fn invite_export_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = match app.path().download_dir() {
+        Ok(downloads) => downloads.join("Odin One"),
+        Err(_) => app_root_dir(app)?.join("exports"),
+    };
+    fs::create_dir_all(&dir).map_err(|err| format!("create invite export directory: {err}"))?;
+    Ok(dir)
+}
+
+fn invite_export_file_name(invite: &InviteProfileFile) -> String {
+    format!(
+        "{}-{}{}",
+        sanitize_host(&invite.server_host),
+        sanitize_host(&invite.name),
+        INVITE_EXPORT_EXTENSION
+    )
 }
 
 fn profiles_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -2028,6 +2715,10 @@ async fn mobile_run_deployment(
     deployment_id: &str,
     payload: ProvisionPayload,
 ) -> Result<(), String> {
+    if normalized_provision_flow(&payload.flow) == PROVISION_FLOW_EDGE_ATTACH {
+        return mobile_run_edge_attach(app, deployment_id, payload).await;
+    }
+
     let mut ssh = MobileSshSession::connect(&payload.server, &payload.secret).await?;
 
     ssh.run("whoami && uname -a").await?;
@@ -2063,16 +2754,6 @@ async fn mobile_run_deployment(
         turn_port,
         wire_guard_port,
         reality_port,
-    );
-    set_deployment_protocol_pack(
-        &app,
-        deployment_id,
-        build_protocol_pack_for_transport(
-            "xray",
-            Some(wire_guard_port),
-            Some(reality_port),
-            Some(turn_port),
-        ),
     );
 
     ensure_remote_vk_turn_proxy_binary(&mut ssh).await?;
@@ -2119,6 +2800,17 @@ async fn mobile_run_deployment(
         &reality_uuid,
         true,
     );
+    set_deployment_protocol_pack(
+        &app,
+        deployment_id,
+        build_protocol_pack_for_transport_with_fallbacks(
+            "xray",
+            Some(wire_guard_port),
+            Some(reality_port),
+            Some(turn_port),
+            Some(&staged_fallbacks),
+        ),
+    );
     let fallback_manifest = render_staged_fallback_manifest(&payload.server.host, reality_port)?;
     let owner_profile = render_owner_profile(
         &payload.server.host,
@@ -2135,6 +2827,7 @@ async fn mobile_run_deployment(
         wire_guard_port,
         reality_port,
         turn_port,
+        Some(&staged_fallbacks),
     )?;
     let xray_unit = render_systemd_unit(
         "Odin One Xray",
@@ -2197,6 +2890,204 @@ async fn mobile_run_deployment(
     complete_step(&app, deployment_id, 5);
 
     let _ = ssh.close().await;
+    Ok(())
+}
+
+fn render_yandex_edge_systemd_unit(origin_host: &str, origin_port: u16, public_port: u16) -> String {
+    format!(
+        "[Unit]\nDescription=Odin One Yandex edge passthrough\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/usr/bin/socat TCP-LISTEN:{public_port},fork,reuseaddr TCP:{origin_host}:{origin_port}\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=multi-user.target\n"
+    )
+}
+
+fn render_yandex_edge_manifest(
+    edge_host: &str,
+    public_port: u16,
+    origin_host: &str,
+    reality: &RealityFallback,
+) -> Result<String, String> {
+    serde_json::to_string_pretty(&json!({
+        "provider": EDGE_PROVIDER_YANDEX,
+        "edgeHost": edge_host,
+        "publicPort": public_port,
+        "originHost": origin_host,
+        "originPort": reality.port,
+        "serverName": reality.server_name,
+        "publicKey": reality.public_key,
+        "shortId": reality.short_id,
+        "uuid": reality.uuid,
+        "flow": reality.flow,
+        "generatedAt": now_rfc3339(),
+    }))
+    .map_err(|err| format!("marshal yandex edge manifest: {err}"))
+}
+
+fn patch_owner_profile_with_yandex_edge(
+    raw_json: &str,
+    edge_host: &str,
+    public_port: u16,
+    origin_host: &str,
+    reality: &RealityFallback,
+) -> Result<(String, Value, Vec<ProtocolPackEntry>), String> {
+    let mut profile: OwnerProfileFile =
+        serde_json::from_str(raw_json).map_err(|err| format!("parse owner profile: {err}"))?;
+    ensure_reality_relay_direct_fallback(&mut profile.staged_fallbacks);
+    ensure_reality_relay_owner_egress_fallback(&mut profile.staged_fallbacks);
+    upsert_yandex_edge_fallback(
+        &mut profile.staged_fallbacks,
+        yandex_edge_fallback_value_for(
+            edge_host,
+            public_port,
+            origin_host,
+            reality.port,
+            &reality.server_name,
+            &reality.public_key,
+            &reality.short_id,
+            &reality.uuid,
+            &reality.flow,
+            YANDEX_EDGE_FINGERPRINT,
+            "owner-attached:yandex-edge",
+            &format!("yandex-edge-{}", edge_host.replace('.', "-")),
+        ),
+    );
+    profile.protocol_pack = build_protocol_pack_for_transport_with_fallbacks(
+        &profile.transport,
+        nonzero_u16(profile.endpoint_port),
+        Some(reality.port),
+        nonzero_u16(profile.vk_turn_proxy_port),
+        Some(&profile.staged_fallbacks),
+    );
+    let staged_fallbacks = profile.staged_fallbacks.clone();
+    let protocol_pack = profile.protocol_pack.clone();
+    let normalized = serde_json::to_string_pretty(&profile)
+        .map_err(|err| format!("marshal owner profile: {err}"))?;
+    Ok((normalized, staged_fallbacks, protocol_pack))
+}
+
+async fn mobile_run_edge_attach(
+    app: AppHandle,
+    deployment_id: &str,
+    payload: ProvisionPayload,
+) -> Result<(), String> {
+    validate_edge_attach_payload(&payload)?;
+    let edge = payload
+        .edge
+        .as_ref()
+        .ok_or_else(|| "edge configuration is required".to_string())?;
+    let edge_server = edge_server_payload(edge);
+    let public_port = normalized_edge_public_port(Some(edge));
+
+    let mut origin = MobileSshSession::connect(&payload.server, &payload.secret).await?;
+    origin.run("whoami && uname -a").await?;
+    complete_step(&app, deployment_id, 0);
+
+    let owner_text = origin
+        .run(&format!("cat {}", quote_shell(WHITELIST_INVITE_PATH)))
+        .await?;
+    let (owner, xray_state) = load_remote_access_state(&mut origin).await?;
+    let reality = read_invite_reality_fallback(&owner)
+        .map_err(|err| format!("read origin reality fallback: {err}"))?;
+
+    let mut edge_ssh = MobileSshSession::connect(&edge_server, &edge.secret).await?;
+    edge_ssh.run("whoami && uname -a").await?;
+    complete_step(&app, deployment_id, 1);
+
+    ensure_remote_socat_installed(&mut edge_ssh).await?;
+    let edge_manifest = render_yandex_edge_manifest(
+        edge.server.host.trim(),
+        public_port,
+        payload.server.host.trim(),
+        &reality,
+    )?;
+    upload_with_sudo(
+        &mut edge_ssh,
+        WHITELIST_EDGE_MANIFEST_PATH,
+        edge_manifest.as_bytes(),
+        "0644",
+    )
+    .await?;
+    complete_step(&app, deployment_id, 2);
+
+    let edge_unit =
+        render_yandex_edge_systemd_unit(payload.server.host.trim(), reality.port, public_port);
+    upload_with_sudo(
+        &mut edge_ssh,
+        WHITELIST_YANDEX_EDGE_SERVICE_PATH,
+        edge_unit.as_bytes(),
+        "0644",
+    )
+    .await?;
+    edge_ssh
+        .run(&remote_root_shell("systemctl daemon-reload"))
+        .await?;
+    complete_step(&app, deployment_id, 3);
+
+    edge_ssh
+        .run(&remote_root_shell(
+            "systemctl enable whitelist-yandex-edge.service && systemctl restart whitelist-yandex-edge.service && sleep 2",
+        ))
+        .await?;
+    edge_ssh
+        .run(&remote_root_shell("systemctl is-active whitelist-yandex-edge.service"))
+        .await?;
+    edge_ssh
+        .run(&format!(
+            "sh -lc {}",
+            quote_shell(&format!(
+                "ss -ltnH | awk '{{print $4}}' | grep -Eq '(^|:){public_port}$'"
+            ))
+        ))
+        .await?;
+    edge_ssh
+        .run(&remote_root_shell(&format!(
+            "socat -T 5 - TCP:{}:{},connect-timeout=5 </dev/null >/dev/null",
+            payload.server.host.trim(),
+            reality.port
+        )))
+        .await?;
+    complete_step(&app, deployment_id, 4);
+
+    let (patched_owner_profile, staged_fallbacks, protocol_pack) = patch_owner_profile_with_yandex_edge(
+        &owner_text,
+        edge.server.host.trim(),
+        public_port,
+        payload.server.host.trim(),
+        &reality,
+    )?;
+    origin
+        .upload(WHITELIST_INVITE_PATH, patched_owner_profile.as_bytes(), "0600")
+        .await?;
+    save_local_owner_profile(&app, &payload.server.host, patched_owner_profile.as_bytes())?;
+    let fallback_manifest =
+        render_staged_fallback_manifest(payload.server.host.trim(), reality.port)?;
+    origin
+        .upload(WHITELIST_FALLBACKS_PATH, fallback_manifest.as_bytes(), "0644")
+        .await?;
+    let protocol_pack_manifest = render_protocol_pack_manifest(
+        payload.server.host.trim(),
+        &owner.transport,
+        xray_state.wire_guard_port,
+        reality.port,
+        owner.vk_turn_proxy_port,
+        Some(&staged_fallbacks),
+    )?;
+    origin
+        .upload(
+            WHITELIST_PROTOCOL_PACK_PATH,
+            protocol_pack_manifest.as_bytes(),
+            "0644",
+        )
+        .await?;
+    set_deployment_protocol_pack(&app, deployment_id, protocol_pack);
+    let store = app.state::<MobileDeploymentStore>();
+    store.update(deployment_id, |deployment| {
+        deployment.edge_enabled = Some(true);
+        deployment.edge_host = Some(edge.server.host.trim().to_string());
+        deployment.edge_port = Some(public_port);
+    });
+    complete_step(&app, deployment_id, 5);
+
+    let _ = edge_ssh.close().await;
+    let _ = origin.close().await;
     Ok(())
 }
 
@@ -2347,7 +3238,7 @@ async fn resolve_remote_udp_port(
         ));
     }
 
-    for port in start..=end {
+    for port in port_candidates(start, end, None)? {
         if excluded.contains(&port) {
             continue;
         }
@@ -2372,6 +3263,10 @@ async fn resolve_remote_relay_port(
         return Err(format!(
             "vk-turn-proxy relay UDP port {requested_port} is already in use on the server"
         ));
+    }
+
+    if let Some(existing_port) = remote_existing_relay_port(ssh).await {
+        return Ok(existing_port);
     }
 
     resolve_remote_udp_port(
@@ -2400,17 +3295,60 @@ async fn resolve_deployment_reality_port(
         ));
     }
 
-    if remote_tcp_port_is_free(ssh, REALITY_FALLBACK_PORT).await? {
-        return Ok(REALITY_FALLBACK_PORT);
+    if let Some(existing_port) = remote_existing_reality_port(ssh).await? {
+        return Ok(existing_port);
     }
 
     find_remote_preferred_tcp_port(
         ssh,
-        None,
+        Some(REALITY_DEPLOY_DEFAULT_PORT),
         REALITY_FALLBACK_MIN_PORT,
         REALITY_FALLBACK_MAX_PORT,
     )
     .await
+}
+
+fn port_candidates_with_seed(
+    start: u16,
+    end: u16,
+    preferred: Option<u16>,
+    seed: u16,
+) -> Vec<u16> {
+    if start > end {
+        return Vec::new();
+    }
+
+    let start_u32 = u32::from(start);
+    let end_u32 = u32::from(end);
+    let span = end_u32 - start_u32 + 1;
+    let offset = u32::from(seed) % span;
+    let preferred = preferred.filter(|port| *port >= start && *port <= end);
+    let mut ports = Vec::with_capacity(span as usize + usize::from(preferred.is_some()));
+
+    if let Some(preferred_port) = preferred {
+        ports.push(preferred_port);
+    }
+
+    for step in 0..span {
+        let port = (start_u32 + ((offset + step) % span)) as u16;
+        if Some(port) == preferred {
+            continue;
+        }
+        ports.push(port);
+    }
+
+    ports
+}
+
+fn port_candidates(start: u16, end: u16, preferred: Option<u16>) -> Result<Vec<u16>, String> {
+    let mut seed = [0_u8; 2];
+    getrandom(&mut seed).map_err(|err| format!("generate port selection seed: {err}"))?;
+    Ok(port_candidates_with_seed(
+        start,
+        end,
+        preferred,
+        u16::from_le_bytes(seed),
+    ))
 }
 
 async fn find_remote_preferred_tcp_port(
@@ -2419,12 +3357,7 @@ async fn find_remote_preferred_tcp_port(
     start: u16,
     end: u16,
 ) -> Result<u16, String> {
-    if let Some(port) = preferred.filter(|port| *port > 0) {
-        if remote_tcp_port_is_free(ssh, port).await? {
-            return Ok(port);
-        }
-    }
-    for port in start..=end {
+    for port in port_candidates(start, end, preferred.filter(|port| *port > 0))? {
         if remote_tcp_port_is_free(ssh, port).await? {
             return Ok(port);
         }
@@ -2453,6 +3386,10 @@ async fn remote_tcp_port_is_free(ssh: &mut MobileSshSession, port: u16) -> Resul
 }
 
 async fn remote_existing_relay_uses_port(ssh: &mut MobileSshSession, port: u16) -> bool {
+    remote_existing_relay_port(ssh).await == Some(port)
+}
+
+async fn remote_existing_relay_port(ssh: &mut MobileSshSession) -> Option<u16> {
     let unit_text = match ssh
         .run(&format!(
             "cat {}",
@@ -2461,15 +3398,19 @@ async fn remote_existing_relay_uses_port(ssh: &mut MobileSshSession, port: u16) 
         .await
     {
         Ok(unit_text) => unit_text,
-        Err(_) => return false,
+        Err(_) => return None,
     };
-    parse_vk_relay_unit_ports(&unit_text).0 == Some(port)
+    parse_vk_relay_unit_ports(&unit_text).0
 }
 
 async fn remote_existing_reality_uses_port(ssh: &mut MobileSshSession, port: u16) -> bool {
+    matches!(remote_existing_reality_port(ssh).await, Ok(Some(existing_port)) if existing_port == port)
+}
+
+async fn remote_existing_reality_port(ssh: &mut MobileSshSession) -> Result<Option<u16>, String> {
     match load_remote_access_state(ssh).await {
-        Ok((_, state)) => state.reality.port == port,
-        Err(_) => false,
+        Ok((_, state)) => Ok(nonzero_u16(state.reality.port)),
+        Err(err) => Err(err),
     }
 }
 
@@ -2688,6 +3629,32 @@ fn build_staged_fallbacks(
     })
 }
 
+fn preview_staged_fallbacks(edge: Option<&EdgeAttachPayload>) -> Value {
+    let mut staged = json!({});
+    ensure_reality_relay_owner_egress_fallback(&mut staged);
+    ensure_reality_relay_direct_fallback(&mut staged);
+    if let Some(edge_payload) = edge.filter(|entry| entry.enabled) {
+        upsert_yandex_edge_fallback(
+            &mut staged,
+            yandex_edge_fallback_value_for(
+                edge_payload.server.host.trim(),
+                normalized_edge_public_port(Some(edge_payload)),
+                "",
+                0,
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+            ),
+        );
+    }
+    staged
+}
+
 fn render_staged_fallback_manifest(host: &str, reality_port: u16) -> Result<String, String> {
     serde_json::to_string_pretty(&json!({
         "host": host,
@@ -2713,7 +3680,7 @@ fn render_staged_fallback_manifest(host: &str, reality_port: u16) -> Result<Stri
                 "id": "reality-relay-direct",
                 "status": "staged",
                 "engine": "sing-box",
-                "port": REALITY_FALLBACK_PORT,
+                "port": REALITY_RELAY_DIRECT_PORT,
                 "network": "tcp",
                 "notes": "Experimental direct relay path that enters through a curated external REALITY relay from the hourly igareck feed and exits directly through that relay."
             },
@@ -2744,6 +3711,7 @@ fn render_protocol_pack_manifest(
     wire_guard_port: u16,
     reality_port: u16,
     vk_relay_port: u16,
+    staged_fallbacks: Option<&Value>,
 ) -> Result<String, String> {
     serde_json::to_string_pretty(&json!({
         "host": host,
@@ -2751,11 +3719,12 @@ fn render_protocol_pack_manifest(
         "activeProtocol": active_protocol_id(transport),
         "generatedAt": now_rfc3339(),
         "recommendedPath": active_protocol_id(transport),
-        "entries": build_protocol_pack_for_transport(
+        "entries": build_protocol_pack_for_transport_with_fallbacks(
             transport,
             Some(wire_guard_port),
             Some(reality_port),
-            Some(vk_relay_port)
+            Some(vk_relay_port),
+            staged_fallbacks,
         )
     }))
     .map_err(|err| format!("marshal protocol pack manifest: {err}"))
@@ -2777,7 +3746,7 @@ fn render_owner_profile(
         server_host: host.to_string(),
         vk_turn_proxy_port,
         endpoint_port: wire_guard_port,
-        protocol_pack: build_protocol_pack_for_transport(
+        protocol_pack: build_protocol_pack_for_transport_with_fallbacks(
             "xray",
             Some(wire_guard_port),
             staged_fallbacks
@@ -2786,6 +3755,7 @@ fn render_owner_profile(
                 .and_then(Value::as_u64)
                 .and_then(|value| u16::try_from(value).ok()),
             Some(vk_turn_proxy_port),
+            Some(&staged_fallbacks),
         ),
         staged_fallbacks,
         wireguard: OwnerWireGuard {
@@ -2821,11 +3791,12 @@ fn active_protocol_id(transport: &str) -> &'static str {
     }
 }
 
-fn build_protocol_pack_for_transport(
+fn build_protocol_pack_for_transport_with_fallbacks(
     transport: &str,
     wire_guard_port: Option<u16>,
     reality_port: Option<u16>,
     vk_turn_proxy_port: Option<u16>,
+    staged_fallbacks: Option<&Value>,
 ) -> Vec<ProtocolPackEntry> {
     let mut entries = vec![
         ProtocolPackEntry {
@@ -2835,7 +3806,7 @@ fn build_protocol_pack_for_transport(
             engine: "sing-box".to_string(),
             scheme: "vless+reality".to_string(),
             network: "tcp".to_string(),
-            port: reality_port.unwrap_or(REALITY_FALLBACK_PORT),
+            port: reality_port.unwrap_or(REALITY_DEPLOY_DEFAULT_PORT),
             notes: "Default direct path for localhost SOCKS and system proxy mode on restrictive networks.".to_string(),
         },
         ProtocolPackEntry {
@@ -2848,6 +3819,56 @@ fn build_protocol_pack_for_transport(
             port: vk_turn_proxy_port.unwrap_or(WHITELIST_TURN_PORT_START),
             notes: "VK relay stays deployed on the same server so the client can switch to it without another server rollout.".to_string(),
         },
+    ];
+
+    if staged_fallback_present(staged_fallbacks, "realityRelayOwnerEgress") {
+        entries.push(ProtocolPackEntry {
+            id: "vless-reality-relay-owner".to_string(),
+            label: "white tunel".to_string(),
+            status: "staged".to_string(),
+            engine: "sing-box".to_string(),
+            scheme: "vless+reality-relay".to_string(),
+            network: "tcp".to_string(),
+            port: fallback_port_from_value(
+                staged_fallbacks.and_then(|value| value.get("realityRelayOwnerEgress")),
+                "ownerEgressPort",
+                REALITY_FALLBACK_MIN_PORT,
+            ),
+            notes: "Experimental relay-assisted path that starts through a curated external REALITY relay and returns internet egress to your server.".to_string(),
+        });
+    }
+
+    if staged_fallback_present(staged_fallbacks, "realityRelayDirect") {
+        entries.push(ProtocolPackEntry {
+            id: "vless-reality-relay-direct".to_string(),
+            label: "white relay".to_string(),
+            status: "staged".to_string(),
+            engine: "sing-box".to_string(),
+            scheme: "vless+reality-relay-direct".to_string(),
+            network: "tcp".to_string(),
+            port: REALITY_RELAY_DIRECT_PORT,
+            notes: "Experimental direct relay path that picks a curated external REALITY relay from the hourly igareck feed and sends traffic through it without returning egress to your server.".to_string(),
+        });
+    }
+
+    if staged_fallback_present(staged_fallbacks, "realityYandexEdge") {
+        entries.push(ProtocolPackEntry {
+            id: "vless-reality-yandex-edge".to_string(),
+            label: "Yandex edge".to_string(),
+            status: "staged".to_string(),
+            engine: "sing-box".to_string(),
+            scheme: "vless+reality-edge".to_string(),
+            network: "tcp".to_string(),
+            port: fallback_port_from_value(
+                staged_fallbacks.and_then(|value| value.get("realityYandexEdge")),
+                "connectPort",
+                YANDEX_EDGE_CONNECT_PORT,
+            ),
+            notes: "Visible whitelist-facing edge entry that forwards the live REALITY origin through a dedicated Yandex host.".to_string(),
+        });
+    }
+
+    entries.extend([
         ProtocolPackEntry {
             id: "direct-wireguard".to_string(),
             label: "Direct WireGuard-over-xray".to_string(),
@@ -2857,26 +3878,6 @@ fn build_protocol_pack_for_transport(
             network: "udp".to_string(),
             port: wire_guard_port.unwrap_or(WHITELIST_WIREGUARD_PORT_START),
             notes: "Legacy direct UDP path kept as a fallback while VLESS + REALITY is the default.".to_string(),
-        },
-        ProtocolPackEntry {
-            id: "vless-reality-relay".to_string(),
-            label: "white tunel".to_string(),
-            status: "staged".to_string(),
-            engine: "sing-box".to_string(),
-            scheme: "vless+reality-relay".to_string(),
-            network: "tcp".to_string(),
-            port: REALITY_FALLBACK_MIN_PORT,
-            notes: "Experimental relay-assisted path that starts through a curated external REALITY relay and returns internet egress to your server.".to_string(),
-        },
-        ProtocolPackEntry {
-            id: "vless-reality-relay-direct".to_string(),
-            label: "white relay".to_string(),
-            status: "staged".to_string(),
-            engine: "sing-box".to_string(),
-            scheme: "vless+reality-relay-direct".to_string(),
-            network: "tcp".to_string(),
-            port: REALITY_FALLBACK_PORT,
-            notes: "Experimental direct relay path that picks a curated external REALITY relay from the hourly igareck feed and sends traffic through it without returning egress to your server.".to_string(),
         },
         ProtocolPackEntry {
             id: "naive".to_string(),
@@ -2898,7 +3899,7 @@ fn build_protocol_pack_for_transport(
             port: HYSTERIA2_FALLBACK_PORT,
             notes: "Planned high-performance UDP fallback for networks where direct WireGuard is unstable.".to_string(),
         },
-    ];
+    ]);
 
     if transport.trim() == "vk-turn-proxy+xray" {
         entries[0].status = "staged".to_string();
@@ -2906,6 +3907,20 @@ fn build_protocol_pack_for_transport(
     }
 
     entries
+}
+
+fn staged_fallback_present(staged_fallbacks: Option<&Value>, key: &str) -> bool {
+    staged_fallbacks
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_object)
+        .is_some()
+}
+
+fn fallback_port_from_value(raw: Option<&Value>, key: &str, fallback: u16) -> u16 {
+    raw.and_then(|entry| entry.get(key))
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+        .unwrap_or(fallback)
 }
 
 fn resolve_android_runtime_request(
@@ -2998,8 +4013,173 @@ fn requested_owner_runtime_lab(
                 | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD
                 | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB
                 | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB
+                | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
         )
     })
+}
+
+fn apply_yandex_edge_reality_preset(
+    profile_object: &mut serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    let fallback = resolve_yandex_edge_fallback(profile_object);
+    let staged_fallbacks = ensure_object_value(
+        profile_object
+            .entry("stagedFallbacks")
+            .or_insert_with(|| json!({})),
+        "stagedFallbacks",
+    )?;
+    staged_fallbacks.insert("realityYandexEdge".to_string(), fallback);
+    Ok(())
+}
+
+fn yandex_edge_string_field(
+    fallback: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+    default: &str,
+) -> String {
+    fallback
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default)
+        .to_string()
+}
+
+fn yandex_edge_u16_field(
+    fallback: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+    default: u16,
+) -> u16 {
+    fallback
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn resolve_yandex_edge_fallback(profile_object: &serde_json::Map<String, Value>) -> Value {
+    let staged_fallbacks = profile_object.get("stagedFallbacks").and_then(Value::as_object);
+    let direct_reality = staged_fallbacks
+        .and_then(|value| value.get("vlessReality"))
+        .and_then(Value::as_object)
+        .or_else(|| profile_object.get("vlessReality").and_then(Value::as_object));
+    let existing_edge = staged_fallbacks
+        .and_then(|value| value.get("realityYandexEdge"))
+        .and_then(Value::as_object);
+    let origin_host = yandex_edge_string_field(
+        existing_edge,
+        "originHost",
+        profile_object
+            .get("serverHost")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(YANDEX_EDGE_ORIGIN_HOST),
+    );
+    let origin_port = existing_edge
+        .and_then(|value| value.get("originPort"))
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .or_else(|| {
+            direct_reality
+                .and_then(|value| value.get("port"))
+                .and_then(Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok())
+                .filter(|value| *value > 0)
+        })
+        .unwrap_or(YANDEX_EDGE_ORIGIN_PORT);
+    let server_name = existing_edge
+        .and_then(|value| value.get("serverName"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            direct_reality
+                .and_then(|value| value.get("serverName"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or(YANDEX_EDGE_SERVER_NAME);
+    let public_key = existing_edge
+        .and_then(|value| value.get("publicKey"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            direct_reality
+                .and_then(|value| value.get("publicKey"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or(YANDEX_EDGE_PUBLIC_KEY);
+    let short_id = existing_edge
+        .and_then(|value| value.get("shortId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            direct_reality
+                .and_then(|value| value.get("shortId"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or(YANDEX_EDGE_SHORT_ID);
+    let uuid = existing_edge
+        .and_then(|value| value.get("uuid"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            direct_reality
+                .and_then(|value| value.get("uuid"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or(YANDEX_EDGE_UUID);
+    let flow = existing_edge
+        .and_then(|value| value.get("flow"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            direct_reality
+                .and_then(|value| value.get("flow"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or(YANDEX_EDGE_FLOW);
+    let fingerprint = yandex_edge_string_field(
+        existing_edge,
+        "fingerprint",
+        YANDEX_EDGE_FINGERPRINT,
+    );
+    let source = yandex_edge_string_field(existing_edge, "source", YANDEX_EDGE_SOURCE);
+    let tag = yandex_edge_string_field(existing_edge, "tag", YANDEX_EDGE_TAG);
+    let connect_host = yandex_edge_string_field(existing_edge, "connectHost", YANDEX_EDGE_CONNECT_HOST);
+    let connect_port = yandex_edge_u16_field(existing_edge, "connectPort", YANDEX_EDGE_CONNECT_PORT);
+
+    yandex_edge_fallback_value_for(
+        &connect_host,
+        connect_port,
+        &origin_host,
+        origin_port,
+        server_name,
+        public_key,
+        short_id,
+        uuid,
+        flow,
+        &fingerprint,
+        &source,
+        &tag,
+    )
 }
 
 fn apply_owner_runtime_lab_overrides(
@@ -3028,6 +4208,15 @@ fn apply_owner_runtime_lab_overrides(
                 .and_then(Value::as_object)
                 .cloned()
         });
+    if owner_runtime_lab.mode.trim() == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE {
+        apply_yandex_edge_reality_preset(profile_object)?;
+    }
+    let yandex_edge_reality = profile_object
+        .get("stagedFallbacks")
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("realityYandexEdge"))
+        .and_then(Value::as_object)
+        .cloned();
     let android_runtime = ensure_object_value(
         profile_object
             .entry("androidRuntime")
@@ -3115,55 +4304,134 @@ fn apply_owner_runtime_lab_overrides(
         }
         OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD
         | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB
-        | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB => {
+        | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB
+        | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE => {
             let server_name = owner_runtime_lab
                 .vps_server_name
                 .trim()
                 .to_ascii_lowercase();
-            if server_name.is_empty() {
+            if server_name.is_empty()
+                && owner_runtime_lab.mode.trim() != OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
+            {
                 return Err("owner runtime lab requires vpsServerName".to_string());
             }
-            if owner_runtime_lab.vps_port == 0 {
+            if owner_runtime_lab.vps_port == 0
+                && owner_runtime_lab.mode.trim() != OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
+            {
                 return Err("owner runtime lab requires a positive vpsPort".to_string());
             }
-            let transport = match owner_runtime_lab.vps_transport.trim() {
-                OWNER_RUNTIME_LAB_VPS_TRANSPORT_TCP => OWNER_RUNTIME_LAB_VPS_TRANSPORT_TCP,
-                OWNER_RUNTIME_LAB_VPS_TRANSPORT_GRPC => OWNER_RUNTIME_LAB_VPS_TRANSPORT_GRPC,
-                _ => {
-                    return Err(
-                        "owner runtime lab requires vpsTransport to be tcp or grpc".to_string()
-                    )
-                }
+            let transport = match owner_runtime_lab.mode.trim() {
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE => OWNER_RUNTIME_LAB_VPS_TRANSPORT_TCP,
+                _ => match owner_runtime_lab.vps_transport.trim() {
+                    OWNER_RUNTIME_LAB_VPS_TRANSPORT_TCP => OWNER_RUNTIME_LAB_VPS_TRANSPORT_TCP,
+                    OWNER_RUNTIME_LAB_VPS_TRANSPORT_GRPC => OWNER_RUNTIME_LAB_VPS_TRANSPORT_GRPC,
+                    _ => {
+                        return Err(
+                            "owner runtime lab requires vpsTransport to be tcp or grpc".to_string()
+                        )
+                    }
+                },
             };
             let runtime_mode = match owner_runtime_lab.mode.trim() {
                 OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB => "lab",
                 OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB => "lab",
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE => "lab",
                 _ => "scaffold",
             };
-            let source = if owner_runtime_lab.vps_source.trim().is_empty() {
-                "operator-curated:vps-lab".to_string()
-            } else {
-                owner_runtime_lab.vps_source.trim().to_string()
-            };
-            let tag = if owner_runtime_lab.vps_tag.trim().is_empty() {
-                format!(
-                    "owner-vps-lab-{server_name}-{transport}-{}",
-                    owner_runtime_lab.vps_port
-                )
-            } else {
-                owner_runtime_lab.vps_tag.trim().to_string()
-            };
-            let fingerprint = if owner_runtime_lab.vps_fingerprint.trim().is_empty() {
-                if transport == OWNER_RUNTIME_LAB_VPS_TRANSPORT_GRPC {
-                    "firefox".to_string()
-                } else {
-                    "chrome".to_string()
+            let source = match owner_runtime_lab.mode.trim() {
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE => {
+                    yandex_edge_string_field(
+                        yandex_edge_reality.as_ref(),
+                        "source",
+                        YANDEX_EDGE_SOURCE,
+                    )
                 }
-            } else {
-                owner_runtime_lab.vps_fingerprint.trim().to_string()
+                _ if owner_runtime_lab.vps_source.trim().is_empty() => {
+                    "operator-curated:vps-lab".to_string()
+                }
+                _ => owner_runtime_lab.vps_source.trim().to_string(),
+            };
+            let tag = match owner_runtime_lab.mode.trim() {
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE => {
+                    yandex_edge_string_field(yandex_edge_reality.as_ref(), "tag", YANDEX_EDGE_TAG)
+                }
+                _ if owner_runtime_lab.vps_tag.trim().is_empty() => {
+                    format!(
+                        "owner-vps-lab-{server_name}-{transport}-{}",
+                        owner_runtime_lab.vps_port
+                    )
+                }
+                _ => owner_runtime_lab.vps_tag.trim().to_string(),
+            };
+            let fingerprint = match owner_runtime_lab.mode.trim() {
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE => yandex_edge_string_field(
+                    yandex_edge_reality.as_ref(),
+                    "fingerprint",
+                    YANDEX_EDGE_FINGERPRINT,
+                ),
+                _ if owner_runtime_lab.vps_fingerprint.trim().is_empty() => {
+                    if transport == OWNER_RUNTIME_LAB_VPS_TRANSPORT_GRPC {
+                        "firefox".to_string()
+                    } else {
+                        "chrome".to_string()
+                    }
+                }
+                _ => owner_runtime_lab.vps_fingerprint.trim().to_string(),
             };
             let force_relay_owner_mode =
                 owner_runtime_lab.mode.trim() == OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB;
+            let connect_host = match owner_runtime_lab.mode.trim() {
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE => Some(yandex_edge_string_field(
+                    yandex_edge_reality.as_ref(),
+                    "connectHost",
+                    YANDEX_EDGE_CONNECT_HOST,
+                )),
+                _ => {
+                    let value = owner_runtime_lab.vps_connect_host.trim();
+                    if value.is_empty() {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    }
+                }
+            };
+            let connect_port = match owner_runtime_lab.mode.trim() {
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE => Some(yandex_edge_u16_field(
+                    yandex_edge_reality.as_ref(),
+                    "connectPort",
+                    YANDEX_EDGE_CONNECT_PORT,
+                )),
+                _ if owner_runtime_lab.vps_connect_port > 0 => {
+                    Some(owner_runtime_lab.vps_connect_port)
+                }
+                _ => None,
+            };
+            let server_name =
+                if owner_runtime_lab.mode.trim() == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE {
+                    yandex_edge_string_field(
+                        yandex_edge_reality.as_ref(),
+                        "serverName",
+                        YANDEX_EDGE_SERVER_NAME,
+                    )
+                } else {
+                    server_name
+                };
+            let vps_port =
+                if owner_runtime_lab.mode.trim() == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE {
+                    yandex_edge_u16_field(
+                        yandex_edge_reality.as_ref(),
+                        "originPort",
+                        bootstrap_reality
+                            .as_ref()
+                            .and_then(|value| value.get("port"))
+                            .and_then(Value::as_u64)
+                            .and_then(|value| u16::try_from(value).ok())
+                            .filter(|value| *value > 0)
+                            .unwrap_or(YANDEX_EDGE_ORIGIN_PORT),
+                    )
+                } else {
+                    owner_runtime_lab.vps_port
+                };
             let vps_lab = ensure_object_value(
                 android_runtime
                     .entry("realityVpsLab")
@@ -3174,7 +4442,66 @@ fn apply_owner_runtime_lab_overrides(
                 "ownerRealityEgress".to_string(),
                 Value::Bool(force_relay_owner_mode || owner_runtime_lab.vps_owner_reality_egress),
             );
-            if let Some(bootstrap_reality) = bootstrap_reality.as_ref() {
+            if owner_runtime_lab.mode.trim() == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE {
+                let bootstrap = ensure_object_value(
+                    vps_lab
+                        .entry("ownerRealityBootstrap")
+                        .or_insert_with(|| json!({})),
+                    "androidRuntime.realityVpsLab.ownerRealityBootstrap",
+                )?;
+                bootstrap.insert(
+                    "serverHost".to_string(),
+                    Value::String(yandex_edge_string_field(
+                        yandex_edge_reality.as_ref(),
+                        "originHost",
+                        if bootstrap_server_host.is_empty() {
+                            YANDEX_EDGE_ORIGIN_HOST
+                        } else {
+                            &bootstrap_server_host
+                        },
+                    )),
+                );
+                bootstrap.insert(
+                    "port".to_string(),
+                    Value::Number(serde_json::Number::from(vps_port)),
+                );
+                bootstrap.insert(
+                    "uuid".to_string(),
+                    Value::String(yandex_edge_string_field(
+                        yandex_edge_reality.as_ref(),
+                        "uuid",
+                        YANDEX_EDGE_UUID,
+                    )),
+                );
+                bootstrap.insert(
+                    "flow".to_string(),
+                    Value::String(yandex_edge_string_field(
+                        yandex_edge_reality.as_ref(),
+                        "flow",
+                        YANDEX_EDGE_FLOW,
+                    )),
+                );
+                bootstrap.insert(
+                    "serverName".to_string(),
+                    Value::String(server_name.clone()),
+                );
+                bootstrap.insert(
+                    "publicKey".to_string(),
+                    Value::String(yandex_edge_string_field(
+                        yandex_edge_reality.as_ref(),
+                        "publicKey",
+                        YANDEX_EDGE_PUBLIC_KEY,
+                    )),
+                );
+                bootstrap.insert(
+                    "shortId".to_string(),
+                    Value::String(yandex_edge_string_field(
+                        yandex_edge_reality.as_ref(),
+                        "shortId",
+                        YANDEX_EDGE_SHORT_ID,
+                    )),
+                );
+            } else if let Some(bootstrap_reality) = bootstrap_reality.as_ref() {
                 let bootstrap = ensure_object_value(
                     vps_lab
                         .entry("ownerRealityBootstrap")
@@ -3209,8 +4536,17 @@ fn apply_owner_runtime_lab_overrides(
             vps_lab.insert("serverName".to_string(), Value::String(server_name));
             vps_lab.insert(
                 "port".to_string(),
-                Value::Number(serde_json::Number::from(owner_runtime_lab.vps_port)),
+                Value::Number(serde_json::Number::from(vps_port)),
             );
+            if let Some(connect_host) = connect_host.filter(|value| !value.trim().is_empty()) {
+                vps_lab.insert("connectHost".to_string(), Value::String(connect_host));
+            }
+            if let Some(connect_port) = connect_port {
+                vps_lab.insert(
+                    "connectPort".to_string(),
+                    Value::Number(serde_json::Number::from(connect_port)),
+                );
+            }
             vps_lab.insert(
                 "transport".to_string(),
                 Value::String(transport.to_string()),
@@ -3218,7 +4554,12 @@ fn apply_owner_runtime_lab_overrides(
             vps_lab.insert("source".to_string(), Value::String(source));
             vps_lab.insert("tag".to_string(), Value::String(tag));
             vps_lab.insert("fingerprint".to_string(), Value::String(fingerprint));
-            if !owner_runtime_lab.vps_flow.trim().is_empty() {
+            if owner_runtime_lab.mode.trim() == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE {
+                vps_lab.insert(
+                    "flow".to_string(),
+                    Value::String(YANDEX_EDGE_FLOW.to_string()),
+                );
+            } else if !owner_runtime_lab.vps_flow.trim().is_empty() {
                 vps_lab.insert(
                     "flow".to_string(),
                     Value::String(owner_runtime_lab.vps_flow.trim().to_string()),
@@ -3388,6 +4729,66 @@ fn ensure_reality_relay_direct_fallback(staged_fallbacks: &mut Value) {
     );
 }
 
+fn yandex_edge_fallback_value_for(
+    connect_host: &str,
+    connect_port: u16,
+    origin_host: &str,
+    origin_port: u16,
+    server_name: &str,
+    public_key: &str,
+    short_id: &str,
+    uuid: &str,
+    flow: &str,
+    fingerprint: &str,
+    source: &str,
+    tag: &str,
+) -> Value {
+    json!({
+        "status": "ready",
+        "connectHost": connect_host,
+        "connectPort": connect_port,
+        "originHost": origin_host,
+        "originPort": origin_port,
+        "serverName": server_name,
+        "publicKey": public_key,
+        "shortId": short_id,
+        "uuid": uuid,
+        "flow": flow,
+        "fingerprint": fingerprint,
+        "source": source,
+        "tag": tag,
+        "description": "Visible Yandex edge mode for Android. The client reaches the current REALITY origin through a dedicated Yandex edge surface."
+    })
+}
+
+#[cfg(test)]
+fn curated_yandex_edge_fallback_value() -> Value {
+    yandex_edge_fallback_value_for(
+        YANDEX_EDGE_CONNECT_HOST,
+        YANDEX_EDGE_CONNECT_PORT,
+        YANDEX_EDGE_ORIGIN_HOST,
+        YANDEX_EDGE_ORIGIN_PORT,
+        YANDEX_EDGE_SERVER_NAME,
+        YANDEX_EDGE_PUBLIC_KEY,
+        YANDEX_EDGE_SHORT_ID,
+        YANDEX_EDGE_UUID,
+        YANDEX_EDGE_FLOW,
+        YANDEX_EDGE_FINGERPRINT,
+        YANDEX_EDGE_SOURCE,
+        YANDEX_EDGE_TAG,
+    )
+}
+
+fn upsert_yandex_edge_fallback(staged_fallbacks: &mut Value, fallback: Value) {
+    if staged_fallbacks.is_null() {
+        *staged_fallbacks = json!({});
+    }
+    let Some(staged_object) = staged_fallbacks.as_object_mut() else {
+        return;
+    };
+    staged_object.insert("realityYandexEdge".to_string(), fallback);
+}
+
 fn requested_transport(server: &ServerDraftPayload) -> &str {
     if server.transport.trim() == "vk-turn-proxy+xray" {
         "vk-turn-proxy+xray"
@@ -3507,7 +4908,59 @@ fn android_tunnel_state(
     state
 }
 
-fn build_plan_steps() -> Vec<PlanEntry> {
+fn build_plan_steps(flow: &str) -> Vec<PlanEntry> {
+    if flow == PROVISION_FLOW_EDGE_ATTACH {
+        return vec![
+            PlanEntry {
+                id: "origin-ssh-check".to_string(),
+                label: "Origin validation".to_string(),
+                status: "queued".to_string(),
+                description:
+                    "Load the live Odin One origin profile and confirm the current REALITY port and keys."
+                        .to_string(),
+            },
+            PlanEntry {
+                id: "edge-ssh-check".to_string(),
+                label: "Edge validation".to_string(),
+                status: "queued".to_string(),
+                description:
+                    "Validate the Yandex edge host and confirm that privileged setup can run there."
+                        .to_string(),
+            },
+            PlanEntry {
+                id: "edge-runtime-prep".to_string(),
+                label: "Edge preparation".to_string(),
+                status: "queued".to_string(),
+                description: "Install socat on the edge host and write the passthrough manifest."
+                    .to_string(),
+            },
+            PlanEntry {
+                id: "edge-configure".to_string(),
+                label: "Edge wiring".to_string(),
+                status: "queued".to_string(),
+                description:
+                    "Install the systemd forwarder that exposes the origin REALITY port through the Yandex edge."
+                        .to_string(),
+            },
+            PlanEntry {
+                id: "edge-service-start".to_string(),
+                label: "Edge startup".to_string(),
+                status: "queued".to_string(),
+                description:
+                    "Start the edge passthrough service and verify that it can reach the current origin REALITY port."
+                        .to_string(),
+            },
+            PlanEntry {
+                id: "profile-refresh".to_string(),
+                label: "Profile refresh".to_string(),
+                status: "queued".to_string(),
+                description:
+                    "Patch the owner profile and protocol pack so the extra Yandex edge mode can be exported in a single invite key."
+                        .to_string(),
+            },
+        ];
+    }
+
     vec![
         PlanEntry {
             id: "ssh-check".to_string(),
@@ -3558,12 +5011,18 @@ fn build_plan_steps() -> Vec<PlanEntry> {
     ]
 }
 
-fn build_plan_warnings(server: &ServerDraftPayload) -> Vec<String> {
+fn build_plan_warnings(server: &ServerDraftPayload, flow: &str) -> Vec<String> {
     let mut warnings = vec![
         "Odin One uses its own ports and paths so the existing Amnezia stack can remain untouched."
             .to_string(),
-        "Odin One now keeps VLESS + REALITY and the VK relay live on the same server, so the client can switch paths locally without redeploying the node.".to_string(),
+        "Odin One keeps the stable direct REALITY path separate from additive access surfaces so stable mode can stay untouched while extra modes are attached later.".to_string(),
     ];
+
+    if flow == PROVISION_FLOW_EDGE_ATTACH {
+        warnings.push("The Yandex edge step is additive: it only exposes the existing REALITY origin through a second host and does not rotate the origin keys by itself.".to_string());
+        warnings.push("You should re-issue invite keys after the edge is attached so imported profiles receive the extra visible mode.".to_string());
+        return warnings;
+    }
 
     if server.vk_turn_proxy_port.unwrap_or_default() > 0
         || server.reality_port.unwrap_or_default() > 0
@@ -3581,12 +5040,14 @@ fn build_plan_warnings(server: &ServerDraftPayload) -> Vec<String> {
     warnings
 }
 
-fn build_protocol_pack(server: &ServerDraftPayload) -> Vec<ProtocolPackEntry> {
-    build_protocol_pack_for_transport(
-        &server.transport,
+fn build_protocol_pack(payload: &ProvisionPayload) -> Vec<ProtocolPackEntry> {
+    let preview_fallbacks = preview_staged_fallbacks(payload.edge.as_ref());
+    build_protocol_pack_for_transport_with_fallbacks(
+        &payload.server.transport,
         None,
-        server.reality_port,
-        server.vk_turn_proxy_port,
+        payload.server.reality_port,
+        payload.server.vk_turn_proxy_port,
+        Some(&preview_fallbacks),
     )
 }
 
@@ -3620,6 +5081,65 @@ fn normalized_port(port: u16) -> u16 {
     }
 }
 
+fn normalized_provision_flow(flow: &str) -> &str {
+    if flow.trim() == PROVISION_FLOW_EDGE_ATTACH {
+        PROVISION_FLOW_EDGE_ATTACH
+    } else {
+        PROVISION_FLOW_ORIGIN
+    }
+}
+
+fn normalized_edge_public_port(edge: Option<&EdgeAttachPayload>) -> u16 {
+    edge.and_then(|entry| entry.public_port)
+        .filter(|port| *port > 0)
+        .unwrap_or(YANDEX_EDGE_CONNECT_PORT)
+}
+
+fn edge_server_payload(edge: &EdgeAttachPayload) -> ServerDraftPayload {
+    ServerDraftPayload {
+        host: edge.server.host.trim().to_string(),
+        port: normalized_port(edge.server.port),
+        username: edge.server.username.trim().to_string(),
+        auth_method: edge.server.auth_method.trim().to_string(),
+        transport: "xray".to_string(),
+        engine: Some("sing-box".to_string()),
+        protocol: Some("vless-reality".to_string()),
+        vk_turn_proxy_port: None,
+        reality_port: None,
+    }
+}
+
+fn validate_edge_attach_payload(payload: &ProvisionPayload) -> Result<(), String> {
+    let Some(edge) = payload.edge.as_ref().filter(|edge| edge.enabled) else {
+        return Err("edge attach requires an enabled edge configuration".to_string());
+    };
+    if !edge.provider.trim().is_empty() && edge.provider.trim() != EDGE_PROVIDER_YANDEX {
+        return Err(format!(
+            "unsupported edge provider: {}",
+            edge.provider.trim()
+        ));
+    }
+    if payload.server.host.trim().is_empty()
+        || payload.server.username.trim().is_empty()
+        || payload.secret.trim().is_empty()
+    {
+        return Err("origin host, username, and secret are required".to_string());
+    }
+    if edge.server.host.trim().is_empty()
+        || edge.server.username.trim().is_empty()
+        || edge.secret.trim().is_empty()
+    {
+        return Err("edge host, username, and secret are required".to_string());
+    }
+    if normalized_port(edge.server.port) == 0 {
+        return Err("edge ssh port must be positive".to_string());
+    }
+    if normalized_edge_public_port(Some(edge)) == 0 {
+        return Err("edge public port must be positive".to_string());
+    }
+    Ok(())
+}
+
 fn describe_manual_port(port: Option<u16>, fallback: &str) -> String {
     match port {
         Some(value) if value > 0 => value.to_string(),
@@ -3630,17 +5150,24 @@ fn describe_manual_port(port: Option<u16>, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_owner_runtime_lab_overrides, build_protocol_pack_for_transport,
-        ensure_reality_relay_direct_fallback, OwnerRuntimeLabPayload,
+        apply_owner_runtime_lab_overrides, build_protocol_pack_for_transport_with_fallbacks,
+        curated_yandex_edge_fallback_value, ensure_reality_relay_direct_fallback, ipv4_in_cidr,
+        parse_ipv4_cidr, parse_whitelist_files, port_candidates_with_seed,
+        upsert_yandex_edge_fallback,
+        OwnerRuntimeLabPayload,
         OwnerRuntimeLabRelayAutoselectPayload, OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB,
         OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB, OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD,
         OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_LAB,
         OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_SCAFFOLD,
+        OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE,
         OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_INTERVAL_HOURS,
         OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL,
-        OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL,
+        OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL, REALITY_DEPLOY_DEFAULT_PORT,
+        YANDEX_EDGE_CONNECT_HOST, YANDEX_EDGE_CONNECT_PORT, YANDEX_EDGE_ORIGIN_PORT,
+        YANDEX_EDGE_SOURCE, YANDEX_EDGE_TAG,
     };
     use serde_json::Value;
+    use std::net::Ipv4Addr;
 
     #[test]
     fn owner_runtime_lab_patch_adds_hidden_reality_whitelist_block() {
@@ -3654,6 +5181,8 @@ mod tests {
                 hint_tag: "candidate-max-ru".to_string(),
                 vps_server_name: String::new(),
                 vps_port: 0,
+                vps_connect_host: String::new(),
+                vps_connect_port: 0,
                 vps_transport: String::new(),
                 vps_flow: String::new(),
                 vps_fingerprint: String::new(),
@@ -3708,6 +5237,28 @@ mod tests {
     }
 
     #[test]
+    fn port_candidates_put_preferred_port_first_without_duplicates() {
+        let ports = port_candidates_with_seed(1000, 1004, Some(1002), 1);
+        assert_eq!(ports[0], 1002);
+        assert_eq!(ports.len(), 5);
+        assert_eq!(
+            ports.iter().copied().collect::<std::collections::BTreeSet<_>>(),
+            [1000_u16, 1001, 1002, 1003, 1004].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn protocol_pack_defaults_direct_reality_to_high_port_range() {
+        let entries =
+            build_protocol_pack_for_transport_with_fallbacks("xray", Some(51820), None, None, None);
+        let direct = entries
+            .iter()
+            .find(|entry| entry.id == "vless-reality")
+            .expect("direct reality entry should exist");
+        assert_eq!(direct.port, REALITY_DEPLOY_DEFAULT_PORT);
+    }
+
+    #[test]
     fn owner_runtime_lab_patch_rejects_empty_server_name() {
         let result = apply_owner_runtime_lab_overrides(
             r#"{"name":"Owner"}"#,
@@ -3719,6 +5270,8 @@ mod tests {
                 hint_tag: String::new(),
                 vps_server_name: String::new(),
                 vps_port: 0,
+                vps_connect_host: String::new(),
+                vps_connect_port: 0,
                 vps_transport: String::new(),
                 vps_flow: String::new(),
                 vps_fingerprint: String::new(),
@@ -3746,6 +5299,8 @@ mod tests {
                 hint_tag: "candidate-02-duma-gov-ru".to_string(),
                 vps_server_name: String::new(),
                 vps_port: 0,
+                vps_connect_host: String::new(),
+                vps_connect_port: 0,
                 vps_transport: String::new(),
                 vps_flow: String::new(),
                 vps_fingerprint: String::new(),
@@ -3779,6 +5334,8 @@ mod tests {
                 hint_tag: String::new(),
                 vps_server_name: "ads.x5.ru".to_string(),
                 vps_port: 20443,
+                vps_connect_host: String::new(),
+                vps_connect_port: 0,
                 vps_transport: "grpc".to_string(),
                 vps_flow: String::new(),
                 vps_fingerprint: "firefox".to_string(),
@@ -3840,6 +5397,8 @@ mod tests {
                 hint_tag: String::new(),
                 vps_server_name: "id.x5.ru".to_string(),
                 vps_port: 443,
+                vps_connect_host: String::new(),
+                vps_connect_port: 0,
                 vps_transport: "tcp".to_string(),
                 vps_flow: "xtls-rprx-vision".to_string(),
                 vps_fingerprint: "chrome".to_string(),
@@ -3891,6 +5450,8 @@ mod tests {
                 hint_tag: String::new(),
                 vps_server_name: "id.x5.ru".to_string(),
                 vps_port: 443,
+                vps_connect_host: String::new(),
+                vps_connect_port: 0,
                 vps_transport: "tcp".to_string(),
                 vps_flow: "xtls-rprx-vision".to_string(),
                 vps_fingerprint: "chrome".to_string(),
@@ -3938,6 +5499,8 @@ mod tests {
                 hint_tag: String::new(),
                 vps_server_name: "id.x5.ru".to_string(),
                 vps_port: 443,
+                vps_connect_host: String::new(),
+                vps_connect_port: 0,
                 vps_transport: "tcp".to_string(),
                 vps_flow: "xtls-rprx-vision".to_string(),
                 vps_fingerprint: "chrome".to_string(),
@@ -3984,6 +5547,8 @@ mod tests {
                 hint_tag: String::new(),
                 vps_server_name: "ads.x5.ru".to_string(),
                 vps_port: 20443,
+                vps_connect_host: String::new(),
+                vps_connect_port: 0,
                 vps_transport: "grpc".to_string(),
                 vps_flow: String::new(),
                 vps_fingerprint: "firefox".to_string(),
@@ -4017,6 +5582,8 @@ mod tests {
                 hint_tag: String::new(),
                 vps_server_name: "pimg.mycdn.me".to_string(),
                 vps_port: 10443,
+                vps_connect_host: String::new(),
+                vps_connect_port: 0,
                 vps_transport: "tcp".to_string(),
                 vps_flow: "xtls-rprx-vision".to_string(),
                 vps_fingerprint: String::new(),
@@ -4047,13 +5614,120 @@ mod tests {
     }
 
     #[test]
-    fn protocol_pack_includes_white_relay_entry() {
-        let entries = build_protocol_pack_for_transport("xray", Some(51820), Some(443), Some(56080));
+    fn owner_runtime_lab_patch_supports_yandex_edge_preset() {
+        let patched = apply_owner_runtime_lab_overrides(
+            r#"{"name":"Owner","serverHost":"95.81.120.226","stagedFallbacks":{"vlessReality":{"port":52443,"uuid":"fe05feb2-c88c-46bc-b809-ba9eefc5e6ee","flow":"xtls-rprx-vision","serverName":"www.cloudflare.com","publicKey":"EwRrvp8PKSyz5Fb2tgXG-4uv1UJfQw65yRTvoH36aw4","shortId":"2d2812af9d8e4cf4"}}}"#,
+            &OwnerRuntimeLabPayload {
+                mode: OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE.to_string(),
+                hint_server_name: String::new(),
+                hint_cidr_bucket: String::new(),
+                hint_source: String::new(),
+                hint_tag: String::new(),
+                vps_server_name: String::new(),
+                vps_port: 0,
+                vps_connect_host: String::new(),
+                vps_connect_port: 0,
+                vps_transport: String::new(),
+                vps_flow: String::new(),
+                vps_fingerprint: String::new(),
+                vps_grpc_service_name: String::new(),
+                vps_grpc_authority: String::new(),
+                vps_source: String::new(),
+                vps_tag: String::new(),
+                vps_owner_reality_egress: false,
+                vps_relay_autoselect: None,
+            },
+        )
+        .expect("owner runtime lab patch should support the Yandex edge preset");
+
+        let payload: Value =
+            serde_json::from_str(&patched).expect("patched profile should stay valid json");
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["connectHost"].as_str(),
+            Some(YANDEX_EDGE_CONNECT_HOST)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["connectPort"].as_u64(),
+            Some(YANDEX_EDGE_CONNECT_PORT as u64)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["source"].as_str(),
+            Some(YANDEX_EDGE_SOURCE)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["tag"].as_str(),
+            Some(YANDEX_EDGE_TAG)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["ownerRealityBootstrap"]["serverHost"]
+                .as_str(),
+            Some("95.81.120.226")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["ownerRealityBootstrap"]["port"].as_u64(),
+            Some(52443)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["serverName"].as_str(),
+            Some("www.cloudflare.com")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["port"].as_u64(),
+            Some(52443)
+        );
+        assert_eq!(
+            payload["stagedFallbacks"]["realityYandexEdge"]["originPort"].as_u64(),
+            Some(52443)
+        );
+        assert_eq!(
+            payload["stagedFallbacks"]["realityYandexEdge"]["publicKey"].as_str(),
+            Some("EwRrvp8PKSyz5Fb2tgXG-4uv1UJfQw65yRTvoH36aw4")
+        );
+        assert_eq!(
+            payload["stagedFallbacks"]["vlessReality"]["publicKey"].as_str(),
+            Some("EwRrvp8PKSyz5Fb2tgXG-4uv1UJfQw65yRTvoH36aw4")
+        );
+    }
+
+    #[test]
+    fn protocol_pack_includes_yandex_edge_entry() {
+        let mut staged = serde_json::json!({});
+        upsert_yandex_edge_fallback(&mut staged, curated_yandex_edge_fallback_value());
+        let entries =
+            build_protocol_pack_for_transport_with_fallbacks(
+                "xray",
+                Some(51820),
+                Some(443),
+                Some(56080),
+                Some(&staged),
+            );
         assert!(
             entries.iter().any(|entry| {
-                entry.id == "vless-reality-relay-direct" &&
-                    entry.label == "white relay" &&
-                    entry.port == 443
+                entry.id == "vless-reality-yandex-edge"
+                    && entry.label == "Yandex edge"
+                    && entry.port == YANDEX_EDGE_CONNECT_PORT
+            }),
+            "protocol pack should expose the Yandex edge mode for invite flows",
+        );
+    }
+
+    #[test]
+    fn protocol_pack_includes_white_relay_entry() {
+        let mut staged = serde_json::json!({});
+        super::ensure_reality_relay_owner_egress_fallback(&mut staged);
+        ensure_reality_relay_direct_fallback(&mut staged);
+        let entries = build_protocol_pack_for_transport_with_fallbacks(
+            "xray",
+            Some(51820),
+            Some(443),
+            Some(56080),
+            Some(&staged),
+        );
+        assert!(
+            entries.iter().any(|entry| {
+                entry.id == "vless-reality-relay-direct"
+                    && entry.label == "white relay"
+                    && entry.port == 443
             }),
             "protocol pack should expose the direct relay mode for deploy/invite flows",
         );
@@ -4071,5 +5745,51 @@ mod tests {
             staged["realityRelayDirect"]["sourceLabel"].as_str(),
             Some(OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL)
         );
+    }
+
+    #[test]
+    fn ensure_yandex_edge_fallback_adds_visible_edge_entry() {
+        let mut staged = serde_json::json!({});
+        upsert_yandex_edge_fallback(&mut staged, curated_yandex_edge_fallback_value());
+        assert_eq!(
+            staged["realityYandexEdge"]["connectHost"].as_str(),
+            Some(YANDEX_EDGE_CONNECT_HOST)
+        );
+        assert_eq!(
+            staged["realityYandexEdge"]["connectPort"].as_u64(),
+            Some(YANDEX_EDGE_CONNECT_PORT as u64)
+        );
+        assert_eq!(
+            staged["realityYandexEdge"]["originPort"].as_u64(),
+            Some(YANDEX_EDGE_ORIGIN_PORT as u64)
+        );
+    }
+
+    #[test]
+    fn parse_ipv4_cidr_matches_expected_ip() {
+        let cidr = parse_ipv4_cidr("62.84.120.0/22").expect("cidr should parse");
+        assert!(ipv4_in_cidr(
+            "62.84.123.148".parse::<Ipv4Addr>().expect("valid ip"),
+            &cidr
+        ));
+        assert!(!ipv4_in_cidr(
+            "62.85.123.148".parse::<Ipv4Addr>().expect("valid ip"),
+            &cidr
+        ));
+    }
+
+    #[test]
+    fn parse_whitelist_files_skips_comments_and_blank_lines() {
+        let parsed = parse_whitelist_files(
+            "\n# note\n62.84.123.148\n\n213.165.213.122\n",
+            "\n# note\n62.84.120.0/22\n213.165.192.0/19\n",
+            "2026-04-06T00:00:00Z",
+        )
+        .expect("whitelist lists should parse");
+
+        assert!(parsed
+            .exact_ips
+            .contains(&"62.84.123.148".parse::<Ipv4Addr>().expect("valid ip")));
+        assert_eq!(parsed.cidrs.len(), 2);
     }
 }

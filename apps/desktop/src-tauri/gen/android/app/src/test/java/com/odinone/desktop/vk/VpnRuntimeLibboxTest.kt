@@ -11,7 +11,7 @@ import org.junit.Test
 
 class VpnRuntimeLibboxTest {
     @Test
-    fun stableRealityDefaultsRemainConservative() {
+    fun stableRealityDefaultsUseEncryptedDns() {
         val normalized =
             VpnRuntimeLibbox.normalizeRuntimeArgs(
                 JSObject().apply {
@@ -24,7 +24,7 @@ class VpnRuntimeLibboxTest {
             )
 
         assertEquals("stable", normalized.getString("configMode", null))
-        assertEquals("udp", normalized.getString("dnsMode", null))
+        assertEquals("doh", normalized.getString("dnsMode", null))
         assertFalse(normalized.getBoolean("strictRoute", true))
         assertFalse(normalized.getBoolean("bootRestoreEnabled", true))
         assertTrue(normalized.getBoolean("allowPrivateNetworkBypass", false))
@@ -40,7 +40,7 @@ class VpnRuntimeLibboxTest {
         assertFeature(normalized, "mux:disabled")
         assertFeature(normalized, "family:direct-reality")
         assertFeature(normalized, "activation:active")
-        assertFeature(normalized, "dns:udp")
+        assertFeature(normalized, "dns:doh")
         assertFeature(normalized, "resolver:1.1.1.1")
         assertFeature(normalized, "dns-strategy:prefer_ipv4")
         assertFeature(normalized, "mode:stable")
@@ -833,6 +833,72 @@ class VpnRuntimeLibboxTest {
         assertEquals(443, normalized.optInt("frontConnectPort", 0))
         assertFeature(normalized, "reality-vps-connect:edge-owner.example.net")
         assertFeature(normalized, "reality-vps-connect-port:443")
+    }
+
+    @Test
+    fun realityVpsLabUsesYandexEdgeFallbackCredentialsWhenTheyMatchTheSelectedEdge() {
+        val config =
+            VpnRuntimeLibbox.renderRealityVpsLabConfigForTesting(
+                JSObject().apply {
+                    put("serverHost", "95.81.120.226")
+                    put("transport", "xray")
+                    put("engine", "sing-box")
+                    put("protocol", "vless-reality")
+                    put(
+                        "profileJson",
+                        """
+                        {
+                          "stagedFallbacks": {
+                            "vlessReality": {
+                              "port": 55555,
+                              "uuid": "old-direct-uuid",
+                              "flow": "xtls-rprx-vision",
+                              "serverName": "www.cloudflare.com",
+                              "publicKey": "oldDirectPublicKey",
+                              "shortId": "oldDirectShortId"
+                            },
+                            "realityYandexEdge": {
+                              "connectHost": "62.84.123.148",
+                              "connectPort": 443,
+                              "originHost": "95.81.120.226",
+                              "originPort": 55555,
+                              "uuid": "edge-uuid",
+                              "flow": "xtls-rprx-vision",
+                              "serverName": "www.cloudflare.com",
+                              "publicKey": "edgePublicKey",
+                              "shortId": "edgeShortId"
+                            }
+                          },
+                          "androidRuntime": {
+                            "realityVpsLab": {
+                              "enabled": true,
+                              "mode": "lab",
+                              "serverName": "www.cloudflare.com",
+                              "port": 55555,
+                              "connectHost": "62.84.123.148",
+                              "connectPort": 443,
+                              "transport": "tcp",
+                              "flow": "xtls-rprx-vision",
+                              "fingerprint": "chrome",
+                              "source": "owner-attached:yandex-edge",
+                              "tag": "yandex-edge-62-84-123-148"
+                            }
+                          }
+                        }
+                        """.trimIndent(),
+                    )
+                },
+            )
+
+        val parsed = JSONObject(config)
+        val mainOutbound = jsonArrayFindObjectWithString(parsed.getJSONArray("outbounds"), "tag", "main-out")
+        assertEquals("62.84.123.148", mainOutbound?.getString("server"))
+        assertEquals(443, mainOutbound?.getInt("server_port"))
+        assertEquals("edge-uuid", mainOutbound?.getString("uuid"))
+        val tls = mainOutbound?.getJSONObject("tls")
+        val reality = tls?.getJSONObject("reality")
+        assertEquals("edgePublicKey", reality?.getString("public_key"))
+        assertEquals("edgeShortId", reality?.getString("short_id"))
     }
 
     @Test
@@ -1995,7 +2061,7 @@ class VpnRuntimeLibboxTest {
     }
 
     @Test
-    fun explicitIncomingRealityOverridesWinOverPersistedHiddenPreset() {
+    fun legacyDefaultUdpIncomingRealityOverridesAreUpgradedToEncryptedDns() {
         val previous =
             JSObject().apply {
                 put("serverHost", "example.com")
@@ -2045,9 +2111,65 @@ class VpnRuntimeLibboxTest {
         val merged = mergePersistedHiddenRuntimeOverrides(previous, incoming)
         val normalized = VpnRuntimeLibbox.normalizeRuntimeArgs(merged)
 
-        assertEquals("udp", normalized.getString("dnsMode", null))
+        assertEquals("doh", normalized.getString("dnsMode", null))
         assertEquals("1.1.1.1", normalized.getString("dnsServer", null))
         assertEquals("cloudflare-dns.com", normalized.getString("dnsServerName", null))
+    }
+
+    @Test
+    fun explicitCustomUdpIncomingRealityOverridesStillWinOverPersistedHiddenPreset() {
+        val previous =
+            JSObject().apply {
+                put("serverHost", "example.com")
+                put("transport", "xray")
+                put("engine", "sing-box")
+                put("protocol", "vless-reality")
+                put("profileSource", "owner")
+                put("preserveHiddenRealityOverrides", true)
+                put(
+                    "profileJson",
+                    """
+                    {
+                      "androidRuntime": {
+                        "reality": {
+                          "dnsMode": "dot",
+                          "dnsServer": "8.8.8.8",
+                          "dnsServerName": "dns.google"
+                        }
+                      }
+                    }
+                    """.trimIndent(),
+                )
+            }
+        val incoming =
+            JSObject().apply {
+                put("serverHost", "example.com")
+                put("transport", "xray")
+                put("engine", "sing-box")
+                put("protocol", "vless-reality")
+                put("profileSource", "owner")
+                put(
+                    "profileJson",
+                    """
+                    {
+                      "androidRuntime": {
+                        "reality": {
+                          "dnsMode": "udp",
+                          "dnsServer": "9.9.9.9",
+                          "dnsServerName": "dns.quad9.net"
+                        }
+                      }
+                    }
+                    """.trimIndent(),
+                )
+            }
+
+        val merged = mergePersistedHiddenRuntimeOverrides(previous, incoming)
+        val normalized = VpnRuntimeLibbox.normalizeRuntimeArgs(merged)
+
+        assertEquals("udp", normalized.getString("dnsMode", null))
+        assertEquals("9.9.9.9", normalized.getString("dnsServer", null))
+        assertEquals("dns.quad9.net", normalized.getString("dnsServerName", null))
     }
 
     @Test

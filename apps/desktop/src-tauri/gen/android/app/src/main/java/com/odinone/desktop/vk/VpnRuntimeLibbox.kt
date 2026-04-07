@@ -1160,6 +1160,50 @@ object VpnRuntimeLibbox {
         )
     }
 
+    private fun readRealityVpsLabRelaySettings(
+        profile: JSObject,
+        serverHost: String,
+        fallback: RealitySettings,
+        options: RealityVpsLabRuntimeOptions,
+    ): RealitySettings {
+        val edge =
+            profile.optJSONObject("stagedFallbacks")
+                ?.optJSONObject("realityYandexEdge")
+                ?: return fallback
+        val connectHost = edge.optString("connectHost", "").trim()
+        val connectPort = edge.optInt("connectPort", 0)
+        val originPort = edge.optInt("originPort", 0)
+        if (
+            connectHost.isBlank() ||
+                connectPort <= 0 ||
+                originPort <= 0 ||
+                !connectHost.equals(options.connectHost, ignoreCase = true) ||
+                connectPort != options.connectPort ||
+                originPort != options.serverPort
+        ) {
+            return fallback
+        }
+
+        val uuid = edge.optString("uuid", "").trim()
+        val flow = edge.optString("flow", fallback.flow).trim().ifBlank { fallback.flow }
+        val serverName = edge.optString("serverName", "").trim()
+        val publicKey = edge.optString("publicKey", "").trim()
+        val shortId = edge.optString("shortId", "").trim()
+        if (uuid.isBlank() || serverName.isBlank() || publicKey.isBlank() || shortId.isBlank()) {
+            return fallback
+        }
+
+        return RealitySettings(
+            serverHost = serverHost,
+            serverPort = originPort,
+            uuid = uuid,
+            flow = flow,
+            serverName = serverName,
+            publicKey = publicKey,
+            shortId = shortId,
+        )
+    }
+
     private fun readWireGuardSettings(profile: JSObject): WireGuardSettings {
         val wireGuard =
             profile.optJSONObject("wireguard")
@@ -1282,11 +1326,12 @@ object VpnRuntimeLibbox {
         socksPort: Int,
         socksAddress: String,
     ): PreparedRuntime {
-        val relayReality = readRealitySettings(profile, serverHost)
-        val ownerReality = readRealityVpsLabOwnerBootstrapSettings(profile, serverHost) ?: relayReality
+        val directReality = readRealitySettings(profile, serverHost)
         val baseArgs = JSObject(args.toString()).apply { remove("configMode") }
         val baseOptions = readRealityRuntimeOptions(baseArgs, profile)
-        val options = readRealityVpsLabRuntimeOptions(args, profile, relayReality)
+        val options = readRealityVpsLabRuntimeOptions(args, profile, directReality)
+        val relayReality = readRealityVpsLabRelaySettings(profile, serverHost, directReality, options)
+        val ownerReality = readRealityVpsLabOwnerBootstrapSettings(profile, serverHost) ?: relayReality
         val scaffoldPath = File(runtimeDir, "reality-vps-lab-scaffold.json")
         scaffoldPath.writeText(buildRealityVpsLabScaffoldDocument(serverHost, ownerReality, baseOptions, options))
         if (options.activationState == ACTIVATION_STATE_ACTIVE) {
@@ -1442,7 +1487,7 @@ object VpnRuntimeLibbox {
                 .put(
                     "dns",
                     JSONObject()
-                        .put("servers", JSONArray().put(buildRealityDnsServer(options)))
+                        .put("servers", JSONArray().put(buildRealityDnsServer(options, "main-out")))
                         .put("final", "resolver")
                         .put("strategy", options.dnsStrategy)
                         .put("disable_cache", options.dnsDisableCache)
@@ -1871,7 +1916,7 @@ object VpnRuntimeLibbox {
                 .put(
                     "dns",
                     JSONObject()
-                        .put("servers", JSONArray().put(buildRealityDnsServer(options)))
+                        .put("servers", JSONArray().put(buildRealityDnsServer(options, "main-out")))
                         .put("final", "resolver")
                         .put("strategy", options.dnsStrategy)
                         .put("disable_cache", options.dnsDisableCache)
@@ -2128,6 +2173,23 @@ object VpnRuntimeLibbox {
         val reality = readRealitySettings(profile, serverHost)
         val options = readCdnAntiWhitelistRuntimeOptions(normalized, profile, serverHost)
         return buildCdnAntiWhitelistConfig(DEFAULT_SOCKS_PORT, reality, options)
+    }
+
+    internal fun renderRealityVpsLabConfigForTesting(args: JSObject): String {
+        val rawProfile = args.getString("profileJson", "{}") ?: "{}"
+        val profile = JSObject(rawProfile)
+        val serverHost = args.getString("serverHost", "")?.trim().orEmpty().ifBlank {
+            profile.optString("serverHost", "").trim()
+        }
+        require(serverHost.isNotBlank()) { "serverHost is required for reality-vps-lab config rendering" }
+        val directReality = readRealitySettings(profile, serverHost)
+        val normalized = normalizeRuntimeArgs(args)
+        val baseArgs = JSObject(normalized.toString()).apply { remove("configMode") }
+        val baseOptions = readRealityRuntimeOptions(baseArgs, profile)
+        val options = readRealityVpsLabRuntimeOptions(normalized, profile, directReality)
+        val relayReality = readRealityVpsLabRelaySettings(profile, serverHost, directReality, options)
+        val ownerReality = readRealityVpsLabOwnerBootstrapSettings(profile, serverHost) ?: relayReality
+        return buildRealityVpsLabConfig(DEFAULT_SOCKS_PORT, relayReality, ownerReality, baseOptions, options)
     }
 
     private fun buildCdnTransportObject(options: CdnAntiWhitelistRuntimeOptions): JSONObject =
@@ -3070,7 +3132,10 @@ object VpnRuntimeLibbox {
                     .put("Keep direct-reality on 443 as the stable default while validating these additive lab ports."),
             ).toString(2)
 
-    private fun buildRealityDnsServer(options: RealityRuntimeOptions): JSONObject =
+    private fun buildRealityDnsServer(
+        options: RealityRuntimeOptions,
+        detour: String,
+    ): JSONObject =
         when (options.dnsMode) {
             REALITY_DNS_MODE_DOH ->
                 JSONObject()
@@ -3079,6 +3144,7 @@ object VpnRuntimeLibbox {
                     .put("server", options.dnsServer)
                     .put("server_port", options.dnsServerPort ?: 443)
                     .put("path", options.dnsDohPath)
+                    .put("detour", detour)
                     .put(
                         "tls",
                         JSONObject().put("server_name", options.dnsServerName),
@@ -3090,6 +3156,7 @@ object VpnRuntimeLibbox {
                     .put("type", "tls")
                     .put("server", options.dnsServer)
                     .put("server_port", options.dnsServerPort ?: 853)
+                    .put("detour", detour)
                     .put(
                         "tls",
                         JSONObject().put("server_name", options.dnsServerName),
@@ -3101,6 +3168,7 @@ object VpnRuntimeLibbox {
                     .put("type", "udp")
                     .put("server", options.dnsServer)
                     .put("server_port", options.dnsServerPort ?: 53)
+                    .put("detour", detour)
         }
 
     private fun isCdnAntiWhitelistEnabled(profile: JSObject): Boolean {
@@ -3997,15 +4065,51 @@ object VpnRuntimeLibbox {
                 args.getString("configMode", null)
                     ?: profileOptions?.optString("mode").takeUnless { it.isNullOrBlank() },
             )
+        val rawDnsMode =
+            args.getString("dnsMode", null)
+                ?.trim()
+                .takeUnless { it.isNullOrBlank() }
+                ?: profileOptions?.optString("dnsMode").takeUnless { it.isNullOrBlank() }
+        val rawDnsServer =
+            args.getString("dnsServer", null)
+                ?.trim()
+                .takeUnless { it.isNullOrBlank() }
+                ?: profileOptions?.optString("dnsServer").takeUnless { it.isNullOrBlank() }
+        val rawDnsServerPort =
+            readNullableIntOption(
+                args = args,
+                key = "dnsServerPort",
+                fallback = profileOptions?.optInt("dnsServerPort"),
+            )
+        val rawDnsDohPath =
+            args.getString("dnsDohPath", null)
+                ?.trim()
+                .takeUnless { it.isNullOrBlank() }
+                ?: profileOptions?.optString("dnsDohPath").takeUnless { it.isNullOrBlank() }
+        val rawDnsServerName =
+            args.getString("dnsServerName", null)
+                ?.trim()
+                .takeUnless { it.isNullOrBlank() }
+                ?: profileOptions?.optString("dnsServerName").takeUnless { it.isNullOrBlank() }
         val dnsMode =
             normalizeRealityDnsMode(
-                args.getString("dnsMode", null)
-                    ?: profileOptions?.optString("dnsMode").takeUnless { it.isNullOrBlank() }
-                    ?: if (mode == REALITY_MODE_EXPERIMENTAL) {
+                when {
+                    shouldUpgradeLegacyDefaultDnsToDoh(
+                        mode = mode,
+                        rawDnsMode = rawDnsMode,
+                        rawDnsServer = rawDnsServer,
+                        rawDnsServerPort = rawDnsServerPort,
+                        rawDnsServerName = rawDnsServerName,
+                        rawDnsDohPath = rawDnsDohPath,
+                    ) -> REALITY_DNS_MODE_DOH
+                    rawDnsMode != null -> rawDnsMode
+                    mode == REALITY_MODE_EXPERIMENTAL -> {
                         REALITY_DNS_MODE_DOT
-                    } else {
-                        REALITY_DNS_MODE_UDP
-                    },
+                    }
+                    else -> {
+                        REALITY_DNS_MODE_DOH
+                    }
+                },
             )
         val strictRoute =
             args.getBoolean(
@@ -4037,33 +4141,15 @@ object VpnRuntimeLibbox {
                         ?: REALITY_NETWORK_RELOAD_DEBOUNCE_DEFAULT_MS,
                 ),
             )
-        val dnsServer =
-            args.getString("dnsServer", null)
-                ?.trim()
-                .takeUnless { it.isNullOrBlank() }
-                ?: profileOptions?.optString("dnsServer").takeUnless { it.isNullOrBlank() }
-                ?: REALITY_DNS_DEFAULT_SERVER
-        val dnsServerPort =
-            readNullableIntOption(
-                args = args,
-                key = "dnsServerPort",
-                fallback = profileOptions?.optInt("dnsServerPort"),
-            )
+        val dnsServer = rawDnsServer ?: REALITY_DNS_DEFAULT_SERVER
+        val dnsServerPort = rawDnsServerPort
         val dnsDohPath =
             normalizeDohPath(
-                args.getString("dnsDohPath", null)
-                    ?.trim()
-                    .takeUnless { it.isNullOrBlank() }
-                    ?: profileOptions?.optString("dnsDohPath").takeUnless { it.isNullOrBlank() }
-                    ?: REALITY_DNS_DEFAULT_DOH_PATH,
+                rawDnsDohPath ?: REALITY_DNS_DEFAULT_DOH_PATH,
             )
         val dnsServerName =
             normalizeRealityDnsServerName(
-                rawValue =
-                    args.getString("dnsServerName", null)
-                        ?.trim()
-                        .takeUnless { it.isNullOrBlank() }
-                        ?: profileOptions?.optString("dnsServerName").takeUnless { it.isNullOrBlank() },
+                rawValue = rawDnsServerName,
                 dnsServer = dnsServer,
                 dnsMode = dnsMode,
             )
@@ -4239,6 +4325,40 @@ object VpnRuntimeLibbox {
             REALITY_DNS_STRATEGY_IPV6_ONLY -> REALITY_DNS_STRATEGY_IPV6_ONLY
             else -> REALITY_DNS_STRATEGY_PREFER_IPV4
         }
+
+    private fun shouldUpgradeLegacyDefaultDnsToDoh(
+        mode: String,
+        rawDnsMode: String?,
+        rawDnsServer: String?,
+        rawDnsServerPort: Int?,
+        rawDnsServerName: String?,
+        rawDnsDohPath: String?,
+    ): Boolean {
+        if (mode == REALITY_MODE_EXPERIMENTAL) {
+            return false
+        }
+        if (rawDnsMode?.trim()?.lowercase(Locale.ROOT) != REALITY_DNS_MODE_UDP) {
+            return false
+        }
+        val server = rawDnsServer?.trim().takeUnless { it.isNullOrBlank() } ?: REALITY_DNS_DEFAULT_SERVER
+        val port = rawDnsServerPort ?: 53
+        val serverName =
+            rawDnsServerName
+                ?.trim()
+                .takeUnless { it.isNullOrBlank() }
+                ?: REALITY_DNS_DEFAULT_SERVER_NAME
+        val dohPath =
+            normalizeDohPath(
+                rawDnsDohPath
+                    ?.trim()
+                    .takeUnless { it.isNullOrBlank() }
+                    ?: REALITY_DNS_DEFAULT_DOH_PATH,
+            )
+        return server == REALITY_DNS_DEFAULT_SERVER &&
+            port == 53 &&
+            serverName.equals(REALITY_DNS_DEFAULT_SERVER_NAME, ignoreCase = true) &&
+            dohPath == REALITY_DNS_DEFAULT_DOH_PATH
+    }
 
     private fun normalizeRealityNetworkReloadDebounceMs(value: Long): Long =
         value.coerceIn(REALITY_NETWORK_RELOAD_DEBOUNCE_MIN_MS, REALITY_NETWORK_RELOAD_DEBOUNCE_MAX_MS)
@@ -4834,9 +4954,14 @@ object VpnRuntimeLibbox {
             "servers": [
               {
                 "tag": "resolver",
-                "type": "udp",
+                "type": "https",
                 "server": "1.1.1.1",
-                "server_port": 53
+                "server_port": 443,
+                "path": "/dns-query",
+                "detour": "wg-ep",
+                "tls": {
+                  "server_name": "cloudflare-dns.com"
+                }
               }
             ],
             "final": "resolver",

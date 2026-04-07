@@ -71,16 +71,19 @@ type InviteProfileResponse struct {
 		UUID       string `json:"uuid"`
 		Flow       string `json:"flow"`
 	} `json:"vlessReality,omitempty"`
-	SupportsReality bool   `json:"supportsReality,omitempty"`
-	SupportsVKRelay bool   `json:"supportsVKRelay,omitempty"`
-	ShareCode       string `json:"shareCode"`
-	RawJSON         string `json:"rawJson"`
-	LocalPath       string `json:"localPath,omitempty"`
-	ImportedAt      string `json:"importedAt,omitempty"`
-	CreatedAt       string `json:"createdAt,omitempty"`
-	RevokedAt       string `json:"revokedAt,omitempty"`
-	Status          string `json:"status,omitempty"`
-	Error           string `json:"error,omitempty"`
+	SupportsReality      bool                `json:"supportsReality,omitempty"`
+	SupportsVKRelay      bool                `json:"supportsVKRelay,omitempty"`
+	SupportsRealityRelay bool                `json:"supportsRealityRelay,omitempty"`
+	ProtocolPack         []ProtocolPackEntry `json:"protocolPack,omitempty"`
+	StagedFallbacks      map[string]any      `json:"stagedFallbacks,omitempty"`
+	ShareCode            string              `json:"shareCode"`
+	RawJSON              string              `json:"rawJson"`
+	LocalPath            string              `json:"localPath,omitempty"`
+	ImportedAt           string              `json:"importedAt,omitempty"`
+	CreatedAt            string              `json:"createdAt,omitempty"`
+	RevokedAt            string              `json:"revokedAt,omitempty"`
+	Status               string              `json:"status,omitempty"`
+	Error                string              `json:"error,omitempty"`
 }
 
 func GenerateGuestInvite(host, name string) InviteProfileResponse {
@@ -119,22 +122,32 @@ func GetImportedInvite(host string) InviteProfileResponse {
 }
 
 func buildInviteResponse(invite inviteProfile, localPath string) InviteProfileResponse {
+	stagedFallbacks := effectiveInviteStagedFallbacks(invite)
 	raw, _ := json.MarshalIndent(invite, "", "  ")
 	return InviteProfileResponse{
-		ID:              invite.ID,
-		Role:            invite.Role,
-		Name:            invite.Name,
-		Protocol:        invite.Protocol,
-		Transport:       invite.Transport,
-		ServerHost:      invite.ServerHost,
-		VKTurnProxyPort: invite.VKTurnProxyPort,
-		WireGuardPort:   invite.WireGuardPort,
-		EndpointPort:    invite.EndpointPort,
-		Endpoint:        invite.Endpoint,
-		Fingerprint:     invite.Fingerprint,
-		VLESSReality:    invite.VLESSReality,
-		SupportsReality: inviteSupportsReality(invite),
-		SupportsVKRelay: inviteSupportsVKRelay(invite),
+		ID:                   invite.ID,
+		Role:                 invite.Role,
+		Name:                 invite.Name,
+		Protocol:             invite.Protocol,
+		Transport:            invite.Transport,
+		ServerHost:           invite.ServerHost,
+		VKTurnProxyPort:      invite.VKTurnProxyPort,
+		WireGuardPort:        invite.WireGuardPort,
+		EndpointPort:         invite.EndpointPort,
+		Endpoint:             invite.Endpoint,
+		Fingerprint:          invite.Fingerprint,
+		VLESSReality:         invite.VLESSReality,
+		SupportsReality:      inviteSupportsReality(invite),
+		SupportsVKRelay:      inviteSupportsVKRelay(invite),
+		SupportsRealityRelay: inviteSupportsRealityRelay(invite),
+		ProtocolPack: buildProtocolPackWithFallbacks(
+			Transport(invite.Transport),
+			effectiveInviteWireGuardPort(invite),
+			effectiveInviteRealityPort(invite),
+			invite.VKTurnProxyPort,
+			stagedFallbacks,
+		),
+		StagedFallbacks: stagedFallbacks,
 		ShareCode:       shareCodePrefix + base64.RawURLEncoding.EncodeToString(raw),
 		RawJSON:         string(raw),
 		LocalPath:       localPath,
@@ -164,6 +177,8 @@ func decodeInvite(shareCode string) (inviteProfile, string, error) {
 		return invite, "", fmt.Errorf("parse invite profile: %w", err)
 	}
 	invite.Protocol = normalizedInviteProtocol(invite)
+	ensureRealityRelayDirectFallback(invite.StagedFallbacks)
+	ensureRealityRelayOwnerEgressFallback(invite.StagedFallbacks)
 	if invite.VLESSReality.Flow == "" && invite.Protocol == string(ProtocolVLESSReality) {
 		invite.VLESSReality.Flow = "xtls-rprx-vision"
 	}
@@ -219,6 +234,12 @@ func inviteSupportsReality(invite inviteProfile) bool {
 
 func inviteSupportsVKRelay(invite inviteProfile) bool {
 	return invite.VKTurnProxyPort > 0 && effectiveInviteWireGuardPort(invite) > 0 && inviteHasWireGuard(invite)
+}
+
+func inviteSupportsRealityRelay(invite inviteProfile) bool {
+	_, ownerMode := invite.StagedFallbacks["realityRelayOwnerEgress"]
+	_, directMode := invite.StagedFallbacks["realityRelayDirect"]
+	return ownerMode || directMode
 }
 
 func inviteMatchesTransport(invite inviteProfile, transport string) bool {
@@ -624,6 +645,11 @@ func loadRemoteAccessState(client *ssh.Client) (inviteProfile, string, remoteXra
 	if err := json.Unmarshal([]byte(ownerText), &owner); err != nil {
 		return owner, "", xrayState, fmt.Errorf("parse remote owner profile: %w", err)
 	}
+	if owner.StagedFallbacks == nil {
+		owner.StagedFallbacks = map[string]any{}
+	}
+	ensureRealityRelayDirectFallback(owner.StagedFallbacks)
+	ensureRealityRelayOwnerEgressFallback(owner.StagedFallbacks)
 	if reality, err := readInviteRealityFallback(owner); err == nil {
 		owner.VLESSReality.Port = reality.Port
 		owner.VLESSReality.ServerName = reality.ServerName
@@ -813,6 +839,23 @@ func effectiveRealityPort(owner inviteProfile, xrayState remoteXrayState) int {
 	return 0
 }
 
+func effectiveInviteRealityPort(invite inviteProfile) int {
+	if reality, err := readInviteRealityFallback(invite); err == nil {
+		return reality.Port
+	}
+	return invite.VLESSReality.Port
+}
+
+func effectiveInviteStagedFallbacks(invite inviteProfile) map[string]any {
+	staged := map[string]any{}
+	for key, value := range invite.StagedFallbacks {
+		staged[key] = value
+	}
+	ensureRealityRelayDirectFallback(staged)
+	ensureRealityRelayOwnerEgressFallback(staged)
+	return staged
+}
+
 func enrichInviteProfile(invite *inviteProfile, owner inviteProfile, xrayState remoteXrayState) {
 	invite.Protocol = normalizedInviteProtocol(*invite)
 	if invite.Status == "" {
@@ -824,6 +867,11 @@ func enrichInviteProfile(invite *inviteProfile, owner inviteProfile, xrayState r
 	if invite.ServerHost == "" {
 		invite.ServerHost = owner.ServerHost
 	}
+	if len(invite.StagedFallbacks) == 0 {
+		invite.StagedFallbacks = effectiveInviteStagedFallbacks(owner)
+	}
+	ensureRealityRelayDirectFallback(invite.StagedFallbacks)
+	ensureRealityRelayOwnerEgressFallback(invite.StagedFallbacks)
 	if invite.VKTurnProxyPort == 0 {
 		invite.VKTurnProxyPort = owner.VKTurnProxyPort
 	}

@@ -1,6 +1,6 @@
 [package]
 name = "odin-one-desktop"
-version = "0.4.1"
+version = "0.5.1"
 description = "Odin One desktop shell"
 authors = ["Odin One"]
 license = ""
@@ -19,6 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 getrandom = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["brotli", "gzip", "rustls-tls"] }
 russh = { version = "0.58.1", default-features = false, features = ["ring"] }
 sha2 = "0.10"
 x25519-dalek = { version = "2", features = ["static_secrets"] }

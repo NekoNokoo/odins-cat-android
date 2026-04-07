@@ -1,13 +1,17 @@
 import type {
   DeploymentState,
   DeployStage,
+  InviteFileExportResult,
+  InviteFileShareResult,
   InviteProfile,
   LocalTunnelState,
   OwnerRuntimeLabRequest,
   OwnerAccessProfile,
+  ProvisionRequest,
   ServerDraft,
   SystemProxyState,
-  ValidationResponse
+  ValidationResponse,
+  WhitelistLookupResult
 } from "@whitelist/contracts";
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_CORE_API_URL ?? "http://127.0.0.1:18088";
@@ -23,11 +27,6 @@ export type CoreApiResult<T> = {
   ok: boolean;
   status: number;
   data: T;
-};
-
-type ProvisionRequest = {
-  server: ServerDraft;
-  secret: string;
 };
 
 type LocalTunnelStartRequest = ProvisionRequest & {
@@ -76,6 +75,15 @@ async function prefersAndroidNativeBridge() {
 
   const tauriCore = await loadTauriCore();
   return Boolean(tauriCore?.isTauri() && /Android/i.test(window.navigator.userAgent));
+}
+
+async function hasTauriBridge() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const tauriCore = await loadTauriCore();
+  return Boolean(tauriCore?.isTauri());
 }
 
 async function invokeNative<T>(command: string, args?: Record<string, unknown>): Promise<CoreApiResult<T>> {
@@ -349,5 +357,62 @@ export const coreApi = {
       return invokeNative<InviteProfile>("mobile_import_profile", { shareCode: payload.shareCode });
     }
     return postJson<InviteProfile>("/api/profile/import", payload);
+  },
+
+  async checkWhitelistIp(ip: string) {
+    if (await prefersAndroidNativeBridge()) {
+      return invokeNative<WhitelistLookupResult>("mobile_check_whitelist_ip", { ip });
+    }
+    return unsupportedResult(
+      501,
+      {
+        ip,
+        valid: false,
+        matchedIp: false,
+        matchedCidr: false,
+        matchedCidrs: [],
+        checkedAt: new Date().toISOString(),
+        cached: false,
+        sourceRepo: "https://github.com/hxehex/russia-mobile-internet-whitelist",
+        ipListUrl:
+          "https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/ipwhitelist.txt",
+        cidrListUrl:
+          "https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/cidrwhitelist.txt",
+        error: "Whitelist IP lookup is currently available only through the Android native bridge."
+      } satisfies WhitelistLookupResult
+    );
+  },
+
+  async exportInviteFile(contents: string) {
+    if (await hasTauriBridge()) {
+      return invokeNative<InviteFileExportResult>("mobile_export_invite_file", { contents });
+    }
+    return unsupportedResult(
+      501,
+      {
+        fileName: "",
+        exportPath: "",
+        rawJson: "",
+        shareCode: "",
+        error: "Native invite file export is unavailable."
+      } as InviteFileExportResult & { error: string }
+    );
+  },
+
+  async shareInviteFile(fileName: string, contents: string) {
+    if (await prefersAndroidNativeBridge()) {
+      return invokeNative<InviteFileShareResult>("mobile_share_invite_file", {
+        fileName,
+        contents
+      });
+    }
+    return unsupportedResult(
+      501,
+      {
+        ok: false,
+        fileName,
+        error: "Native invite file sharing is currently available only through the Android bridge."
+      } as InviteFileShareResult & { error: string }
+    );
   }
 };

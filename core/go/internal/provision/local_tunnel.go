@@ -247,6 +247,11 @@ func GetLocalOwnerProfile(host string) OwnerProfileResponse {
 			Error:     fmt.Sprintf("parse local owner profile: %v", err),
 		}
 	}
+	if profile.StagedFallbacks == nil {
+		profile.StagedFallbacks = map[string]any{}
+	}
+	ensureRealityRelayDirectFallback(profile.StagedFallbacks)
+	ensureRealityRelayOwnerEgressFallback(profile.StagedFallbacks)
 
 	resp := OwnerProfileResponse{
 		Exists:          true,
@@ -258,7 +263,13 @@ func GetLocalOwnerProfile(host string) OwnerProfileResponse {
 		EndpointPort:    effectiveOwnerEndpointPort(profile),
 		LocalPath:       targetPath,
 		RawJSON:         string(data),
-		ProtocolPack:    slices.Clone(profile.ProtocolPack),
+		ProtocolPack: buildProtocolPackWithFallbacks(
+			Transport(profile.Transport),
+			effectiveOwnerEndpointPort(profile),
+			realityPortFromStagedFallbacks(profile.StagedFallbacks),
+			profile.VKTurnProxyPort,
+			profile.StagedFallbacks,
+		),
 		StagedFallbacks: profile.StagedFallbacks,
 	}
 	resp.WireGuard.ServerPublicKey = profile.WireGuard.ServerPublicKey
@@ -595,11 +606,12 @@ func buildVKRelayRuntimeProfile(profile ownerProfile, relayPort int) (ownerProfi
 	profile.VKTurnProxyPort = relayPort
 	profile.EndpointPort = relayPort
 	profile.ActiveProtocol = activeProtocolID(TransportVKTurnProxyXray)
-	profile.ProtocolPack = buildProtocolPack(
+	profile.ProtocolPack = buildProtocolPackWithFallbacks(
 		TransportVKTurnProxyXray,
 		wireGuardPort,
 		realityPortFromStagedFallbacks(profile.StagedFallbacks),
 		relayPort,
+		profile.StagedFallbacks,
 	)
 	return profile, nil
 }
@@ -774,11 +786,12 @@ func loadImportedProfile(host string, transport Transport) (ownerProfile, error)
 			},
 		}
 	}
-	profile.ProtocolPack = buildProtocolPack(
+	profile.ProtocolPack = buildProtocolPackWithFallbacks(
 		Transport(profile.Transport),
 		effectiveInviteWireGuardPort(invite),
 		realityPortFromStagedFallbacks(profile.StagedFallbacks),
 		invite.VKTurnProxyPort,
+		profile.StagedFallbacks,
 	)
 
 	return profile, nil

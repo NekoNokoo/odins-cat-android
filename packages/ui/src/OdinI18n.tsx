@@ -1,14 +1,23 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 
 export type Locale = "ru" | "en";
 
 const dictionaries = {
   ru: {
     appTag: "macOS MVP / self-hosted",
-    appSubtitle: "Self-hosted VPN deployer with an isolated test tunnel for macOS.",
-    appSubtitleCompact: "Телефонный shell для self-hosted VPN с коротким connect flow.",
+    appSubtitle:
+      "Self-hosted VPN deployer with an isolated test tunnel for macOS.",
+    appSubtitleCompact:
+      "Телефонный shell для self-hosted VPN с коротким connect flow.",
     language: "Язык",
     ru: "RU",
     en: "EN",
@@ -16,12 +25,43 @@ const dictionaries = {
     tabAccess: "Доступ",
     tabTunnel: "Туннель",
     navProtocol: "Режим",
+    navWhitelist: "White IP",
     navLogs: "Логи",
-    navMore: "Ещё",
+    navMore: "ПОДЕЛИТЬСЯ",
     sheetServerTitle: "Сервер",
     sheetProtocolTitle: "Режим",
+    sheetWhitelistTitle: "White IP / CIDR",
     sheetLogsTitle: "Логи и тест",
-    sheetMoreTitle: "Ещё",
+    sheetMoreTitle: "ПОДЕЛИТЬСЯ",
+    whitelistEyebrow: "Whitelist check",
+    whitelistInputLabel: "Проверка IPv4",
+    whitelistCardTitle: "Проверить IP сервера",
+    sheetWhitelistText: "",
+    whitelistIpv4: "IPv4",
+    whitelistCheck: "Проверить IP",
+    whitelistChecking: "Проверяем...",
+    whitelistExactIp: "Точный IP",
+    whitelistCidr: "CIDR",
+    whitelistMatchYes: "Да",
+    whitelistMatchNo: "Нет",
+    whitelistMatchedCidrs: "Совпавшие CIDR",
+    whitelistNoCidrs: "CIDR-совпадений для этого IP сейчас нет.",
+    whitelistSource: "Источник",
+    whitelistCheckedAt: "Проверено",
+    whitelistFetchedAt: "Списки обновлены",
+    whitelistSourceLive: "live",
+    whitelistSourceCached: "cache",
+    whitelistUsingCache:
+      "GitHub сейчас не обновился, поэтому показан сохранённый кэш списков.",
+    whitelistInvalid: "Введите корректный IPv4-адрес.",
+    whitelistResultExactAndCidr:
+      "IP найден и в точном whitelist, и внутри разрешённого CIDR.",
+    whitelistResultIpOnly:
+      "IP найден в точном whitelist. Это самый сильный положительный матч.",
+    whitelistResultCidrOnly:
+      "Точного IP в списке нет, но он входит в разрешённый CIDR.",
+    whitelistResultMissing:
+      "В текущих ipwhitelist.txt и cidrwhitelist.txt совпадений не найдено.",
     serverInput: "Данные сервера",
     remoteNode: "Удалённый узел",
     host: "Хост",
@@ -38,11 +78,25 @@ const dictionaries = {
     engineSingBox: "sing-box",
     runtimeMode: "Режим доступа",
     runtimeModeReality: "VLESS + REALITY",
-    runtimeModeVk: "VK relay",
-    runtimeModeRelayOwner: "white tunel",
-    runtimeModeRelayDirect: "white relay",
-    runtimeModeRealityHint: "Основной режим. Клиент поднимает прямой VLESS + REALITY path без нового server-side deploy.",
-    runtimeModeVkHint: "Использует уже развернутый VK relay на том же сервере. Нужна только свежая ссылка звонка VK.",
+    runtimeModeYandexEdge: "YANDEX EDGE",
+    runtimeModeVk: "VK RELAY",
+    runtimeModeRelayOwner: "WHITE TUNEL",
+    runtimeModeRelayDirect: "WHITE RELAY",
+    modeStatusLive: "live",
+    modeStatusReady: "ready",
+    modeStatusOptional: "optional",
+    modeStatusAttach: "attach step 2",
+    modeStatusLocked: "locked",
+    changeMode: "Сменить",
+    sheetModePickerTitle: "Выбор режима",
+    sheetModePickerText:
+      "Нажмите на нужный режим. Выбрать можно только те варианты, которые уже есть в текущем профиле.",
+    runtimeModeRealityHint:
+      "Основной режим. Клиент поднимает прямой VLESS + REALITY path без нового server-side deploy.",
+    runtimeModeYandexEdgeHint:
+      "Новый visible mode. Клиент идёт в стабильный REALITY path через российский edge, не меняя основной прямой маршрут.",
+    runtimeModeVkHint:
+      "Использует уже развернутый VK relay на том же сервере. Нужна только свежая ссылка звонка VK.",
     runtimeModeRelayOwnerHint:
       "white tunel. Клиент сначала поднимает внешний REALITY relay, а затем выпускает трафик уже через ваш сервер.",
     runtimeModeRelayDirectHint:
@@ -50,12 +104,16 @@ const dictionaries = {
     portSetup: "Публичные порты",
     portSetupAuto: "Авто",
     portSetupManual: "Вручную",
-    portSetupAutoHint: "Сервер сам подберёт свободные публичные порты для VK relay и REALITY при следующем deploy.",
-    portSetupManualHint: "Зафиксируйте два публичных порта: VK relay по UDP и VLESS + REALITY по TCP.",
+    portSetupAutoHint:
+      "Сервер сам подберёт свободные публичные порты для VK relay и REALITY при следующем deploy.",
+    portSetupManualHint:
+      "Зафиксируйте два публичных порта: VK relay по UDP и VLESS + REALITY по TCP.",
     vkRelayPort: "VK relay порт (UDP)",
     realityPort: "REALITY порт (TCP)",
-    manualPortsRequired: "Для ручного режима нужно указать оба публичных порта: VK relay и REALITY.",
-    manualPortsDistinct: "VK relay и REALITY должны использовать разные номера портов.",
+    manualPortsRequired:
+      "Для ручного режима нужно указать оба публичных порта: VK relay и REALITY.",
+    manualPortsDistinct:
+      "VK relay и REALITY должны использовать разные номера портов.",
     protocolMode: "Direct protocol",
     protocolWireGuard: "WireGuard over xray",
     protocolReality: "VLESS + REALITY",
@@ -70,29 +128,49 @@ const dictionaries = {
     stoppingTunnel: "Остановка...",
     startDeploy: "Развернуть",
     deploySuccess: "Развёртывание прошло успешно.",
+    edgeAttachSuccess:
+      "Yandex edge подключён. Перевыпустите invite key, чтобы новый режим попал в share code.",
+    validateOrigin: "Проверить origin",
+    validateEdge: "Проверить edge",
+    attachEdge: "Подключить edge",
     reset: "Сбросить",
+    deployStepOrigin: "Шаг 1",
+    deployStepOriginTitle: "Origin deploy",
+    deployStepOriginText:
+      "Базовый deploy на иностранный сервер. После него уже работают обычные режимы и можно выпустить обычный invite key.",
+    deployStepEdge: "Шаг 2",
+    deployStepEdgeTitle: "Yandex edge attach",
+    deployStepEdgeText:
+      "Опциональный additive шаг. Поднимает whitelist-facing вход через Yandex edge и добавляет пятый visible режим без ротации stable REALITY path.",
+    edgeHost: "Edge host",
+    edgePublicPort: "Публичный edge port",
     deploymentPrefix: "Развёртывание",
     deploymentDetails: "Ход развёртывания",
     validationDetails: "Результат проверки",
     close: "Закрыть",
     validation: "Проверка",
     serverChecks: "Проверки сервера",
-    validationEmpty: "Запустите проверку, чтобы увидеть доступ по SSH, готовность сервера и пригодность для развёртывания.",
+    validationEmpty:
+      "Запустите проверку, чтобы увидеть доступ по SSH, готовность сервера и пригодность для развёртывания.",
     provisioning: "Развёртывание",
     provisioningState: "Состояние развёртывания",
-    provisioningEmpty: "План развёртывания появится после первого запроса к Go core.",
+    provisioningEmpty:
+      "План развёртывания появится после первого запроса к Go core.",
     macTest: "Тест на macOS",
     isolatedTunnel: "Локальный изолированный туннель",
     vpnMode: "Режим VPN для macOS",
-    vpnModeText: "Одна кнопка поднимает direct-туннель Odin One и включает системный SOCKS proxy macOS для обычных приложений.",
+    vpnModeText:
+      "Одна кнопка поднимает direct-туннель Odin One и включает системный SOCKS proxy macOS для обычных приложений.",
     enableVpn: "Включить VPN",
     disableVpn: "Выключить VPN",
     enablingVpn: "Включаем VPN...",
     disablingVpn: "Выключаем VPN...",
     vpnEnabled: "VPN-режим включен",
     vpnDisabled: "VPN-режим выключен.",
-    tunnelIntro: "Этот режим поднимает только локальный SOCKS-прокси. Системные маршруты и глобальные настройки интернета macOS не меняются.",
-    directTunnelIntro: "Этот режим поднимает обычный прямой SOCKS-туннель через xray без VK. Системные маршруты и глобальные настройки интернета macOS не меняются.",
+    tunnelIntro:
+      "Этот режим поднимает только локальный SOCKS-прокси. Системные маршруты и глобальные настройки интернета macOS не меняются.",
+    directTunnelIntro:
+      "Этот режим поднимает обычный прямой SOCKS-туннель через xray без VK. Системные маршруты и глобальные настройки интернета macOS не меняются.",
     startTunnel: "Запустить туннель",
     startRealityTunnel: "Запустить REALITY",
     stopTunnel: "Остановить туннель",
@@ -104,66 +182,93 @@ const dictionaries = {
     ready: "Готово",
     local: "Локально",
     quickTest: "Быстрый тест",
-    quickTestText: "Приложение может безопасно выполнить эту проверку само, но команда остаётся доступной для ручного запуска.",
+    quickTestText:
+      "Приложение может безопасно выполнить эту проверку само, но команда остаётся доступной для ручного запуска.",
     systemProxy: "Системный прокси macOS",
-    systemProxyText: "Этот режим явно включает системный SOCKS5 proxy для активного сетевого сервиса macOS. Default route не меняется, но обычные приложения начнут ходить через Odin One до выключения.",
+    systemProxyText:
+      "Этот режим явно включает системный SOCKS5 proxy для активного сетевого сервиса macOS. Default route не меняется, но обычные приложения начнут ходить через Odin One до выключения.",
     enableSystemProxy: "Включить для всей системы",
     disableSystemProxy: "Выключить системный прокси",
     systemProxyEnabled: "Системный SOCKS proxy включён.",
     systemProxyDisabled: "Системный SOCKS proxy сейчас выключен.",
     networkService: "Сетевой сервис",
     tunnelCooldown: "Пауза VK",
-    tunnelCooldownText: "VK временно ограничил выдачу TURN-данных. Дождитесь окончания паузы, используйте новую ссылку и повторите только один запуск.",
+    tunnelCooldownText:
+      "VK временно ограничил выдачу TURN-данных. Дождитесь окончания паузы, используйте новую ссылку и повторите только один запуск.",
     lastTest: "Последний тест",
-    lastTestPassedVK: "Изолированный туннель успешно выполнил реальный исходящий запрос через VK и ваш сервер.",
-    lastTestPassedDirect: "Изолированный туннель успешно выполнил реальный исходящий запрос напрямую через ваш сервер.",
-    lastTestRunning: "Один запрос сейчас отправляется через локальный SOCKS-туннель.",
+    lastTestPassedVK:
+      "Изолированный туннель успешно выполнил реальный исходящий запрос через VK и ваш сервер.",
+    lastTestPassedDirect:
+      "Изолированный туннель успешно выполнил реальный исходящий запрос напрямую через ваш сервер.",
+    lastTestRunning:
+      "Один запрос сейчас отправляется через локальный SOCKS-туннель.",
     lastTestFailed: "Последний изолированный запрос завершился ошибкой.",
     lastTestIdle: "",
     target: "Цель",
     error: "Ошибка",
     fail: "Ошибка",
     safeMode: "Безопасный режим",
-    safeModeText: "Приложение использует только localhost-порты. Нет смены default route, системного прокси или глобального VPN-профиля.",
+    safeModeText:
+      "Приложение использует только localhost-порты. Нет смены default route, системного прокси или глобального VPN-профиля.",
     sharing: "Доступ",
     ownerProfile: "Ключ подключения",
     accessKeyTab: "Мой ключ",
     accessShareTab: "Передать",
     accessImportTab: "Импорт",
-    ownerProfileIntro: "После успешного развёртывания Odin One сохраняет локальный ключ подключения для владельца сервера. Этот ключ можно экспортировать и передать другому пользователю для ручного импорта.",
+    ownerProfileIntro:
+      "После успешного развёртывания Odin One сохраняет локальный ключ подключения для владельца сервера. Этот ключ можно экспортировать и передать другому пользователю для ручного импорта.",
     refreshProfile: "Обновить профиль",
     guestAccess: "Передача доступа",
-    guestAccessIntro: "Здесь можно сгенерировать ключ подключения из уже сохранённого профиля владельца и передать его другому пользователю без SSH и без запуска туннеля.",
+    guestAccessIntro:
+      "Здесь можно сгенерировать ключ подключения из уже сохранённого профиля владельца и передать его другому пользователю без SSH и без запуска туннеля.",
     generateShareCode: "Сгенерировать ключ подключения",
-    guestAccessNeedsSecret: "Введите owner secret, чтобы сгенерировать новый ключ подключения.",
+    inviteBundleHint:
+      "Один share code передаёт все режимы, которые реально присутствуют в текущем owner profile. После edge attach перевыпустите ключ, чтобы в нём появился и Yandex edge.",
+    guestAccessNeedsSecret:
+      "Введите owner secret, чтобы сгенерировать новый ключ подключения.",
     guestAccessOwnerOnly:
       "Сейчас это устройство использует импортированный invite key. Новые ключи подключения можно выпускать только с owner device.",
     copyShareCode: "Скопировать share code",
     copyJson: "Скопировать JSON",
     copied: "Скопировано",
+    exportProfileFile: "Экспортировать файл",
+    exportProfileFileStarted: "Сохранение файла запущено",
+    exportProfileFileSavedDownload: "Папка: Download/Odin One",
+    exportProfileFileSavedLocal: "Файл сохранён во внутреннюю папку приложения",
+    exportProfileFileSharedNoLocal:
+      "Файл уже подготовлен для отправки через системное меню, но локальная копия не сохранилась.",
     shareCode: "Share code",
-    shareCodeText: "Эту строку можно передать другому пользователю для локального импорта подключения в Odin One.",
+    shareCodeText:
+      "Эту строку можно передать другому пользователю для локального импорта подключения в Odin One.",
     fingerprint: "Fingerprint",
     endpoint: "Endpoint",
     importProfile: "Импортировать ключ",
-    importProfileIntro: "Вставьте share code или raw JSON, чтобы сохранить его локально как импортированное подключение.",
+    importProfileFile: "Импортировать файлом",
+    importedProfileFile: "Импортирован файл",
+    importProfileIntro:
+      "Вставьте share code или raw JSON, либо выберите файл invite-профиля, чтобы сохранить его локально как импортированное подключение.",
     importPlaceholder: "odin1:...",
     importedProfile: "Импортированное подключение",
     imported: "Импортирован",
     importedAt: "Импортировано",
-    noGuestProfile: "Сначала загрузите локальный ключ подключения для этого хоста, затем можно будет сгенерировать share code.",
+    noGuestProfile:
+      "Сначала загрузите локальный ключ подключения для этого хоста, затем можно будет сгенерировать share code.",
     name: "Имя",
     saved: "Сохранено",
     transport: "Транспорт",
     owner: "Владелец",
     guest: "Ключ",
     localFile: "Локальный файл",
-    localFileText: "Подключение закэшировано локально и может повторно использоваться приложением.",
+    localFileText:
+      "Подключение закэшировано локально и может повторно использоваться приложением.",
     exportJson: "Экспорт JSON",
-    exportJsonText: "Это текущий локальный ключ подключения, сгенерированный из развёрнутого узла.",
+    exportJsonText:
+      "Это текущий локальный ключ подключения, сгенерированный из развёрнутого узла.",
     importJson: "Импортированный JSON",
-    importJsonText: "Это нормализованное локальное подключение, сохранённое после импорта share code.",
-    noOwnerProfile: "Для этого хоста локальный ключ подключения пока не найден. Сначала выполните развёртывание, затем обновите эту карточку.",
+    importJsonText:
+      "Это нормализованное локальное подключение, сохранённое после импорта share code.",
+    noOwnerProfile:
+      "Для этого хоста локальный ключ подключения пока не найден. Сначала выполните развёртывание, затем обновите эту карточку.",
     authPassword: "Пароль",
     authPrivateKey: "Приватный ключ",
     deployStartFailed: "Не удалось запустить развёртывание",
@@ -187,7 +292,8 @@ const dictionaries = {
     tunnelStatusFailed: "ошибка",
     controlPlane: "Control plane",
     runtimeOverview: "Runtime overview",
-    runtimeOverviewText: "Этот блок собирает в одном месте состояние локального core, кэша профиля и safety-поведения приложения, как в зрелых proxy-клиентах, но не меняет self-hosted deploy flow Odin One.",
+    runtimeOverviewText:
+      "Этот блок собирает в одном месте состояние локального core, кэша профиля и safety-поведения приложения, как в зрелых proxy-клиентах, но не меняет self-hosted deploy flow Odin One.",
     coreRuntime: "Локальный core",
     runtimeHealthy: "core отвечает",
     runtimeUnavailable: "core недоступен",
@@ -211,16 +317,21 @@ const dictionaries = {
     refreshOverview: "Обновить overview",
     desktopDiagnostics: "Desktop diagnostics",
     diagnosticsCenter: "Diagnostics center",
-    diagnosticsCenterText: "Этот блок собирает operator-facing telemetry для macOS shell: cached profile, лог локального tunnel runtime и быстрые признаки того, где сейчас именно находится сбой.",
+    diagnosticsCenterText:
+      "Этот блок собирает operator-facing telemetry для macOS shell: cached profile, лог локального tunnel runtime и быстрые признаки того, где сейчас именно находится сбой.",
     runtimeLog: "Runtime log",
-    runtimeLogText: "Последние локальные события tunnel runtime без перехода к route-level VPN.",
+    runtimeLogText:
+      "Последние локальные события tunnel runtime без перехода к route-level VPN.",
     operatorNotes: "Operator notes",
-    operatorNotesText: "Проверяйте эту карточку перед повторным запуском, чтобы не делать лишние рестарты и не терять контекст ошибки.",
+    operatorNotesText:
+      "Проверяйте эту карточку перед повторным запуском, чтобы не делать лишние рестарты и не терять контекст ошибки.",
     diagnosticsEmpty: "Локальный runtime ещё не вернул событий.",
     remoteEgressHealth: "Исходящий трафик сервера",
     remoteEgressReady: "server egress подтверждён",
     remoteEgressBlocked: "server egress не подтверждён",
     activeEndpoint: "Активный endpoint",
+    activeEndpointHidden: "Адрес скрыт",
+    portLabel: "порт",
     tunnelEngine: "Tunnel engine",
     runtimeStartSource: "Источник запуска runtime",
     runtimeFamily: "Семейство runtime",
@@ -250,16 +361,25 @@ const dictionaries = {
     stateDisabled: "выключено",
     recentSession: "Recent session",
     sessionSnapshot: "Session snapshot",
-    sessionSnapshotText: "Снимок текущей operator-сессии: последняя валидация, deploy, локальный tunnel и профиль доступа без ухода в отдельный лог-стек.",
+    sessionSnapshotText:
+      "Снимок текущей operator-сессии: последняя валидация, deploy, локальный tunnel и профиль доступа без ухода в отдельный лог-стек.",
     recoveryHints: "Recovery hints",
-    recoveryHintsText: "Небольшие подсказки для следующего безопасного шага без route-level изменений и без лишних перезапусков.",
-    recoveryHintValidate: "Сначала обновите validation и owner profile, потом пробуйте deploy или tunnel.",
-    recoveryHintVkLink: "Для VK-режима используйте свежую ссылку звонка и один аккуратный запуск tunnel.",
-    recoveryHintCooldown: "Сейчас активен cooldown. Дождитесь его окончания перед повторной попыткой.",
-    recoveryHintSystemProxy: "Tunnel уже поднят. Проверьте one-click test или включение system proxy, если нужен VPN-like режим.",
-    recoveryHintImport: "Импортированный профиль уже сохранён локально, можно использовать его без SSH.",
-    recoveryHintOwnerProfile: "Owner profile уже в кэше, лишний deploy не нужен, пока endpoint не менялся.",
-    recoveryHintGeneric: "Сначала обновите overview и diagnostics, чтобы увидеть актуальное состояние перед действием.",
+    recoveryHintsText:
+      "Небольшие подсказки для следующего безопасного шага без route-level изменений и без лишних перезапусков.",
+    recoveryHintValidate:
+      "Сначала обновите validation и owner profile, потом пробуйте deploy или tunnel.",
+    recoveryHintVkLink:
+      "Для VK-режима используйте свежую ссылку звонка и один аккуратный запуск tunnel.",
+    recoveryHintCooldown:
+      "Сейчас активен cooldown. Дождитесь его окончания перед повторной попыткой.",
+    recoveryHintSystemProxy:
+      "Tunnel уже поднят. Проверьте one-click test или включение system proxy, если нужен VPN-like режим.",
+    recoveryHintImport:
+      "Импортированный профиль уже сохранён локально, можно использовать его без SSH.",
+    recoveryHintOwnerProfile:
+      "Owner profile уже в кэше, лишний deploy не нужен, пока endpoint не менялся.",
+    recoveryHintGeneric:
+      "Сначала обновите overview и diagnostics, чтобы увидеть актуальное состояние перед действием.",
     ownerLabTitle: "Owner lab launcher",
     ownerLabText:
       "Скрытый owner-only launcher использует обычный app start path, чтобы поднять stable control lane или hidden whitelist scaffold без adb-bridge.",
@@ -294,40 +414,54 @@ const dictionaries = {
     ownerLabVpsOwnerEgressEnabled: "white tunel",
     ownerLabVpsOwnerEgressDisabled: "white relay",
     ownerLabVpsOwnerEgressText:
-      "Когда режим включён, relay остаётся только первым hop, а интернет дальше должен выходить уже через ваш сервер 95.81.120.226.",
+      "Когда режим включён, relay остаётся только первым hop, а интернет дальше должен выходить уже через ваш сервер.",
     ownerLabVpsRelayOwnerText:
-      "Этот hidden режим всегда поднимает два hop: сначала внешний relay из igareck, потом ваш сервер 95.81.120.226 как owner egress.",
+      "Этот hidden режим всегда поднимает два hop: сначала внешний relay из igareck, потом ваш сервер как owner egress.",
     ownerLabVpsRelaySubscriptionUrl: "Relay subscription URL",
     ownerLabVpsRelaySourceLabel: "Relay source label",
     ownerLabStart: "Запустить owner lab",
     ownerLabStartRequested:
       "Owner lab стартовал через обычный app path. Дальше проверь runtime diagnostics и реальный трафик вручную.",
     ownerLabUnlocked: "Owner lab launcher разблокирован.",
-    ownerLabControlReady: "Stable control lane поднят через обычный app start path.",
-    ownerLabWhitelistReady: "Hidden whitelist scaffold surfaced через обычный app start path.",
-    ownerLabWhitelistLabReady: "Hidden whitelist lab lane surfaced и поднял реальный runtime через обычный app start path.",
-    ownerLabVpsScaffoldReady: "Hidden VPS scaffold surfaced через обычный app start path.",
-    ownerLabVpsLabReady: "Hidden VPS lab lane surfaced и поднял реальный runtime через обычный app start path.",
+    ownerLabControlReady:
+      "Stable control lane поднят через обычный app start path.",
+    ownerLabWhitelistReady:
+      "Hidden whitelist scaffold surfaced через обычный app start path.",
+    ownerLabWhitelistLabReady:
+      "Hidden whitelist lab lane surfaced и поднял реальный runtime через обычный app start path.",
+    ownerLabVpsScaffoldReady:
+      "Hidden VPS scaffold surfaced через обычный app start path.",
+    ownerLabVpsLabReady:
+      "Hidden VPS lab lane surfaced и поднял реальный runtime через обычный app start path.",
     ownerLabVpsRelayLabReady:
       "Hidden relay -> owner lane surfaced и поднял реальный runtime через обычный app start path.",
-    ownerLabWhitelistFailed: "Hidden whitelist scaffold не surfaced через app start path.",
-    ownerLabWhitelistLabFailed: "Hidden whitelist lab lane не поднялся через app start path.",
-    ownerLabVpsScaffoldFailed: "Hidden VPS scaffold не surfaced через app start path.",
-    ownerLabVpsLabFailed: "Hidden VPS lab lane не поднялся через app start path.",
-    ownerLabVpsRelayLabFailed: "Hidden relay -> owner lane не поднялся через app start path.",
-    ownerLabNeedsOwnerProfile: "Owner lab требует локальный owner profile для текущего REALITY host.",
+    ownerLabWhitelistFailed:
+      "Hidden whitelist scaffold не surfaced через app start path.",
+    ownerLabWhitelistLabFailed:
+      "Hidden whitelist lab lane не поднялся через app start path.",
+    ownerLabVpsScaffoldFailed:
+      "Hidden VPS scaffold не surfaced через app start path.",
+    ownerLabVpsLabFailed:
+      "Hidden VPS lab lane не поднялся через app start path.",
+    ownerLabVpsRelayLabFailed:
+      "Hidden relay -> owner lane не поднялся через app start path.",
+    ownerLabNeedsOwnerProfile:
+      "Owner lab требует локальный owner profile для текущего REALITY host.",
     ownerLabNeedsAccessProfile:
       "Для этого режима нужен локальный owner profile или импортированный invite key с поддержкой relay -> owner server.",
-    ownerLabRealityOnly: "Owner lab сейчас поддерживает только VLESS + REALITY.",
+    ownerLabRealityOnly:
+      "Owner lab сейчас поддерживает только VLESS + REALITY.",
     ownerLabHintServerRequired: "Для owner lab нужен непустой hint serverName.",
     ownerLabVpsServerRequired: "Для VPS lab нужен непустой serverName.",
     ownerLabVpsPortRequired: "Для VPS lab нужен корректный порт.",
-    ownerLabAndroidOnly: "Owner lab launcher доступен только на Android."
+    ownerLabAndroidOnly: "Owner lab launcher доступен только на Android.",
   },
   en: {
     appTag: "macOS MVP / self-hosted",
-    appSubtitle: "Self-hosted VPN deployer with an isolated test tunnel for macOS.",
-    appSubtitleCompact: "Phone-like shell for a self-hosted VPN with a compact connect flow.",
+    appSubtitle:
+      "Self-hosted VPN deployer with an isolated test tunnel for macOS.",
+    appSubtitleCompact:
+      "Phone-like shell for a self-hosted VPN with a compact connect flow.",
     language: "Language",
     ru: "RU",
     en: "EN",
@@ -335,12 +469,43 @@ const dictionaries = {
     tabAccess: "Access",
     tabTunnel: "Tunnel",
     navProtocol: "Mode",
+    navWhitelist: "White IP",
     navLogs: "Logs",
-    navMore: "More",
+    navMore: "SHARE",
     sheetServerTitle: "Server",
     sheetProtocolTitle: "Mode",
+    sheetWhitelistTitle: "White IP / CIDR",
     sheetLogsTitle: "Logs & test",
-    sheetMoreTitle: "More",
+    sheetMoreTitle: "SHARE",
+    whitelistEyebrow: "Whitelist check",
+    whitelistInputLabel: "IPv4 lookup",
+    whitelistCardTitle: "Check server IP",
+    sheetWhitelistText: "",
+    whitelistIpv4: "IPv4",
+    whitelistCheck: "Check IP",
+    whitelistChecking: "Checking...",
+    whitelistExactIp: "Exact IP",
+    whitelistCidr: "CIDR",
+    whitelistMatchYes: "Yes",
+    whitelistMatchNo: "No",
+    whitelistMatchedCidrs: "Matched CIDRs",
+    whitelistNoCidrs: "No CIDR matches were found for this IP.",
+    whitelistSource: "Source",
+    whitelistCheckedAt: "Checked at",
+    whitelistFetchedAt: "Lists fetched at",
+    whitelistSourceLive: "live",
+    whitelistSourceCached: "cache",
+    whitelistUsingCache:
+      "The GitHub refresh failed, so the app is showing the saved whitelist cache.",
+    whitelistInvalid: "Enter a valid IPv4 address.",
+    whitelistResultExactAndCidr:
+      "The IP is present both as an exact whitelist entry and inside an allowed CIDR.",
+    whitelistResultIpOnly:
+      "The IP is present in the exact whitelist. This is the strongest positive match.",
+    whitelistResultCidrOnly:
+      "The exact IP is not listed, but it is inside an allowed CIDR.",
+    whitelistResultMissing:
+      "No match was found in the current ipwhitelist.txt or cidrwhitelist.txt.",
     serverInput: "Server Input",
     remoteNode: "Remote node",
     host: "Host",
@@ -357,11 +522,25 @@ const dictionaries = {
     engineSingBox: "sing-box",
     runtimeMode: "Access mode",
     runtimeModeReality: "VLESS + REALITY",
-    runtimeModeVk: "VK relay",
-    runtimeModeRelayOwner: "white tunel",
-    runtimeModeRelayDirect: "white relay",
-    runtimeModeRealityHint: "Recommended default. The client starts the direct VLESS + REALITY path without another server rollout.",
-    runtimeModeVkHint: "Uses the already deployed VK relay on the same server. You only need a fresh VK call link.",
+    runtimeModeYandexEdge: "YANDEX EDGE",
+    runtimeModeVk: "VK RELAY",
+    runtimeModeRelayOwner: "WHITE TUNEL",
+    runtimeModeRelayDirect: "WHITE RELAY",
+    modeStatusLive: "live",
+    modeStatusReady: "ready",
+    modeStatusOptional: "optional",
+    modeStatusAttach: "attach step 2",
+    modeStatusLocked: "locked",
+    changeMode: "Change",
+    sheetModePickerTitle: "Choose mode",
+    sheetModePickerText:
+      "Tap a mode to switch right away. Only the modes already present in the current profile can be selected.",
+    runtimeModeRealityHint:
+      "Recommended default. The client starts the direct VLESS + REALITY path without another server rollout.",
+    runtimeModeYandexEdgeHint:
+      "New visible mode. The client reaches the stable REALITY path through a Russian edge without changing the main direct route.",
+    runtimeModeVkHint:
+      "Uses the already deployed VK relay on the same server. You only need a fresh VK call link.",
     runtimeModeRelayOwnerHint:
       "white tunel. The client first brings up an external REALITY relay and then sends traffic out through your server.",
     runtimeModeRelayDirectHint:
@@ -369,12 +548,16 @@ const dictionaries = {
     portSetup: "Public ports",
     portSetupAuto: "Auto",
     portSetupManual: "Manual",
-    portSetupAutoHint: "The server will pick free public ports for the VK relay and REALITY on the next deploy.",
-    portSetupManualHint: "Pin both public ports yourself: VK relay over UDP and VLESS + REALITY over TCP.",
+    portSetupAutoHint:
+      "The server will pick free public ports for the VK relay and REALITY on the next deploy.",
+    portSetupManualHint:
+      "Pin both public ports yourself: VK relay over UDP and VLESS + REALITY over TCP.",
     vkRelayPort: "VK relay port (UDP)",
     realityPort: "REALITY port (TCP)",
-    manualPortsRequired: "Manual mode requires both public ports: VK relay and REALITY.",
-    manualPortsDistinct: "VK relay and REALITY must use different port numbers.",
+    manualPortsRequired:
+      "Manual mode requires both public ports: VK relay and REALITY.",
+    manualPortsDistinct:
+      "VK relay and REALITY must use different port numbers.",
     protocolMode: "Direct protocol",
     protocolWireGuard: "WireGuard over xray",
     protocolReality: "VLESS + REALITY",
@@ -389,29 +572,49 @@ const dictionaries = {
     stoppingTunnel: "Stopping...",
     startDeploy: "Start deploy",
     deploySuccess: "Deployment completed successfully.",
+    edgeAttachSuccess:
+      "Yandex edge attached successfully. Re-issue the invite key so the extra mode is bundled into the share code.",
+    validateOrigin: "Validate origin",
+    validateEdge: "Validate edge",
+    attachEdge: "Attach edge",
     reset: "Reset",
+    deployStepOrigin: "Step 1",
+    deployStepOriginTitle: "Origin deploy",
+    deployStepOriginText:
+      "Base deploy on the foreign server. After this step the ordinary modes already work and you can issue the standard invite key.",
+    deployStepEdge: "Step 2",
+    deployStepEdgeTitle: "Yandex edge attach",
+    deployStepEdgeText:
+      "Optional additive step. It raises a whitelist-facing Yandex edge entry and adds the fifth visible mode without rotating the stable REALITY path.",
+    edgeHost: "Edge host",
+    edgePublicPort: "Public edge port",
     deploymentPrefix: "Deployment",
     deploymentDetails: "Deployment progress",
     validationDetails: "Validation result",
     close: "Close",
     validation: "Validation",
     serverChecks: "Server checks",
-    validationEmpty: "Run validation to inspect SSH access, runtime readiness, and deployment fit.",
+    validationEmpty:
+      "Run validation to inspect SSH access, runtime readiness, and deployment fit.",
     provisioning: "Deployment",
     provisioningState: "Provisioning state",
-    provisioningEmpty: "The deployment plan will appear after the first successful request to the Go core.",
+    provisioningEmpty:
+      "The deployment plan will appear after the first successful request to the Go core.",
     macTest: "macOS Test",
     isolatedTunnel: "Local isolated tunnel",
     vpnMode: "macOS VPN mode",
-    vpnModeText: "One button starts the Odin One direct tunnel and enables the macOS system SOCKS proxy for regular apps.",
+    vpnModeText:
+      "One button starts the Odin One direct tunnel and enables the macOS system SOCKS proxy for regular apps.",
     enableVpn: "Enable VPN",
     disableVpn: "Disable VPN",
     enablingVpn: "Enabling VPN...",
     disablingVpn: "Disabling VPN...",
     vpnEnabled: "VPN mode enabled",
     vpnDisabled: "VPN mode is disabled.",
-    tunnelIntro: "This mode starts a local SOCKS proxy only. It does not change your system routes or global macOS internet settings.",
-    directTunnelIntro: "This mode starts a regular direct SOCKS tunnel through xray without VK. It does not change your system routes or global macOS internet settings.",
+    tunnelIntro:
+      "This mode starts a local SOCKS proxy only. It does not change your system routes or global macOS internet settings.",
+    directTunnelIntro:
+      "This mode starts a regular direct SOCKS tunnel through xray without VK. It does not change your system routes or global macOS internet settings.",
     startTunnel: "Start tunnel",
     startRealityTunnel: "Start REALITY",
     stopTunnel: "Stop tunnel",
@@ -423,66 +626,93 @@ const dictionaries = {
     ready: "Ready",
     local: "Local",
     quickTest: "Quick test",
-    quickTestText: "The app can now run this safely for you, but the raw command stays visible for manual checks.",
+    quickTestText:
+      "The app can now run this safely for you, but the raw command stays visible for manual checks.",
     systemProxy: "macOS system proxy",
-    systemProxyText: "This explicitly enables a system SOCKS5 proxy for the active macOS network service. The default route stays unchanged, but regular apps will start using Odin One until you turn it off.",
+    systemProxyText:
+      "This explicitly enables a system SOCKS5 proxy for the active macOS network service. The default route stays unchanged, but regular apps will start using Odin One until you turn it off.",
     enableSystemProxy: "Enable for system",
     disableSystemProxy: "Disable system proxy",
     systemProxyEnabled: "The system SOCKS proxy is enabled.",
     systemProxyDisabled: "The system SOCKS proxy is currently disabled.",
     networkService: "Network service",
     tunnelCooldown: "VK cooldown",
-    tunnelCooldownText: "VK temporarily limited TURN credential requests. Wait for the cooldown to expire, use a fresh call link, and retry only once.",
+    tunnelCooldownText:
+      "VK temporarily limited TURN credential requests. Wait for the cooldown to expire, use a fresh call link, and retry only once.",
     lastTest: "Last test",
-    lastTestPassedVK: "The isolated tunnel completed a real outbound request through VK and your server.",
-    lastTestPassedDirect: "The isolated tunnel completed a real outbound request directly through your server.",
-    lastTestRunning: "A single request is currently being sent through the local SOCKS tunnel.",
+    lastTestPassedVK:
+      "The isolated tunnel completed a real outbound request through VK and your server.",
+    lastTestPassedDirect:
+      "The isolated tunnel completed a real outbound request directly through your server.",
+    lastTestRunning:
+      "A single request is currently being sent through the local SOCKS tunnel.",
     lastTestFailed: "The last isolated request did not complete successfully.",
     lastTestIdle: "",
     target: "Target",
     error: "Error",
     fail: "Fail",
     safeMode: "Safe mode",
-    safeModeText: "The app is using isolated localhost ports only. No default route changes, no system proxy, and no global VPN profile are applied in this test mode.",
+    safeModeText:
+      "The app is using isolated localhost ports only. No default route changes, no system proxy, and no global VPN profile are applied in this test mode.",
     sharing: "Sharing",
     ownerProfile: "Connection key",
     accessKeyTab: "My key",
     accessShareTab: "Share",
     accessImportTab: "Import",
-    ownerProfileIntro: "After a successful deploy, Odin One stores a local connection key for the server owner. You can export this key and pass it to another user for manual import.",
+    ownerProfileIntro:
+      "After a successful deploy, Odin One stores a local connection key for the server owner. You can export this key and pass it to another user for manual import.",
     refreshProfile: "Refresh profile",
     guestAccess: "Access sharing",
-    guestAccessIntro: "Generate a connection key from the saved owner profile and pass it to another user without SSH or starting a tunnel.",
+    guestAccessIntro:
+      "Generate a connection key from the saved owner profile and pass it to another user without SSH or starting a tunnel.",
     generateShareCode: "Generate connection key",
-    guestAccessNeedsSecret: "Enter the owner secret to generate a new connection key.",
+    inviteBundleHint:
+      "A single share code carries every mode that is actually present in the current owner profile. After edge attach, re-issue the key so Yandex edge is included too.",
+    guestAccessNeedsSecret:
+      "Enter the owner secret to generate a new connection key.",
     guestAccessOwnerOnly:
       "This device is using an imported invite key. New connection keys can only be generated on the owner device.",
     copyShareCode: "Copy share code",
     copyJson: "Copy JSON",
     copied: "Copied",
+    exportProfileFile: "Export file",
+    exportProfileFileStarted: "File export started",
+    exportProfileFileSavedDownload: "Folder: Download/Odin One",
+    exportProfileFileSavedLocal: "The file was saved into the app-local exports folder",
+    exportProfileFileSharedNoLocal:
+      "The file is already ready to send through the system share sheet, but the local saved copy was not created.",
     shareCode: "Share code",
-    shareCodeText: "You can pass this string to another user so Odin One can import the connection locally.",
+    shareCodeText:
+      "You can pass this string to another user so Odin One can import the connection locally.",
     fingerprint: "Fingerprint",
     endpoint: "Endpoint",
     importProfile: "Import key",
-    importProfileIntro: "Paste a share code or raw JSON to save it locally as an imported connection.",
+    importProfileFile: "Import file",
+    importedProfileFile: "Imported file",
+    importProfileIntro:
+      "Paste a share code or raw JSON, or pick an invite-profile file, to save it locally as an imported connection.",
     importPlaceholder: "odin1:...",
     importedProfile: "Imported connection",
     imported: "Imported",
     importedAt: "Imported at",
-    noGuestProfile: "Load the local connection key for this host first, then a share code can be generated.",
+    noGuestProfile:
+      "Load the local connection key for this host first, then a share code can be generated.",
     name: "Name",
     saved: "Saved",
     transport: "Transport",
     owner: "Owner",
     guest: "Key",
     localFile: "Local file",
-    localFileText: "The connection is cached locally and can be reused by the app.",
+    localFileText:
+      "The connection is cached locally and can be reused by the app.",
     exportJson: "Export JSON",
-    exportJsonText: "This is the current local connection key generated from your server deployment.",
+    exportJsonText:
+      "This is the current local connection key generated from your server deployment.",
     importJson: "Imported JSON",
-    importJsonText: "This is the normalized local connection saved after importing the share code.",
-    noOwnerProfile: "No local connection key found yet for this host. Run deploy first, then refresh this card.",
+    importJsonText:
+      "This is the normalized local connection saved after importing the share code.",
+    noOwnerProfile:
+      "No local connection key found yet for this host. Run deploy first, then refresh this card.",
     authPassword: "Password",
     authPrivateKey: "Private key",
     deployStartFailed: "Failed to start deployment",
@@ -506,7 +736,8 @@ const dictionaries = {
     tunnelStatusFailed: "failed",
     controlPlane: "Control plane",
     runtimeOverview: "Runtime overview",
-    runtimeOverviewText: "This panel keeps the local core state, cached profile state, and safety posture in one place like a mature proxy client, while preserving the existing self-hosted Odin One deploy flow.",
+    runtimeOverviewText:
+      "This panel keeps the local core state, cached profile state, and safety posture in one place like a mature proxy client, while preserving the existing self-hosted Odin One deploy flow.",
     coreRuntime: "Local core",
     runtimeHealthy: "core is healthy",
     runtimeUnavailable: "core is unavailable",
@@ -530,16 +761,21 @@ const dictionaries = {
     refreshOverview: "Refresh overview",
     desktopDiagnostics: "Desktop diagnostics",
     diagnosticsCenter: "Diagnostics center",
-    diagnosticsCenterText: "This panel collects operator-facing telemetry for the macOS shell: cached profile state, local tunnel runtime log, and quick hints about where the current failure sits.",
+    diagnosticsCenterText:
+      "This panel collects operator-facing telemetry for the macOS shell: cached profile state, local tunnel runtime log, and quick hints about where the current failure sits.",
     runtimeLog: "Runtime log",
-    runtimeLogText: "Recent local tunnel runtime events without switching into route-level VPN behavior.",
+    runtimeLogText:
+      "Recent local tunnel runtime events without switching into route-level VPN behavior.",
     operatorNotes: "Operator notes",
-    operatorNotesText: "Check this card before retrying so you do not waste restarts or lose the current error context.",
+    operatorNotesText:
+      "Check this card before retrying so you do not waste restarts or lose the current error context.",
     diagnosticsEmpty: "The local runtime has not reported events yet.",
     remoteEgressHealth: "Server egress",
     remoteEgressReady: "server egress confirmed",
     remoteEgressBlocked: "server egress not confirmed",
     activeEndpoint: "Active endpoint",
+    activeEndpointHidden: "Endpoint hidden",
+    portLabel: "port",
     tunnelEngine: "Tunnel engine",
     runtimeStartSource: "Runtime start source",
     runtimeFamily: "Runtime family",
@@ -569,16 +805,25 @@ const dictionaries = {
     stateDisabled: "disabled",
     recentSession: "Recent session",
     sessionSnapshot: "Session snapshot",
-    sessionSnapshotText: "A snapshot of the current operator session: latest validation, deploy, local tunnel, and access profile state without switching into a dedicated log stack.",
+    sessionSnapshotText:
+      "A snapshot of the current operator session: latest validation, deploy, local tunnel, and access profile state without switching into a dedicated log stack.",
     recoveryHints: "Recovery hints",
-    recoveryHintsText: "Small hints for the next safe step without route-level changes or unnecessary restarts.",
-    recoveryHintValidate: "Refresh validation and the owner profile first, then retry deploy or tunnel actions.",
-    recoveryHintVkLink: "For VK mode, use a fresh call link and make a single careful tunnel start attempt.",
-    recoveryHintCooldown: "A cooldown is active right now. Wait for it to expire before retrying.",
-    recoveryHintSystemProxy: "The tunnel is already up. Try the one-click test or enable the system proxy if you want VPN-like mode.",
-    recoveryHintImport: "An imported profile is already stored locally and can be reused without SSH.",
-    recoveryHintOwnerProfile: "The owner profile is already cached, so another deploy is unnecessary unless the endpoint changed.",
-    recoveryHintGeneric: "Refresh overview and diagnostics first so the next action is based on fresh state.",
+    recoveryHintsText:
+      "Small hints for the next safe step without route-level changes or unnecessary restarts.",
+    recoveryHintValidate:
+      "Refresh validation and the owner profile first, then retry deploy or tunnel actions.",
+    recoveryHintVkLink:
+      "For VK mode, use a fresh call link and make a single careful tunnel start attempt.",
+    recoveryHintCooldown:
+      "A cooldown is active right now. Wait for it to expire before retrying.",
+    recoveryHintSystemProxy:
+      "The tunnel is already up. Try the one-click test or enable the system proxy if you want VPN-like mode.",
+    recoveryHintImport:
+      "An imported profile is already stored locally and can be reused without SSH.",
+    recoveryHintOwnerProfile:
+      "The owner profile is already cached, so another deploy is unnecessary unless the endpoint changed.",
+    recoveryHintGeneric:
+      "Refresh overview and diagnostics first so the next action is based on fresh state.",
     ownerLabTitle: "Owner lab launcher",
     ownerLabText:
       "This hidden owner-only launcher uses the normal app start path so you can raise the stable control lane or the hidden whitelist scaffold without the adb bridge.",
@@ -613,36 +858,49 @@ const dictionaries = {
     ownerLabVpsOwnerEgressEnabled: "white tunel",
     ownerLabVpsOwnerEgressDisabled: "white relay",
     ownerLabVpsOwnerEgressText:
-      "When enabled, the relay stays only as the first hop and internet egress should move to your server at 95.81.120.226.",
+      "When enabled, the relay stays only as the first hop and internet egress should move to your server.",
     ownerLabVpsRelayOwnerText:
-      "This hidden mode always brings up two hops: first an external relay from igareck, then your server 95.81.120.226 as the owner egress.",
+      "This hidden mode always brings up two hops: first an external relay from igareck, then your server as the owner egress.",
     ownerLabVpsRelaySubscriptionUrl: "Relay subscription URL",
     ownerLabVpsRelaySourceLabel: "Relay source label",
     ownerLabStart: "Start owner lab",
     ownerLabStartRequested:
       "The owner lab start was dispatched through the normal app path. Check the runtime diagnostics and real traffic manually next.",
     ownerLabUnlocked: "Owner lab launcher unlocked.",
-    ownerLabControlReady: "The stable control lane was started through the normal app path.",
-    ownerLabWhitelistReady: "The hidden whitelist scaffold surfaced through the normal app path.",
-    ownerLabWhitelistLabReady: "The hidden whitelist lab lane surfaced and brought up the real runtime through the normal app path.",
-    ownerLabVpsScaffoldReady: "The hidden VPS scaffold surfaced through the normal app path.",
-    ownerLabVpsLabReady: "The hidden VPS lab lane surfaced and brought up the real runtime through the normal app path.",
+    ownerLabControlReady:
+      "The stable control lane was started through the normal app path.",
+    ownerLabWhitelistReady:
+      "The hidden whitelist scaffold surfaced through the normal app path.",
+    ownerLabWhitelistLabReady:
+      "The hidden whitelist lab lane surfaced and brought up the real runtime through the normal app path.",
+    ownerLabVpsScaffoldReady:
+      "The hidden VPS scaffold surfaced through the normal app path.",
+    ownerLabVpsLabReady:
+      "The hidden VPS lab lane surfaced and brought up the real runtime through the normal app path.",
     ownerLabVpsRelayLabReady:
       "The hidden relay -> owner lane surfaced and brought up a real runtime through the normal app path.",
-    ownerLabWhitelistFailed: "The hidden whitelist scaffold did not surface through the normal app path.",
-    ownerLabWhitelistLabFailed: "The hidden whitelist lab lane did not come up through the normal app path.",
-    ownerLabVpsScaffoldFailed: "The hidden VPS scaffold did not surface through the normal app path.",
-    ownerLabVpsLabFailed: "The hidden VPS lab lane did not come up through the normal app path.",
-    ownerLabVpsRelayLabFailed: "The hidden relay -> owner lane did not come up through the normal app path.",
-    ownerLabNeedsOwnerProfile: "The owner lab requires a local owner profile for the current REALITY host.",
+    ownerLabWhitelistFailed:
+      "The hidden whitelist scaffold did not surface through the normal app path.",
+    ownerLabWhitelistLabFailed:
+      "The hidden whitelist lab lane did not come up through the normal app path.",
+    ownerLabVpsScaffoldFailed:
+      "The hidden VPS scaffold did not surface through the normal app path.",
+    ownerLabVpsLabFailed:
+      "The hidden VPS lab lane did not come up through the normal app path.",
+    ownerLabVpsRelayLabFailed:
+      "The hidden relay -> owner lane did not come up through the normal app path.",
+    ownerLabNeedsOwnerProfile:
+      "The owner lab requires a local owner profile for the current REALITY host.",
     ownerLabNeedsAccessProfile:
       "This mode requires a local owner profile or an imported invite key that supports relay -> owner server.",
-    ownerLabRealityOnly: "The owner lab currently supports VLESS + REALITY only.",
-    ownerLabHintServerRequired: "The owner lab requires a non-empty hint serverName.",
+    ownerLabRealityOnly:
+      "The owner lab currently supports VLESS + REALITY only.",
+    ownerLabHintServerRequired:
+      "The owner lab requires a non-empty hint serverName.",
     ownerLabVpsServerRequired: "The VPS lab requires a non-empty serverName.",
     ownerLabVpsPortRequired: "The VPS lab requires a valid port.",
-    ownerLabAndroidOnly: "The owner lab launcher is only available on Android."
-  }
+    ownerLabAndroidOnly: "The owner lab launcher is only available on Android.",
+  },
 } as const;
 
 type Dictionary = typeof dictionaries.ru;
@@ -672,9 +930,9 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     () => ({
       locale,
       setLocale,
-      t: (key: keyof Dictionary) => dictionaries[locale][key]
+      t: (key: keyof Dictionary) => dictionaries[locale][key],
     }),
-    [locale]
+    [locale],
   );
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;

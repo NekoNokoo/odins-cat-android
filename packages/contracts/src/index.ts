@@ -4,6 +4,8 @@ export type TunnelEngine = "xray" | "sing-box";
 export type TunnelProtocol = "direct-wireguard" | "vless-reality";
 export type StageStatus = "queued" | "current" | "done" | "failed";
 export type ProtocolPackStatus = "active" | "staged";
+export type ProvisionFlow = "origin" | "edge-attach";
+export type EdgeProvider = "yandex-edge";
 
 export interface ProtocolPackEntry {
   id: string;
@@ -26,6 +28,21 @@ export interface ServerDraft {
   protocol?: TunnelProtocol;
   vkTurnProxyPort?: number;
   realityPort?: number;
+}
+
+export interface EdgeServerDraft {
+  host: string;
+  port: number;
+  username: string;
+  authMethod: AuthMethod;
+}
+
+export interface EdgeAttachDraft {
+  enabled: boolean;
+  provider: EdgeProvider;
+  server: EdgeServerDraft;
+  secret: string;
+  publicPort?: number;
 }
 
 export interface DeployStage {
@@ -121,6 +138,8 @@ export interface OwnerAccessProfile {
 export interface ProvisionRequest {
   server: ServerDraft;
   secret: string;
+  flow?: ProvisionFlow;
+  edge?: EdgeAttachDraft;
 }
 
 export interface ProvisionResponse {
@@ -131,6 +150,7 @@ export interface ProvisionResponse {
 export interface DeploymentState {
   deploymentId: string;
   serverHost: string;
+  deployFlow?: ProvisionFlow;
   transport: string;
   engine?: TunnelEngine;
   protocol?: TunnelProtocol;
@@ -139,6 +159,9 @@ export interface DeploymentState {
   turnPort?: number;
   wireGuardPort?: number;
   realityPort?: number;
+  edgeEnabled?: boolean;
+  edgeHost?: string;
+  edgePort?: number;
   healthChecks?: Array<{
     key: string;
     label: string;
@@ -152,13 +175,19 @@ export interface DeploymentState {
 export interface ValidationRequest {
   server: ServerDraft;
   secret: string;
+  flow?: ProvisionFlow;
+  edge?: EdgeAttachDraft;
 }
 
 export interface ValidationResponse {
   ok: boolean;
   host: string;
+  deployFlow?: ProvisionFlow;
   user: string;
   authMethod: AuthMethod;
+  edgeEnabled?: boolean;
+  edgeHost?: string;
+  edgePort?: number;
   checks: Array<{
     key: string;
     label: string;
@@ -168,6 +197,36 @@ export interface ValidationResponse {
   warnings: string[];
   protocolPack?: ProtocolPackEntry[];
   error?: string;
+}
+
+export interface WhitelistLookupResult {
+  ip: string;
+  valid: boolean;
+  matchedIp: boolean;
+  matchedCidr: boolean;
+  matchedCidrs: string[];
+  checkedAt: string;
+  listsFetchedAt?: string;
+  cached: boolean;
+  sourceRepo: string;
+  ipListUrl: string;
+  cidrListUrl: string;
+  note?: string;
+  error?: string;
+}
+
+export interface InviteFileExportResult {
+  fileName: string;
+  exportPath: string;
+  rawJson: string;
+  shareCode: string;
+}
+
+export interface InviteFileShareResult {
+  ok: boolean;
+  fileName: string;
+  cachePath?: string;
+  contentUri?: string;
 }
 
 export interface LocalTunnelStartRequest {
@@ -182,7 +241,8 @@ export type OwnerRuntimeLabMode =
   | "reality-whitelist-lab"
   | "reality-vps-scaffold"
   | "reality-vps-lab"
-  | "reality-vps-relay-lab";
+  | "reality-vps-relay-lab"
+  | "reality-yandex-edge";
 
 export type OwnerRuntimeLabTransport = "tcp" | "grpc";
 
@@ -200,6 +260,8 @@ export interface OwnerRuntimeLabRequest {
   hintTag?: string;
   vpsServerName?: string;
   vpsPort?: number;
+  vpsConnectHost?: string;
+  vpsConnectPort?: number;
   vpsTransport?: OwnerRuntimeLabTransport;
   vpsFlow?: string;
   vpsFingerprint?: string;

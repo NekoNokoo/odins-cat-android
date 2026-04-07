@@ -1,16 +1,27 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  useTransition,
+  type ChangeEvent,
+} from "react";
 import type {
+  AuthMethod,
   DeploymentState,
   DeployStage,
+  EdgeAttachDraft,
   InviteProfile,
   LocalTunnelState,
   OwnerRuntimeLabRequest,
   OwnerAccessProfile,
+  ProtocolPackEntry,
+  ProvisionFlow,
   ServerDraft,
   SystemProxyState,
-  ValidationResponse
+  ValidationResponse,
+  WhitelistLookupResult,
 } from "@whitelist/contracts";
 import { StageList } from "@whitelist/ui/StageList";
 import { coreApi, type CoreHealthState } from "../_core/core-api";
@@ -23,24 +34,37 @@ const initialDraft: ServerDraft = {
   authMethod: "password",
   transport: "xray",
   engine: "sing-box",
-  protocol: "vless-reality"
+  protocol: "vless-reality",
 };
 
 type WorkspaceTab = "server" | "access" | "tunnel";
 type AccessTab = "key" | "share" | "import";
-type MobileSheet = "server" | "protocol" | "logs" | "more" | null;
-type AccessMode = "vless-reality" | "vk-relay" | "relay-via-server" | "relay-direct";
+type MobileSheet =
+  | "server"
+  | "mode-picker"
+  | "whitelist"
+  | "logs"
+  | "more"
+  | null;
+type AccessMode =
+  | "vless-reality"
+  | "yandex-edge"
+  | "vk-relay"
+  | "relay-via-server"
+  | "relay-direct";
 type DeployPortMode = "auto" | "manual";
 type PendingAction =
   | "enableVpn"
   | "disableVpn"
   | "validate"
   | "deploy"
+  | "exportInviteFile"
   | "startTunnel"
   | "startOwnerRuntimeLab"
   | "stopTunnel"
   | "refreshTunnel"
   | "runTest"
+  | "checkWhitelist"
   | "refreshOwnerProfile"
   | "enableSystemProxy"
   | "disableSystemProxy"
@@ -52,9 +76,18 @@ type OwnerRuntimeLabMode =
   | "reality-whitelist-lab"
   | "reality-vps-scaffold"
   | "reality-vps-lab"
-  | "reality-vps-relay-lab";
+  | "reality-vps-relay-lab"
+  | "reality-yandex-edge";
 
 type OwnerRuntimeLabTransport = "tcp" | "grpc";
+type EdgeDraft = {
+  host: string;
+  port: number;
+  username: string;
+  authMethod: AuthMethod;
+  secret: string;
+  publicPort: number;
+};
 
 type OwnerRuntimeLabState = {
   mode: OwnerRuntimeLabMode;
@@ -64,6 +97,8 @@ type OwnerRuntimeLabState = {
   hintTag: string;
   vpsServerName: string;
   vpsPort: string;
+  vpsConnectHost: string;
+  vpsConnectPort: string;
   vpsTransport: OwnerRuntimeLabTransport;
   vpsFlow: string;
   vpsFingerprint: string;
@@ -77,13 +112,27 @@ type OwnerRuntimeLabState = {
   vpsRelaySourceLabel: string;
 };
 
-const storageKey = "odin-one-vk-control-center-v4";
+const storageKey = "odin-one-vk-control-center-v5";
 const ownerRuntimeLabStorageKey = "odin-one-owner-runtime-lab-v1";
-const ownerRuntimeLabUnlockStorageKey = "odin-one-owner-runtime-lab-unlocked-v1";
+const ownerRuntimeLabUnlockStorageKey =
+  "odin-one-owner-runtime-lab-unlocked-v1";
 const ownerRuntimeLabUnlockTapTarget = 5;
 const defaultOwnerRuntimeLabRelaySubscriptionUrl =
   "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Vless-Reality-White-Lists-Rus-Mobile.txt";
 const defaultOwnerRuntimeLabRelaySourceLabel = "igareck-mobile-hourly";
+const yandexEdgeConnectHost = "62.84.123.148";
+const yandexEdgeConnectPort = 443;
+const yandexEdgeSource = "operator-curated:yandex-edge";
+const yandexEdgeTag = "yandex-edge-62-84-123-148";
+const inviteFileExtension = ".odinone-access.json";
+const initialEdgeDraft: EdgeDraft = {
+  host: "",
+  port: 22,
+  username: "root",
+  authMethod: "password",
+  secret: "",
+  publicPort: 443,
+};
 const diagnosticsPreviewMaxLines = 8;
 const diagnosticsPreviewMaxChars = 720;
 const diagnosticsLogPreviewMaxLines = 24;
@@ -96,6 +145,8 @@ const defaultOwnerRuntimeLabState: OwnerRuntimeLabState = {
   hintTag: "candidate-max-ru",
   vpsServerName: "pimg.mycdn.me",
   vpsPort: "10443",
+  vpsConnectHost: "",
+  vpsConnectPort: "",
   vpsTransport: "tcp",
   vpsFlow: "xtls-rprx-vision",
   vpsFingerprint: "chrome",
@@ -106,45 +157,74 @@ const defaultOwnerRuntimeLabState: OwnerRuntimeLabState = {
   vpsUseOwnerRealityEgress: true,
   vpsUseRelayAutoselect: false,
   vpsRelaySubscriptionUrl: defaultOwnerRuntimeLabRelaySubscriptionUrl,
-  vpsRelaySourceLabel: defaultOwnerRuntimeLabRelaySourceLabel
+  vpsRelaySourceLabel: defaultOwnerRuntimeLabRelaySourceLabel,
 };
 
-const withIgareckRelayDefaults = (current: OwnerRuntimeLabState): OwnerRuntimeLabState => ({
+const withIgareckRelayDefaults = (
+  current: OwnerRuntimeLabState,
+): OwnerRuntimeLabState => ({
   ...current,
   vpsUseOwnerRealityEgress: current.vpsUseOwnerRealityEgress,
   vpsUseRelayAutoselect: true,
-  vpsRelaySubscriptionUrl: current.vpsRelaySubscriptionUrl.trim() || defaultOwnerRuntimeLabRelaySubscriptionUrl,
-  vpsRelaySourceLabel: current.vpsRelaySourceLabel.trim() || defaultOwnerRuntimeLabRelaySourceLabel,
+  vpsRelaySubscriptionUrl:
+    current.vpsRelaySubscriptionUrl.trim() ||
+    defaultOwnerRuntimeLabRelaySubscriptionUrl,
+  vpsRelaySourceLabel:
+    current.vpsRelaySourceLabel.trim() ||
+    defaultOwnerRuntimeLabRelaySourceLabel,
   vpsServerName: current.vpsServerName.trim() || "id.x5.ru",
   vpsPort:
-    Number.isInteger(Number.parseInt(current.vpsPort, 10)) && Number.parseInt(current.vpsPort, 10) > 0
+    Number.isInteger(Number.parseInt(current.vpsPort, 10)) &&
+    Number.parseInt(current.vpsPort, 10) > 0
       ? current.vpsPort
       : "443",
   vpsTransport: "tcp",
   vpsFlow: current.vpsFlow.trim() || "xtls-rprx-vision",
-  vpsFingerprint: current.vpsFingerprint.trim() || "chrome"
+  vpsFingerprint: current.vpsFingerprint.trim() || "chrome",
 });
 
 const isOwnerRuntimeLabVpsMode = (mode: OwnerRuntimeLabMode) =>
-  mode === "reality-vps-scaffold" || mode === "reality-vps-lab" || mode === "reality-vps-relay-lab";
+  mode === "reality-vps-scaffold" ||
+  mode === "reality-vps-lab" ||
+  mode === "reality-vps-relay-lab";
 
-const isOwnerRuntimeLabRelayOwnerMode = (mode: OwnerRuntimeLabMode) => mode === "reality-vps-relay-lab";
+const isOwnerRuntimeLabRelayOwnerMode = (mode: OwnerRuntimeLabMode) =>
+  mode === "reality-vps-relay-lab";
 
-const normalizeTransport = (transport: string | undefined): ServerDraft["transport"] =>
-  transport === "xray" || transport === "vk-turn-proxy+xray" ? transport : initialDraft.transport;
+const normalizeTransport = (
+  transport: string | undefined,
+): ServerDraft["transport"] =>
+  transport === "xray" || transport === "vk-turn-proxy+xray"
+    ? transport
+    : initialDraft.transport;
 
-const normalizeEngine = (engine: string | undefined): NonNullable<ServerDraft["engine"]> =>
+const normalizeEngine = (
+  engine: string | undefined,
+): NonNullable<ServerDraft["engine"]> =>
   engine === "sing-box" || engine === "xray" ? engine : "xray";
 
-const normalizeProtocol = (protocol: string | undefined): NonNullable<ServerDraft["protocol"]> =>
-  protocol === "vless-reality" || protocol === "direct-wireguard" ? protocol : "vless-reality";
+const normalizeProtocol = (
+  protocol: string | undefined,
+): NonNullable<ServerDraft["protocol"]> =>
+  protocol === "vless-reality" || protocol === "direct-wireguard"
+    ? protocol
+    : "vless-reality";
 
 const normalizePortHint = (port: number | undefined): number | undefined =>
-  typeof port === "number" && Number.isInteger(port) && port > 0 && port <= 65535 ? port : undefined;
+  typeof port === "number" &&
+  Number.isInteger(port) &&
+  port > 0 &&
+  port <= 65535
+    ? port
+    : undefined;
 
-const normalizeHostValue = (host: string | null | undefined) => host?.trim().toLowerCase() ?? "";
+const normalizeHostValue = (host: string | null | undefined) =>
+  host?.trim().toLowerCase() ?? "";
 
-const hostsMatch = (left: string | null | undefined, right: string | null | undefined) => {
+const hostsMatch = (
+  left: string | null | undefined,
+  right: string | null | undefined,
+) => {
   const normalizedLeft = normalizeHostValue(left);
   const normalizedRight = normalizeHostValue(right);
   if (!normalizedLeft || !normalizedRight) {
@@ -153,37 +233,80 @@ const hostsMatch = (left: string | null | undefined, right: string | null | unde
   return normalizedLeft === normalizedRight;
 };
 
-const normalizeInviteProtocol = (protocol: InviteProfile["protocol"] | undefined): NonNullable<ServerDraft["protocol"]> =>
+const normalizeInviteProtocol = (
+  protocol: InviteProfile["protocol"] | undefined,
+): NonNullable<ServerDraft["protocol"]> =>
   protocol === "wireguard" ? "direct-wireguard" : "vless-reality";
 
 const importedProfileHasReality = (profile: InviteProfile | null) =>
   Boolean(profile?.supportsReality ?? profile?.vlessReality?.port);
 
 const importedProfileHasVKRelay = (profile: InviteProfile | null) =>
-  Boolean(profile?.supportsVKRelay ?? (profile?.vkTurnProxyPort && profile?.wireGuardPort));
+  Boolean(
+    profile?.supportsVKRelay ??
+    (profile?.vkTurnProxyPort && profile?.wireGuardPort),
+  );
+
+const profileProtocolPackHasEntry = (
+  profile:
+    | Pick<OwnerAccessProfile, "protocolPack">
+    | Pick<InviteProfile, "protocolPack">
+    | null
+    | undefined,
+  id: string,
+) => Boolean(profile?.protocolPack?.some((entry) => entry.id === id));
+
+const ownerProfileHasYandexEdge = (profile: OwnerAccessProfile | null) =>
+  Boolean(
+    profile?.stagedFallbacks &&
+      Object.prototype.hasOwnProperty.call(
+        profile.stagedFallbacks,
+        "realityYandexEdge",
+      ),
+  ) || profileProtocolPackHasEntry(profile, "vless-reality-yandex-edge");
+
+const importedProfileHasYandexEdge = (profile: InviteProfile | null) =>
+  Boolean(
+    profile?.stagedFallbacks &&
+      Object.prototype.hasOwnProperty.call(
+        profile.stagedFallbacks,
+        "realityYandexEdge",
+      ),
+  ) || profileProtocolPackHasEntry(profile, "vless-reality-yandex-edge");
 
 const ownerProfileHasRealityRelay = (profile: OwnerAccessProfile | null) =>
   Boolean(
     profile?.stagedFallbacks &&
-      (Object.prototype.hasOwnProperty.call(profile.stagedFallbacks, "realityRelayOwnerEgress") ||
-        Object.prototype.hasOwnProperty.call(profile.stagedFallbacks, "vlessReality"))
+    (Object.prototype.hasOwnProperty.call(
+      profile.stagedFallbacks,
+      "realityRelayOwnerEgress",
+    ) ||
+      Object.prototype.hasOwnProperty.call(
+        profile.stagedFallbacks,
+        "vlessReality",
+      )),
   );
 
 const importedProfileHasRealityRelay = (profile: InviteProfile | null) =>
   Boolean(
     profile?.supportsRealityRelay ??
-      (profile?.stagedFallbacks &&
-        Object.prototype.hasOwnProperty.call(profile.stagedFallbacks, "realityRelayOwnerEgress"))
+    (profile?.stagedFallbacks &&
+      Object.prototype.hasOwnProperty.call(
+        profile.stagedFallbacks,
+        "realityRelayOwnerEgress",
+      )),
   );
 
 const resolveDraftEngine = (
   transport: ServerDraft["transport"] | undefined,
   protocol: ServerDraft["protocol"] | undefined,
-  engine: string | undefined
+  engine: string | undefined,
 ): NonNullable<ServerDraft["engine"]> => {
   const normalizedTransportValue = normalizeTransport(transport);
   const normalizedProtocolValue =
-    normalizedTransportValue === "xray" ? normalizeProtocol(protocol) : "direct-wireguard";
+    normalizedTransportValue === "xray"
+      ? normalizeProtocol(protocol)
+      : "direct-wireguard";
   if (normalizedProtocolValue === "vless-reality") {
     return "sing-box";
   }
@@ -193,24 +316,31 @@ const resolveDraftEngine = (
 const draftAccessMode = (serverDraft: ServerDraft): AccessMode =>
   serverDraft.transport === "vk-turn-proxy+xray" ? "vk-relay" : "vless-reality";
 
-const applyAccessModeToDraft = (serverDraft: ServerDraft, mode: AccessMode): ServerDraft => {
+const applyAccessModeToDraft = (
+  serverDraft: ServerDraft,
+  mode: AccessMode,
+): ServerDraft => {
   if (mode === "vk-relay") {
     return {
       ...serverDraft,
       transport: "vk-turn-proxy+xray",
       engine: "xray",
-      protocol: "direct-wireguard"
+      protocol: "direct-wireguard",
     };
   }
   return {
     ...serverDraft,
     transport: "xray",
     engine: "sing-box",
-    protocol: "vless-reality"
+    protocol: "vless-reality",
   };
 };
 
-const clampDiagnosticText = (value: string, maxLines = diagnosticsPreviewMaxLines, maxChars = diagnosticsPreviewMaxChars) => {
+const clampDiagnosticText = (
+  value: string,
+  maxLines = diagnosticsPreviewMaxLines,
+  maxChars = diagnosticsPreviewMaxChars,
+) => {
   const normalized = value.replace(/\r\n/g, "\n").trim();
   if (!normalized) {
     return "";
@@ -237,13 +367,26 @@ const formatDiagnosticLogTail = (lines: string[], fallback: string) => {
   }
 
   const relevantLines = lines.slice(-diagnosticsLogPreviewMaxLines);
-  return clampDiagnosticText(relevantLines.join("\n"), diagnosticsLogPreviewMaxLines, diagnosticsLogPreviewMaxChars);
+  return clampDiagnosticText(
+    relevantLines.join("\n"),
+    diagnosticsLogPreviewMaxLines,
+    diagnosticsLogPreviewMaxChars,
+  );
 };
 
 const ownerProfileHasRealityFallback = (profile: OwnerAccessProfile | null) =>
-  Boolean(profile?.stagedFallbacks && Object.prototype.hasOwnProperty.call(profile.stagedFallbacks, "vlessReality"));
+  Boolean(
+    profile?.stagedFallbacks &&
+    Object.prototype.hasOwnProperty.call(
+      profile.stagedFallbacks,
+      "vlessReality",
+    ),
+  );
 
-const ownerProfileSupportsDraft = (profile: OwnerAccessProfile | null, serverDraft: ServerDraft) => {
+const ownerProfileSupportsDraft = (
+  profile: OwnerAccessProfile | null,
+  serverDraft: ServerDraft,
+) => {
   if (!profile?.exists) {
     return false;
   }
@@ -257,18 +400,28 @@ const ownerProfileSupportsDraft = (profile: OwnerAccessProfile | null, serverDra
       profile.vkTurnProxyPort &&
       profile.wireguard?.serverPublicKey &&
       profile.wireguard?.clientPrivateKey &&
-      profile.wireguard?.address
+      profile.wireguard?.address,
     );
   }
-  return Boolean(profile.wireguard?.serverPublicKey && profile.wireguard?.clientPrivateKey && profile.wireguard?.address);
+  return Boolean(
+    profile.wireguard?.serverPublicKey &&
+    profile.wireguard?.clientPrivateKey &&
+    profile.wireguard?.address,
+  );
 };
 
-const importedProfileSupportsDraft = (profile: InviteProfile | null, serverDraft: ServerDraft) => {
+const importedProfileSupportsDraft = (
+  profile: InviteProfile | null,
+  serverDraft: ServerDraft,
+) => {
   if (!profile?.localPath) {
     return false;
   }
   const transport = normalizeTransport(serverDraft.transport);
-  if (transport === "xray" && normalizeProtocol(serverDraft.protocol) === "vless-reality") {
+  if (
+    transport === "xray" &&
+    normalizeProtocol(serverDraft.protocol) === "vless-reality"
+  ) {
     return importedProfileHasReality(profile);
   }
   if (transport === "vk-turn-proxy+xray") {
@@ -277,29 +430,82 @@ const importedProfileSupportsDraft = (profile: InviteProfile | null, serverDraft
   return importedProfileHasVKRelay(profile);
 };
 
-const ownerProfileSupportsRelayMode = (profile: OwnerAccessProfile | null, serverDraft: ServerDraft) =>
-  ownerProfileSupportsDraft(profile, serverDraft) && ownerProfileHasRealityRelay(profile);
+const ownerProfileSupportsRelayMode = (
+  profile: OwnerAccessProfile | null,
+  serverDraft: ServerDraft,
+) =>
+  ownerProfileSupportsDraft(profile, serverDraft) &&
+  ownerProfileHasRealityRelay(profile);
 
-const importedProfileSupportsRelayMode = (profile: InviteProfile | null, serverDraft: ServerDraft) =>
-  importedProfileSupportsDraft(profile, serverDraft) && importedProfileHasRealityRelay(profile);
+const importedProfileSupportsRelayMode = (
+  profile: InviteProfile | null,
+  serverDraft: ServerDraft,
+) =>
+  importedProfileSupportsDraft(profile, serverDraft) &&
+  importedProfileHasRealityRelay(profile);
 
-const importedProfileMatchesHost = (profile: InviteProfile | null, host: string | null | undefined) =>
-  Boolean(profile?.localPath && hostsMatch(host, profile?.serverHost));
+const ownerProfileSupportsYandexEdgeMode = (
+  profile: OwnerAccessProfile | null,
+  serverDraft: ServerDraft,
+) =>
+  ownerProfileSupportsDraft(profile, serverDraft) &&
+  ownerProfileHasYandexEdge(profile);
+
+const importedProfileSupportsYandexEdgeMode = (
+  profile: InviteProfile | null,
+  serverDraft: ServerDraft,
+) =>
+  importedProfileSupportsDraft(profile, serverDraft) &&
+  importedProfileHasYandexEdge(profile);
+
+const importedProfileMatchesHost = (
+  profile: InviteProfile | null,
+  host: string | null | undefined,
+) => Boolean(profile?.localPath && hostsMatch(host, profile?.serverHost));
 
 type PersistedState = {
   activeTab: WorkspaceTab;
   activeAccessTab: AccessTab;
   accessMode?: AccessMode;
   draft: ServerDraft;
+  edgeDraft?: EdgeDraft;
   deployPortMode: DeployPortMode;
   secret: string;
   vkLink: string;
+  whitelistIp?: string;
   validation: ValidationResponse | null;
   importedProfile?: InviteProfile | null;
 };
 
-const formatProtocolEntry = (entry: NonNullable<OwnerAccessProfile["protocolPack"]>[number]) =>
+const formatProtocolEntry = (
+  entry: ProtocolPackEntry,
+) =>
   `${entry.label} / ${entry.scheme} / ${entry.network.toUpperCase()} ${entry.port}`;
+
+const sanitizeInviteFilePart = (value: string) =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "odin-one";
+
+const buildInviteFileName = (profile: InviteProfile) =>
+  `${sanitizeInviteFilePart(profile.serverHost || "server")}-${sanitizeInviteFilePart(profile.name || "invite")}${inviteFileExtension}`;
+
+const formatInviteExportNotice = (
+  t: ReturnType<typeof useI18n>["t"],
+  fileName: string,
+  exportPath: string,
+) => {
+  const normalizedPath = exportPath.replace(/\\/g, "/");
+  if (normalizedPath.includes("/Download/Odin One/")) {
+    return `${t("saved")}: ${fileName}\n${t("exportProfileFileSavedDownload")}`;
+  }
+  if (normalizedPath.includes("/exports/")) {
+    return `${t("saved")}: ${fileName}\n${t("exportProfileFileSavedLocal")}`;
+  }
+  return `${t("saved")}: ${fileName}`;
+};
 
 export function ControlCenter() {
   const { locale, t } = useI18n();
@@ -307,7 +513,9 @@ export function ControlCenter() {
   const [activeAccessTab, setActiveAccessTab] = useState<AccessTab>("key");
   const [activeSheet, setActiveSheet] = useState<MobileSheet>(null);
   const [draft, setDraft] = useState<ServerDraft>(initialDraft);
-  const [selectedAccessMode, setSelectedAccessMode] = useState<AccessMode>("vless-reality");
+  const [edgeDraft, setEdgeDraft] = useState<EdgeDraft>(initialEdgeDraft);
+  const [selectedAccessMode, setSelectedAccessMode] =
+    useState<AccessMode>("vless-reality");
   const [deployPortMode, setDeployPortMode] = useState<DeployPortMode>("auto");
   const [secret, setSecret] = useState("");
   const [validation, setValidation] = useState<ValidationResponse | null>(null);
@@ -316,38 +524,59 @@ export function ControlCenter() {
   const [deployment, setDeployment] = useState<DeploymentState | null>(null);
   const [showDeploymentOverlay, setShowDeploymentOverlay] = useState(false);
   const [vkLink, setVKLink] = useState("");
+  const [whitelistIp, setWhitelistIp] = useState(yandexEdgeConnectHost);
+  const [whitelistLookup, setWhitelistLookup] =
+    useState<WhitelistLookupResult | null>(null);
+  const [whitelistLookupError, setWhitelistLookupError] = useState<
+    string | null
+  >(null);
+  const importProfileFileInputRef = useRef<HTMLInputElement | null>(null);
   const [localTunnel, setLocalTunnel] = useState<LocalTunnelState | null>(null);
   const [systemProxy, setSystemProxy] = useState<SystemProxyState | null>(null);
-  const [ownerProfile, setOwnerProfile] = useState<OwnerAccessProfile | null>(null);
+  const [ownerProfile, setOwnerProfile] = useState<OwnerAccessProfile | null>(
+    null,
+  );
   const [guestProfile, setGuestProfile] = useState<InviteProfile | null>(null);
   const [importShareCode, setImportShareCode] = useState("");
-  const [importedProfile, setImportedProfile] = useState<InviteProfile | null>(null);
+  const [importedProfile, setImportedProfile] = useState<InviteProfile | null>(
+    null,
+  );
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [coreHealth, setCoreHealth] = useState<CoreHealthState | null>(null);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
+  const [inviteFileNotice, setInviteFileNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [isPending, startTransition] = useTransition();
-  const [androidVpnVisualOverride, setAndroidVpnVisualOverride] = useState(false);
+  const [androidVpnVisualOverride, setAndroidVpnVisualOverride] =
+    useState(false);
   const [ownerRuntimeLabUnlocked, setOwnerRuntimeLabUnlocked] = useState(false);
-  const [ownerRuntimeLabUnlockTapCount, setOwnerRuntimeLabUnlockTapCount] = useState(0);
-  const [ownerRuntimeLab, setOwnerRuntimeLab] = useState<OwnerRuntimeLabState>(defaultOwnerRuntimeLabState);
+  const [ownerRuntimeLabUnlockTapCount, setOwnerRuntimeLabUnlockTapCount] =
+    useState(0);
+  const [ownerRuntimeLab, setOwnerRuntimeLab] = useState<OwnerRuntimeLabState>(
+    defaultOwnerRuntimeLabState,
+  );
   const isAndroidClient =
     coreHealth?.service === "odin-one-mobile-bridge" ||
-    (typeof window !== "undefined" && /Android/i.test(window.navigator.userAgent));
+    (typeof window !== "undefined" &&
+      /Android/i.test(window.navigator.userAgent));
   const curlCommand = localTunnel?.socksAddress
     ? `curl --socks5-hostname ${localTunnel.socksAddress} -I https://example.com`
     : "";
   const requiresVKLink = selectedAccessMode === "vk-relay";
-  const resolvedDraftHost = draft.host.trim() || importedProfile?.serverHost?.trim() || ownerProfile?.serverHost?.trim() || "";
+  const resolvedDraftHost =
+    draft.host.trim() ||
+    importedProfile?.serverHost?.trim() ||
+    ownerProfile?.serverHost?.trim() ||
+    "";
   const cooldownMinutes =
-    localTunnel?.cooldownRemainingSeconds && localTunnel.cooldownRemainingSeconds > 0
+    localTunnel?.cooldownRemainingSeconds &&
+    localTunnel.cooldownRemainingSeconds > 0
       ? Math.ceil(localTunnel.cooldownRemainingSeconds / 60)
       : 0;
-  const endpointPort = ownerProfile?.endpointPort ?? ownerProfile?.vkTurnProxyPort ?? 0;
   const deploymentPortSummary = [
     deployment?.turnPort ? `VK UDP ${deployment.turnPort}` : "",
-    deployment?.realityPort ? `REALITY TCP ${deployment.realityPort}` : ""
+    deployment?.realityPort ? `REALITY TCP ${deployment.realityPort}` : "",
   ]
     .filter(Boolean)
     .join(" / ");
@@ -357,49 +586,87 @@ export function ControlCenter() {
     isAndroidClient &&
     Boolean(
       localTunnel &&
-        localTunnel.status !== "idle" &&
-        localTunnel.status !== "stopped" &&
-        localTunnel.status !== "failed" &&
-        localTunnel.logTail?.some((line) => line.includes("Android VpnService established the system VPN interface."))
+      localTunnel.status !== "idle" &&
+      localTunnel.status !== "stopped" &&
+      localTunnel.status !== "failed" &&
+      localTunnel.logTail?.some((line) =>
+        line.includes(
+          "Android VpnService established the system VPN interface.",
+        ),
+      ),
     );
-  const runtimeTunnelActive = localTunnel?.status === "running" || androidInterfaceEstablished;
-  const vpnModeActive = runtimeTunnelActive && (isAndroidClient || isAndroidVpnRuntime || systemProxyActive);
+  const runtimeTunnelActive =
+    localTunnel?.status === "running" || androidInterfaceEstablished;
+  const vpnModeActive =
+    runtimeTunnelActive &&
+    (isAndroidClient || isAndroidVpnRuntime || systemProxyActive);
   const ownerRuntimeLabRealityDraft: ServerDraft = {
     ...draft,
     transport: "xray",
     engine: "sing-box",
-    protocol: "vless-reality"
+    protocol: "vless-reality",
   };
   const hasMatchingOwnerProfile = Boolean(
-    ownerProfileSupportsDraft(ownerProfile, draft) && hostsMatch(draft.host, ownerProfile?.serverHost)
+    ownerProfileSupportsDraft(ownerProfile, draft) &&
+    hostsMatch(draft.host, ownerProfile?.serverHost),
   );
   const hasMatchingImportedProfile = Boolean(
-    importedProfileSupportsDraft(importedProfile, draft) && hostsMatch(draft.host, importedProfile?.serverHost)
+    importedProfileSupportsDraft(importedProfile, draft) &&
+    hostsMatch(draft.host, importedProfile?.serverHost),
   );
-  const hasImportedProfileForHost = importedProfileMatchesHost(importedProfile, draft.host || resolvedDraftHost);
-  const hasLocalAccessProfile = Boolean(hasMatchingOwnerProfile || hasMatchingImportedProfile || hasImportedProfileForHost);
+  const hasImportedProfileForHost = importedProfileMatchesHost(
+    importedProfile,
+    draft.host || resolvedDraftHost,
+  );
+  const hasLocalAccessProfile = Boolean(
+    hasMatchingOwnerProfile ||
+    hasMatchingImportedProfile ||
+    hasImportedProfileForHost,
+  );
   const hasLocalRelayAccessProfile = Boolean(
     (ownerProfileSupportsRelayMode(ownerProfile, ownerRuntimeLabRealityDraft) &&
       hostsMatch(draft.host || resolvedDraftHost, ownerProfile?.serverHost)) ||
-      (importedProfileSupportsRelayMode(importedProfile, ownerRuntimeLabRealityDraft) &&
-        hostsMatch(draft.host || resolvedDraftHost, importedProfile?.serverHost))
+    (importedProfileSupportsRelayMode(
+      importedProfile,
+      ownerRuntimeLabRealityDraft,
+    ) &&
+      hostsMatch(draft.host || resolvedDraftHost, importedProfile?.serverHost)),
+  );
+  const hasLocalYandexEdgeAccessProfile = Boolean(
+    (ownerProfileSupportsYandexEdgeMode(
+      ownerProfile,
+      ownerRuntimeLabRealityDraft,
+    ) &&
+      hostsMatch(draft.host || resolvedDraftHost, ownerProfile?.serverHost)) ||
+      (importedProfileSupportsYandexEdgeMode(
+        importedProfile,
+        ownerRuntimeLabRealityDraft,
+      ) &&
+        hostsMatch(draft.host || resolvedDraftHost, importedProfile?.serverHost)),
   );
   const hasLocalAccessProfileForSelectedMode =
-    selectedAccessMode === "relay-via-server" ? hasLocalRelayAccessProfile : hasLocalAccessProfile;
-  const canGenerateGuestProfile = Boolean(resolvedDraftHost && ownerProfile?.exists && secret.trim());
+    selectedAccessMode === "yandex-edge"
+      ? hasLocalYandexEdgeAccessProfile
+      : selectedAccessMode === "relay-via-server" ||
+          selectedAccessMode === "relay-direct"
+      ? hasLocalRelayAccessProfile
+      : hasLocalAccessProfile;
+  const canGenerateGuestProfile = Boolean(
+    resolvedDraftHost && ownerProfile?.exists && secret.trim(),
+  );
   const guestProfileHint =
     importedProfile?.localPath && !ownerProfile?.exists
       ? t("guestAccessOwnerOnly")
       : ownerProfile?.exists && !secret.trim()
         ? t("guestAccessNeedsSecret")
         : !ownerProfile?.exists
-          ? t("noGuestProfile")
+          ? ""
           : "";
   const stageStatusLabels = {
     queued: t("stageQueued"),
     current: t("stageCurrent"),
     done: t("stageDone"),
-    failed: t("stageFailed")
+    failed: t("stageFailed"),
   };
 
   const translateStage = (stage: DeployStage): DeployStage => {
@@ -409,25 +676,49 @@ export function ControlCenter() {
 
     const labelMap: Record<string, string> = {
       "ssh-check": "Проверка SSH",
+      "origin-ssh-check": "Проверка origin",
+      "edge-ssh-check": "Проверка edge",
       "runtime-prep": "Подготовка окружения",
+      "edge-runtime-prep": "Подготовка edge",
       "install-binaries": "Установка бинарников",
       "configure-services": "Настройка сервисов",
+      "edge-configure": "Настройка edge",
       "service-start": "Запуск сервисов",
-      "egress-check": "Проверка исходящего трафика"
+      "edge-service-start": "Запуск edge",
+      "egress-check": "Проверка исходящего трафика",
+      "profile-refresh": "Обновление профиля",
     };
     const descriptionMap: Record<string, string> = {
-      "ssh-check": "Проверяет учётные данные, удалённую ОС и текущее состояние сервера.",
-      "runtime-prep": "Создаёт изолированные директории Odin One и проверяет сетевую готовность.",
-      "install-binaries": "Устанавливает xray и загружает server-side vk-turn-proxy для общего dual-stack runtime.",
-      "configure-services": "Генерирует ключи, пишет конфиги xray и ставит unit-файлы для REALITY и VK relay.",
-      "service-start": "Запускает xray и vk-turn-proxy на одном сервере и проверяет оба входа.",
-      "egress-check": "Проверяет DNS, HTTP и HTTPS egress на сервере после запуска сервисов."
+      "ssh-check":
+        "Проверяет учётные данные, удалённую ОС и текущее состояние сервера.",
+      "origin-ssh-check":
+        "Читает live owner profile на origin и подтверждает текущий REALITY inbound.",
+      "edge-ssh-check":
+        "Проверяет Yandex edge-хост и возможность аккуратно выполнить privileged setup.",
+      "runtime-prep":
+        "Создаёт изолированные директории Odin One и проверяет сетевую готовность.",
+      "edge-runtime-prep":
+        "Ставит socat на edge-хост и пишет manifest для TCP passthrough.",
+      "install-binaries":
+        "Устанавливает xray и загружает server-side vk-turn-proxy для общего dual-stack runtime.",
+      "configure-services":
+        "Генерирует ключи, пишет конфиги xray и ставит unit-файлы для REALITY и VK relay.",
+      "edge-configure":
+        "Ставит systemd forwarder, который поднимает новый вход через Yandex edge.",
+      "service-start":
+        "Запускает xray и vk-turn-proxy на одном сервере и проверяет оба входа.",
+      "edge-service-start":
+        "Запускает passthrough-сервис и проверяет reachability до текущего REALITY origin.",
+      "egress-check":
+        "Проверяет DNS, HTTP и HTTPS egress на сервере после запуска сервисов.",
+      "profile-refresh":
+        "Патчит owner profile и protocol pack, чтобы новый visible режим попал в один invite key.",
     };
 
     return {
       ...stage,
       label: labelMap[stage.id] ?? stage.label,
-      description: descriptionMap[stage.id] ?? stage.description
+      description: descriptionMap[stage.id] ?? stage.description,
     };
   };
 
@@ -439,6 +730,13 @@ export function ControlCenter() {
     const map: Record<string, string> = {
       "ssh-port": "SSH порт доступен",
       "tcp-connect": "TCP подключение",
+      "origin-tcp-connect": "TCP до origin",
+      "origin-owner-profile": "Owner profile origin",
+      "edge-tcp-connect": "TCP до edge",
+      "edge-remote-user": "Пользователь на edge",
+      "edge-os-release": "ОС на edge",
+      "edge-sudo-ready": "Sudo на edge",
+      "edge-public-port": "Публичный порт edge",
       "remote-user": "Удалённый пользователь",
       "os-release": "Операционная система",
       "sudo-presence": "Наличие sudo",
@@ -446,7 +744,7 @@ export function ControlCenter() {
       "curl-presence": "Наличие curl",
       "dns-resolution": "DNS резолвинг",
       "remote-http-egress": "Исходящий HTTP с сервера",
-      "remote-https-egress": "Исходящий HTTPS с сервера"
+      "remote-https-egress": "Исходящий HTTPS с сервера",
     };
 
     return map[key] ?? fallback;
@@ -459,7 +757,9 @@ export function ControlCenter() {
     if (detail === "No output") {
       return "Нет вывода";
     }
-    return detail.replace("Connected to ", "Подключено к ").replace("accepted the connection", "принял соединение");
+    return detail
+      .replace("Connected to ", "Подключено к ")
+      .replace("accepted the connection", "принял соединение");
   };
 
   const deploymentStatusLabel = deployment
@@ -467,7 +767,7 @@ export function ControlCenter() {
         queued: t("deployStatusQueued"),
         running: t("deployStatusRunning"),
         done: t("deployStatusDone"),
-        failed: t("deployStatusFailed")
+        failed: t("deployStatusFailed"),
       }[deployment.status] ?? deployment.status)
     : "";
   const tunnelStatusLabel = localTunnel
@@ -476,13 +776,55 @@ export function ControlCenter() {
         starting: t("tunnelStatusStarting"),
         running: t("tunnelStatusRunning"),
         stopped: t("tunnelStatusStopped"),
-        failed: t("tunnelStatusFailed")
+        failed: t("tunnelStatusFailed"),
       }[localTunnel.status] ?? localTunnel.status)
     : "";
-  const isBusy = (action: Exclude<PendingAction, null>) => pendingAction === action;
+  const isBusy = (action: Exclude<PendingAction, null>) =>
+    pendingAction === action;
   const vpnButtonBusy = isBusy("enableVpn") || isBusy("disableVpn");
-  const vpnActionActive = runtimeTunnelActive || vpnModeActive || (isAndroidClient && androidVpnVisualOverride);
+  const vpnActionActive =
+    runtimeTunnelActive ||
+    vpnModeActive ||
+    (isAndroidClient && androidVpnVisualOverride);
   const vpnVisualActive = vpnActionActive;
+  const modeTriggerError = Boolean(error) || localTunnel?.status === "failed";
+  const modeTriggerConnecting =
+    !modeTriggerError &&
+    !vpnVisualActive &&
+    (isBusy("enableVpn") || localTunnel?.status === "starting");
+  const modeTriggerClassName = [
+    "home-mode-trigger",
+    modeTriggerError
+      ? "home-mode-trigger--error"
+      : vpnVisualActive
+        ? "home-mode-trigger--active"
+        : modeTriggerConnecting
+          ? "home-mode-trigger--connecting"
+          : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const whitelistLookupSummary =
+    whitelistLookup && whitelistLookup.valid
+      ? whitelistLookup.matchedIp && whitelistLookup.matchedCidr
+        ? t("whitelistResultExactAndCidr")
+        : whitelistLookup.matchedIp
+          ? t("whitelistResultIpOnly")
+          : whitelistLookup.matchedCidr
+            ? t("whitelistResultCidrOnly")
+            : t("whitelistResultMissing")
+      : "";
+  const whitelistSourceSummary = whitelistLookup
+    ? [
+        whitelistLookup.sourceRepo,
+        whitelistLookup.ipListUrl,
+        whitelistLookup.cidrListUrl,
+      ].join("\n")
+    : "";
+  const exportableInviteProfile = guestProfile ?? importedProfile;
+  const exportableInviteFileName = exportableInviteProfile
+    ? buildInviteFileName(exportableInviteProfile)
+    : "";
   const vpnButtonLabel = isBusy("disableVpn")
     ? t("disablingVpn")
     : vpnActionActive
@@ -490,37 +832,29 @@ export function ControlCenter() {
       : isBusy("enableVpn") && !runtimeTunnelActive
         ? t("enablingVpn")
         : t("enableVpn");
-  const currentHost = localTunnel?.serverHost || draft.host || importedProfile?.serverHost || "—";
   const relayRuntimeActive = Boolean(
     localTunnel?.runtimeFamily === "reality-vps-lab" &&
-      localTunnel?.activationState === "active" &&
-      localTunnel?.relayAutoselectEnabled &&
-      localTunnel?.frontConnectHost
+    localTunnel?.activationState === "active" &&
+    localTunnel?.relayAutoselectEnabled &&
+    localTunnel?.frontConnectHost,
   );
   const relayOwnerRuntimeActive = Boolean(
-    relayRuntimeActive && localTunnel?.activeFeatures?.includes("reality-vps-owner-egress:on")
+    relayRuntimeActive &&
+    localTunnel?.activeFeatures?.includes("reality-vps-owner-egress:on"),
   );
   const relayDirectRuntimeActive = Boolean(
-    relayRuntimeActive && localTunnel?.activeFeatures?.includes("reality-vps-owner-egress:off")
+    relayRuntimeActive &&
+    localTunnel?.activeFeatures?.includes("reality-vps-owner-egress:off"),
   );
-  const currentTransport =
-    relayOwnerRuntimeActive || selectedAccessMode === "relay-via-server"
-      ? t("runtimeModeRelayOwner")
-      : relayDirectRuntimeActive || selectedAccessMode === "relay-direct"
-        ? t("runtimeModeRelayDirect")
-      : (localTunnel?.transport ?? draft.transport) === "vk-turn-proxy+xray"
-        ? t("runtimeModeVk")
-        : t("runtimeModeReality");
-  const selectedAccessModeHint =
-    selectedAccessMode === "relay-via-server"
-      ? t("runtimeModeRelayOwnerHint")
-      : selectedAccessMode === "relay-direct"
-        ? t("runtimeModeRelayDirectHint")
-      : selectedAccessMode === "vk-relay"
-        ? t("runtimeModeVkHint")
-        : t("runtimeModeRealityHint");
-  const currentEngine = localTunnel?.engine ?? deployment?.engine ?? draft.engine ?? "xray";
-  const currentProtocol = localTunnel?.protocol ?? deployment?.protocol ?? draft.protocol ?? "vless-reality";
+  const yandexEdgeRuntimeActive = Boolean(
+    localTunnel?.runtimeFamily === "reality-vps-lab" &&
+    localTunnel?.activationState === "active" &&
+    localTunnel?.frontConnectHost === yandexEdgeConnectHost &&
+    localTunnel?.activeFeatures?.includes(
+      `reality-vps-source:${yandexEdgeSource}`,
+    ) &&
+    localTunnel?.activeFeatures?.includes("reality-vps-owner-egress:off"),
+  );
   const deploymentHealthLabel = deployment?.healthChecks?.length
     ? deployment.healthChecks.every((check) => check.ok)
       ? t("remoteEgressReady")
@@ -535,13 +869,22 @@ export function ControlCenter() {
           ? t("testing")
           : t("tunnelStatusIdle")
     : t("tunnelStatusIdle");
-  const primaryStatusBadge = vpnVisualActive ? t("ready") : tunnelStatusLabel || t("tunnelStatusIdle");
-  const primaryStatusText = vpnVisualActive ? t("vpnEnabled") : t("vpnDisabled");
+  const primaryStatusBadge = vpnVisualActive
+    ? t("ready")
+    : tunnelStatusLabel || t("tunnelStatusIdle");
+  const primaryStatusText = vpnVisualActive
+    ? t("vpnEnabled")
+    : t("vpnDisabled");
   const relayOwnerConnectAnimation =
-    (selectedAccessMode === "relay-via-server" || selectedAccessMode === "relay-direct") &&
+    (selectedAccessMode === "yandex-edge" ||
+      selectedAccessMode === "relay-via-server" ||
+      selectedAccessMode === "relay-direct") &&
     !vpnVisualActive &&
-    (isBusy("enableVpn") || isBusy("startTunnel") || localTunnel?.status === "starting");
-  const coreRuntimeLabel = coreHealth?.status === "ok" ? t("runtimeHealthy") : t("runtimeUnavailable");
+    (isBusy("enableVpn") ||
+      isBusy("startTunnel") ||
+      localTunnel?.status === "starting");
+  const coreRuntimeLabel =
+    coreHealth?.status === "ok" ? t("runtimeHealthy") : t("runtimeUnavailable");
   const profileCacheLabel = draft.host
     ? ownerProfile?.exists
       ? t("profileCacheReady")
@@ -556,14 +899,18 @@ export function ControlCenter() {
           ? t("manualPortsDistinct")
           : null;
   const deployModeLabel = `${t("deployModeDual")} / ${deployPortMode === "manual" ? t("portSetupManual") : t("portSetupAuto")}`;
-  const safetyPostureLabel = systemProxyActive ? t("safetySystemProxyOn") : t("safetyLocalhostOnly");
+  const safetyPostureLabel = systemProxyActive
+    ? t("safetySystemProxyOn")
+    : t("safetyLocalhostOnly");
   const runtimeLogTail = localTunnel?.logTail ?? [];
   const runtimeStartSource = localTunnel?.startSource ?? t("diagnosticsEmpty");
   const runtimeFamily = localTunnel?.runtimeFamily ?? t("diagnosticsEmpty");
-  const runtimeActivationState = localTunnel?.activationState ?? t("diagnosticsEmpty");
+  const runtimeActivationState =
+    localTunnel?.activationState ?? t("diagnosticsEmpty");
   const runtimeFrontHost = localTunnel?.frontHost ?? t("diagnosticsEmpty");
   const runtimeFrontPath = localTunnel?.frontPath ?? t("diagnosticsEmpty");
-  const runtimeFrontProvider = localTunnel?.frontProvider ?? t("diagnosticsEmpty");
+  const runtimeFrontProvider =
+    localTunnel?.frontProvider ?? t("diagnosticsEmpty");
   const runtimeFrontTag = localTunnel?.frontTag ?? t("diagnosticsEmpty");
   const runtimeRelayAutoselectSummary = localTunnel?.relayAutoselectEnabled
     ? [
@@ -583,13 +930,17 @@ export function ControlCenter() {
             : t("diagnosticsEmpty")
         }`,
         `lastRefreshAt: ${localTunnel.relayAutoselectLastRefreshAt ?? t("diagnosticsEmpty")}`,
-        `lastError: ${localTunnel.relayAutoselectLastError ?? t("diagnosticsEmpty")}`
+        `lastError: ${localTunnel.relayAutoselectLastError ?? t("diagnosticsEmpty")}`,
       ].join("\n")
     : t("diagnosticsEmpty");
-  const runtimeSelectedSniHint = localTunnel?.selectedSniHint ?? t("diagnosticsEmpty");
-  const runtimeSelectedCidrHint = localTunnel?.selectedCidrHint ?? t("diagnosticsEmpty");
-  const runtimeWhitelistHintSource = localTunnel?.whitelistHintSource ?? t("diagnosticsEmpty");
-  const runtimeWhitelistHintTag = localTunnel?.whitelistHintTag ?? t("diagnosticsEmpty");
+  const runtimeSelectedSniHint =
+    localTunnel?.selectedSniHint ?? t("diagnosticsEmpty");
+  const runtimeSelectedCidrHint =
+    localTunnel?.selectedCidrHint ?? t("diagnosticsEmpty");
+  const runtimeWhitelistHintSource =
+    localTunnel?.whitelistHintSource ?? t("diagnosticsEmpty");
+  const runtimeWhitelistHintTag =
+    localTunnel?.whitelistHintTag ?? t("diagnosticsEmpty");
   const realityConfigMode = localTunnel?.configMode ?? t("diagnosticsEmpty");
   const runtimeAlwaysOnState =
     typeof localTunnel?.alwaysOnEnabled === "boolean"
@@ -609,62 +960,122 @@ export function ControlCenter() {
         ? t("stateEnabled")
         : t("stateDisabled")
       : t("diagnosticsEmpty");
-  const runtimeNetworkEvent = localTunnel?.lastNetworkEvent ?? t("diagnosticsEmpty");
+  const runtimeNetworkEvent =
+    localTunnel?.lastNetworkEvent ?? t("diagnosticsEmpty");
   const runtimeStartupDuration =
     typeof localTunnel?.lastStartupDurationMs === "number"
       ? `${localTunnel.lastStartupDurationMs} ms`
       : t("diagnosticsEmpty");
-  const runtimeStartupStage = localTunnel?.lastStartupStage ?? t("diagnosticsEmpty");
-  const runtimeFailureStage = localTunnel?.lastFailureStage ?? t("diagnosticsEmpty");
-  const runtimeFailureCode = localTunnel?.lastFailureCode ?? t("diagnosticsEmpty");
+  const runtimeStartupStage =
+    localTunnel?.lastStartupStage ?? t("diagnosticsEmpty");
+  const runtimeFailureStage =
+    localTunnel?.lastFailureStage ?? t("diagnosticsEmpty");
+  const runtimeFailureCode =
+    localTunnel?.lastFailureCode ?? t("diagnosticsEmpty");
   const runtimeRecoveryCounters = localTunnel
     ? `restore=${localTunnel.restoreCount ?? 0} / reload=${localTunnel.reloadCount ?? 0} / network=${localTunnel.networkChangeCount ?? 0}`
     : t("diagnosticsEmpty");
-  const runtimeRecoveryAction = localTunnel?.lastRecoveryAction ?? t("diagnosticsEmpty");
+  const runtimeRecoveryAction =
+    localTunnel?.lastRecoveryAction ?? t("diagnosticsEmpty");
   const realityFeatureSummary =
     localTunnel?.activeFeatures && localTunnel.activeFeatures.length > 0
       ? localTunnel.activeFeatures.join(" / ")
       : t("diagnosticsEmpty");
-  const runtimeRelayAutoselectSummaryDisplay = clampDiagnosticText(runtimeRelayAutoselectSummary);
-  const runtimeLogDisplay = formatDiagnosticLogTail(runtimeLogTail, t("diagnosticsEmpty"));
+  const runtimeRelayAutoselectSummaryDisplay = clampDiagnosticText(
+    runtimeRelayAutoselectSummary,
+  );
+  const runtimeLogDisplay = formatDiagnosticLogTail(
+    runtimeLogTail,
+    t("diagnosticsEmpty"),
+  );
   const runtimeLastTestDisplay = clampDiagnosticText(
-    localTunnel?.lastTest?.output ?? localTunnel?.lastTest?.error ?? t("diagnosticsEmpty"),
+    localTunnel?.lastTest?.output ??
+      localTunnel?.lastTest?.error ??
+      t("diagnosticsEmpty"),
     12,
-    1400
+    1400,
   );
   const operatorSummary = [
     coreHealth?.status === "ok" ? t("runtimeHealthy") : t("runtimeUnavailable"),
     ownerProfile?.exists ? t("profileCacheReady") : t("profileCacheMissing"),
     localTunnel?.status === "running" ? tunnelStatusLabel : primaryStatusBadge,
-    deploymentHealthLabel
+    deploymentHealthLabel,
   ].join(" / ");
-  const recoveryHint = !resolvedDraftHost || (!secret.trim() && !hasLocalAccessProfile)
-    ? t("recoveryHintValidate")
-    : requiresVKLink && !vkLink.trim()
-      ? t("recoveryHintVkLink")
-      : cooldownMinutes > 0
-        ? t("recoveryHintCooldown")
-        : localTunnel?.status === "running"
-          ? t("recoveryHintSystemProxy")
-          : importedProfile?.localPath
-            ? t("recoveryHintImport")
-            : ownerProfile?.exists
-              ? t("recoveryHintOwnerProfile")
-              : t("recoveryHintGeneric");
-  const currentProtocolPack = ownerProfile?.protocolPack ?? deployment?.protocolPack ?? validation?.protocolPack ?? [];
-  const activeProtocolEntry = currentProtocolPack.find((entry) => entry.status === "active") ?? currentProtocolPack[0];
-  const stagedProtocolEntries = currentProtocolPack.filter((entry) => entry.status !== "active");
-  const protocolPackSummary = activeProtocolEntry
-    ? `${activeProtocolEntry.label} / ${activeProtocolEntry.scheme} / ${activeProtocolEntry.network.toUpperCase()} ${activeProtocolEntry.port}`
-    : t("diagnosticsEmpty");
-  const stagedFallbackSummary = stagedProtocolEntries.length > 0
-    ? stagedProtocolEntries.map((entry) => formatProtocolEntry(entry)).join("\n")
-    : t("diagnosticsEmpty");
-  const ownerRuntimeLabPanelVisible = isAndroidClient && ownerRuntimeLabUnlocked;
+  const currentProtocolPack =
+    ownerProfile?.protocolPack ??
+    importedProfile?.protocolPack ??
+    deployment?.protocolPack ??
+    validation?.protocolPack ??
+    [];
+  const protocolEntryById = new Map(
+    currentProtocolPack.map((entry) => [entry.id, entry]),
+  );
+  const accessModeCards = [
+    {
+      mode: "vless-reality" as const,
+      label: t("runtimeModeReality"),
+      hint: t("runtimeModeRealityHint"),
+      status:
+        protocolEntryById.get("vless-reality")?.status === "active"
+          ? t("modeStatusLive")
+          : t("modeStatusReady"),
+      available: true,
+    },
+    {
+      mode: "yandex-edge" as const,
+      label: t("runtimeModeYandexEdge"),
+      hint: t("runtimeModeYandexEdgeHint"),
+      status: protocolEntryById.has("vless-reality-yandex-edge")
+        ? t("modeStatusOptional")
+        : t("modeStatusAttach"),
+      available:
+        isAndroidClient && protocolEntryById.has("vless-reality-yandex-edge"),
+    },
+    {
+      mode: "vk-relay" as const,
+      label: t("runtimeModeVk"),
+      hint: t("runtimeModeVkHint"),
+      status:
+        protocolEntryById.get("vk-turn-wireguard")?.status === "active"
+          ? t("modeStatusLive")
+          : t("modeStatusReady"),
+      available: true,
+    },
+    {
+      mode: "relay-via-server" as const,
+      label: t("runtimeModeRelayOwner"),
+      hint: t("runtimeModeRelayOwnerHint"),
+      status: protocolEntryById.has("vless-reality-relay-owner")
+        ? t("modeStatusOptional")
+        : t("modeStatusLocked"),
+      available:
+        isAndroidClient && protocolEntryById.has("vless-reality-relay-owner"),
+    },
+    {
+      mode: "relay-direct" as const,
+      label: t("runtimeModeRelayDirect"),
+      hint: t("runtimeModeRelayDirectHint"),
+      status: protocolEntryById.has("vless-reality-relay-direct")
+        ? t("modeStatusOptional")
+        : t("modeStatusLocked"),
+      available:
+        isAndroidClient && protocolEntryById.has("vless-reality-relay-direct"),
+    },
+  ];
+  const selectedAccessModeCard =
+    accessModeCards.find((entry) => entry.mode === selectedAccessMode) ??
+    accessModeCards[0];
+  const ownerRuntimeLabPanelVisible =
+    isAndroidClient && ownerRuntimeLabUnlocked;
   const ownerRuntimeLabHintInputsVisible =
-    ownerRuntimeLab.mode === "reality-whitelist-scaffold" || ownerRuntimeLab.mode === "reality-whitelist-lab";
-  const ownerRuntimeLabVpsInputsVisible = isOwnerRuntimeLabVpsMode(ownerRuntimeLab.mode);
-  const ownerRuntimeLabVpsRelayOwnerMode = isOwnerRuntimeLabRelayOwnerMode(ownerRuntimeLab.mode);
+    ownerRuntimeLab.mode === "reality-whitelist-scaffold" ||
+    ownerRuntimeLab.mode === "reality-whitelist-lab";
+  const ownerRuntimeLabVpsInputsVisible = isOwnerRuntimeLabVpsMode(
+    ownerRuntimeLab.mode,
+  );
+  const ownerRuntimeLabVpsRelayOwnerMode = isOwnerRuntimeLabRelayOwnerMode(
+    ownerRuntimeLab.mode,
+  );
   const ownerRuntimeLabVpsManualInputsVisible =
     ownerRuntimeLabVpsInputsVisible &&
     !ownerRuntimeLabVpsRelayOwnerMode &&
@@ -675,7 +1086,9 @@ export function ControlCenter() {
   const ownerRuntimeLabRequiresOwnerProfile =
     !ownerProfileSupportsDraft(ownerProfile, ownerRuntimeLabRealityDraft) ||
     !hostsMatch(resolvedDraftHost, ownerProfile?.serverHost);
-  const ownerRuntimeLabDisabledReason = ownerRuntimeLabRequiresOwnerProfile ? t("ownerLabNeedsOwnerProfile") : null;
+  const ownerRuntimeLabDisabledReason = ownerRuntimeLabRequiresOwnerProfile
+    ? t("ownerLabNeedsOwnerProfile")
+    : null;
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -690,17 +1103,30 @@ export function ControlCenter() {
 
     try {
       const parsed = JSON.parse(saved) as Partial<PersistedState>;
-      if (parsed.activeTab === "server" || parsed.activeTab === "access" || parsed.activeTab === "tunnel") {
+      if (
+        parsed.activeTab === "server" ||
+        parsed.activeTab === "access" ||
+        parsed.activeTab === "tunnel"
+      ) {
         setActiveTab(parsed.activeTab);
       }
-      if (parsed.activeAccessTab === "key" || parsed.activeAccessTab === "share" || parsed.activeAccessTab === "import") {
+      if (
+        parsed.activeAccessTab === "key" ||
+        parsed.activeAccessTab === "share" ||
+        parsed.activeAccessTab === "import"
+      ) {
         setActiveAccessTab(parsed.activeAccessTab);
       }
       if (parsed.draft) {
-        const normalizedTransportValue = normalizeTransport(parsed.draft.transport);
-        const normalizedProtocolValue = normalizeProtocol(parsed.draft.protocol);
+        const normalizedTransportValue = normalizeTransport(
+          parsed.draft.transport,
+        );
+        const normalizedProtocolValue = normalizeProtocol(
+          parsed.draft.protocol,
+        );
         const normalizedDraftProtocol =
-          normalizedTransportValue === "xray" && normalizedProtocolValue === "direct-wireguard"
+          normalizedTransportValue === "xray" &&
+          normalizedProtocolValue === "direct-wireguard"
             ? "vless-reality"
             : normalizedProtocolValue;
         setDraft({
@@ -709,13 +1135,18 @@ export function ControlCenter() {
           username: parsed.draft.username ?? initialDraft.username,
           authMethod: parsed.draft.authMethod ?? initialDraft.authMethod,
           transport: normalizedTransportValue,
-          engine: resolveDraftEngine(normalizedTransportValue, normalizedDraftProtocol, parsed.draft.engine),
+          engine: resolveDraftEngine(
+            normalizedTransportValue,
+            normalizedDraftProtocol,
+            parsed.draft.engine,
+          ),
           protocol: normalizedDraftProtocol,
           vkTurnProxyPort: normalizePortHint(parsed.draft.vkTurnProxyPort),
-          realityPort: normalizePortHint(parsed.draft.realityPort)
+          realityPort: normalizePortHint(parsed.draft.realityPort),
         });
         if (
           parsed.accessMode === "vless-reality" ||
+          parsed.accessMode === "yandex-edge" ||
           parsed.accessMode === "vk-relay" ||
           parsed.accessMode === "relay-via-server" ||
           parsed.accessMode === "relay-direct"
@@ -726,15 +1157,33 @@ export function ControlCenter() {
         }
         setDeployPortMode(
           parsed.deployPortMode === "manual" ||
-          normalizePortHint(parsed.draft.vkTurnProxyPort) ||
-          normalizePortHint(parsed.draft.realityPort)
+            normalizePortHint(parsed.draft.vkTurnProxyPort) ||
+            normalizePortHint(parsed.draft.realityPort)
             ? "manual"
-            : "auto"
+            : "auto",
         );
         if (parsed.draft.host) {
           void fetchOwnerProfile(parsed.draft.host);
           void fetchImportedProfile(parsed.draft.host);
         }
+      }
+      if (parsed.edgeDraft) {
+        setEdgeDraft({
+          host: parsed.edgeDraft.host ?? initialEdgeDraft.host,
+          port: parsed.edgeDraft.port ?? initialEdgeDraft.port,
+          username: parsed.edgeDraft.username ?? initialEdgeDraft.username,
+          authMethod:
+            parsed.edgeDraft.authMethod === "private-key" ||
+            parsed.edgeDraft.authMethod === "password"
+              ? parsed.edgeDraft.authMethod
+              : initialEdgeDraft.authMethod,
+          secret: parsed.edgeDraft.secret ?? initialEdgeDraft.secret,
+          publicPort:
+            typeof parsed.edgeDraft.publicPort === "number" &&
+            parsed.edgeDraft.publicPort > 0
+              ? parsed.edgeDraft.publicPort
+              : initialEdgeDraft.publicPort,
+        });
       }
       if (parsed.importedProfile?.localPath) {
         setImportedProfile(parsed.importedProfile);
@@ -745,6 +1194,9 @@ export function ControlCenter() {
       if (typeof parsed.vkLink === "string") {
         setVKLink(parsed.vkLink);
       }
+      if (typeof parsed.whitelistIp === "string" && parsed.whitelistIp.trim()) {
+        setWhitelistIp(parsed.whitelistIp);
+      }
       if (parsed.validation) {
         setValidation(parsed.validation);
       }
@@ -753,29 +1205,52 @@ export function ControlCenter() {
     }
 
     try {
-      const savedOwnerRuntimeLab = window.localStorage.getItem(ownerRuntimeLabStorageKey);
+      const savedOwnerRuntimeLab = window.localStorage.getItem(
+        ownerRuntimeLabStorageKey,
+      );
       if (savedOwnerRuntimeLab) {
-        const parsed = JSON.parse(savedOwnerRuntimeLab) as Partial<OwnerRuntimeLabState>;
+        const parsed = JSON.parse(
+          savedOwnerRuntimeLab,
+        ) as Partial<OwnerRuntimeLabState>;
         setOwnerRuntimeLab({
           mode:
             parsed.mode === "reality-whitelist-scaffold" ||
             parsed.mode === "reality-whitelist-lab" ||
             parsed.mode === "reality-vps-scaffold" ||
             parsed.mode === "reality-vps-lab" ||
-            parsed.mode === "reality-vps-relay-lab"
+            parsed.mode === "reality-vps-relay-lab" ||
+            parsed.mode === "reality-yandex-edge"
               ? parsed.mode
               : "off",
-          hintServerName: parsed.hintServerName ?? defaultOwnerRuntimeLabState.hintServerName,
-          hintCidrBucket: parsed.hintCidrBucket ?? defaultOwnerRuntimeLabState.hintCidrBucket,
-          hintSource: parsed.hintSource ?? defaultOwnerRuntimeLabState.hintSource,
+          hintServerName:
+            parsed.hintServerName ?? defaultOwnerRuntimeLabState.hintServerName,
+          hintCidrBucket:
+            parsed.hintCidrBucket ?? defaultOwnerRuntimeLabState.hintCidrBucket,
+          hintSource:
+            parsed.hintSource ?? defaultOwnerRuntimeLabState.hintSource,
           hintTag: parsed.hintTag ?? defaultOwnerRuntimeLabState.hintTag,
-          vpsServerName: parsed.vpsServerName ?? defaultOwnerRuntimeLabState.vpsServerName,
+          vpsServerName:
+            parsed.vpsServerName ?? defaultOwnerRuntimeLabState.vpsServerName,
           vpsPort: parsed.vpsPort ?? defaultOwnerRuntimeLabState.vpsPort,
-          vpsTransport: parsed.vpsTransport === "grpc" ? "grpc" : defaultOwnerRuntimeLabState.vpsTransport,
+          vpsConnectHost:
+            parsed.vpsConnectHost ??
+            defaultOwnerRuntimeLabState.vpsConnectHost,
+          vpsConnectPort:
+            parsed.vpsConnectPort ??
+            defaultOwnerRuntimeLabState.vpsConnectPort,
+          vpsTransport:
+            parsed.vpsTransport === "grpc"
+              ? "grpc"
+              : defaultOwnerRuntimeLabState.vpsTransport,
           vpsFlow: parsed.vpsFlow ?? defaultOwnerRuntimeLabState.vpsFlow,
-          vpsFingerprint: parsed.vpsFingerprint ?? defaultOwnerRuntimeLabState.vpsFingerprint,
-          vpsGrpcServiceName: parsed.vpsGrpcServiceName ?? defaultOwnerRuntimeLabState.vpsGrpcServiceName,
-          vpsGrpcAuthority: parsed.vpsGrpcAuthority ?? defaultOwnerRuntimeLabState.vpsGrpcAuthority,
+          vpsFingerprint:
+            parsed.vpsFingerprint ?? defaultOwnerRuntimeLabState.vpsFingerprint,
+          vpsGrpcServiceName:
+            parsed.vpsGrpcServiceName ??
+            defaultOwnerRuntimeLabState.vpsGrpcServiceName,
+          vpsGrpcAuthority:
+            parsed.vpsGrpcAuthority ??
+            defaultOwnerRuntimeLabState.vpsGrpcAuthority,
           vpsSource: parsed.vpsSource ?? defaultOwnerRuntimeLabState.vpsSource,
           vpsTag: parsed.vpsTag ?? defaultOwnerRuntimeLabState.vpsTag,
           vpsUseOwnerRealityEgress:
@@ -787,16 +1262,20 @@ export function ControlCenter() {
               ? parsed.vpsUseRelayAutoselect
               : defaultOwnerRuntimeLabState.vpsUseRelayAutoselect,
           vpsRelaySubscriptionUrl:
-            parsed.vpsRelaySubscriptionUrl ?? defaultOwnerRuntimeLabState.vpsRelaySubscriptionUrl,
+            parsed.vpsRelaySubscriptionUrl ??
+            defaultOwnerRuntimeLabState.vpsRelaySubscriptionUrl,
           vpsRelaySourceLabel:
-            parsed.vpsRelaySourceLabel ?? defaultOwnerRuntimeLabState.vpsRelaySourceLabel
+            parsed.vpsRelaySourceLabel ??
+            defaultOwnerRuntimeLabState.vpsRelaySourceLabel,
         });
       }
     } catch {
       window.localStorage.removeItem(ownerRuntimeLabStorageKey);
     }
 
-    if (window.localStorage.getItem(ownerRuntimeLabUnlockStorageKey) === "true") {
+    if (
+      window.localStorage.getItem(ownerRuntimeLabUnlockStorageKey) === "true"
+    ) {
       setOwnerRuntimeLabUnlocked(true);
     }
 
@@ -809,13 +1288,19 @@ export function ControlCenter() {
     if (typeof window === "undefined" || !isAndroidClient) {
       return;
     }
-    if (localTunnel?.status !== "running" && localTunnel?.status !== "starting") {
+    if (
+      localTunnel?.status !== "running" &&
+      localTunnel?.status !== "starting"
+    ) {
       return;
     }
 
-    const intervalId = window.setInterval(() => {
-      void pollLocalTunnel(true);
-    }, activeSheet === "logs" ? 4000 : 1500);
+    const intervalId = window.setInterval(
+      () => {
+        void pollLocalTunnel(true);
+      },
+      activeSheet === "logs" ? 4000 : 1500,
+    );
 
     return () => window.clearInterval(intervalId);
   }, [activeSheet, isAndroidClient, localTunnel?.status]);
@@ -824,10 +1309,22 @@ export function ControlCenter() {
     if (!isAndroidClient) {
       return;
     }
-    if (!localTunnel || localTunnel.status === "idle" || localTunnel.status === "stopped" || localTunnel.status === "failed") {
+    if (
+      !localTunnel ||
+      localTunnel.status === "idle" ||
+      localTunnel.status === "stopped" ||
+      localTunnel.status === "failed"
+    ) {
       setAndroidVpnVisualOverride(false);
     }
   }, [isAndroidClient, localTunnel]);
+
+  useEffect(() => {
+    if (selectedAccessModeCard.available) {
+      return;
+    }
+    setSelectedAccessMode("vless-reality");
+  }, [selectedAccessModeCard.available, selectedAccessMode]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -839,20 +1336,37 @@ export function ControlCenter() {
       activeAccessTab,
       accessMode: selectedAccessMode,
       draft,
+      edgeDraft,
       deployPortMode,
       secret,
       vkLink,
+      whitelistIp,
       validation,
-      importedProfile
+      importedProfile,
     };
     window.localStorage.setItem(storageKey, JSON.stringify(snapshot));
-  }, [activeAccessTab, activeTab, deployPortMode, draft, importedProfile, secret, selectedAccessMode, validation, vkLink]);
+  }, [
+    activeAccessTab,
+    activeTab,
+    deployPortMode,
+    draft,
+    edgeDraft,
+    importedProfile,
+    secret,
+    selectedAccessMode,
+    validation,
+    whitelistIp,
+    vkLink,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
-    window.localStorage.setItem(ownerRuntimeLabStorageKey, JSON.stringify(ownerRuntimeLab));
+    window.localStorage.setItem(
+      ownerRuntimeLabStorageKey,
+      JSON.stringify(ownerRuntimeLab),
+    );
   }, [ownerRuntimeLab]);
 
   useEffect(() => {
@@ -866,22 +1380,52 @@ export function ControlCenter() {
     }
   }, [ownerRuntimeLabUnlocked]);
 
-  const handleValidate = () => {
+  const buildProvisionPayload = (
+    flow: ProvisionFlow = "origin",
+  ): {
+    server: ServerDraft;
+    secret: string;
+    flow: ProvisionFlow;
+    edge?: EdgeAttachDraft;
+  } => {
+    if (flow === "edge-attach") {
+      return {
+        server: draft,
+        secret,
+        flow,
+        edge: {
+          enabled: true,
+          provider: "yandex-edge",
+          server: {
+            host: edgeDraft.host,
+            port: edgeDraft.port,
+            username: edgeDraft.username,
+            authMethod: edgeDraft.authMethod,
+          },
+          secret: edgeDraft.secret,
+          publicPort: edgeDraft.publicPort,
+        },
+      };
+    }
+
+    return {
+      server: draft,
+      secret,
+      flow,
+    };
+  };
+
+  const handleValidate = (flow: ProvisionFlow = "origin") => {
     setError(null);
     startTransition(async () => {
       try {
-        const validateRes = await coreApi.validateProvision({
-          server: draft,
-          secret
-        });
+        const payload = buildProvisionPayload(flow);
+        const validateRes = await coreApi.validateProvision(payload);
         const validateData = validateRes.data;
         setValidation(validateData);
         setShowValidationOverlay(true);
 
-        const planRes = await coreApi.getProvisionPlan({
-          server: draft,
-          secret
-        });
+        const planRes = await coreApi.getProvisionPlan(payload);
         const planData = planRes.data;
         setPlan(planData.steps ?? []);
 
@@ -889,21 +1433,21 @@ export function ControlCenter() {
           setError(validateData.error);
         }
       } catch (requestError) {
-        const message = requestError instanceof Error ? requestError.message : "Unknown error";
+        const message =
+          requestError instanceof Error
+            ? requestError.message
+            : "Unknown error";
         setError(message);
       }
     });
   };
 
-  const handleDeploy = () => {
+  const handleDeploy = (flow: ProvisionFlow = "origin") => {
     setError(null);
     setSuccessNotice(null);
     startTransition(async () => {
       try {
-        const deployRes = await coreApi.startDeployment({
-          server: draft,
-          secret
-        });
+        const deployRes = await coreApi.startDeployment(buildProvisionPayload(flow));
         const deployData = deployRes.data;
         setDeployment(deployData);
         setPlan(deployData.steps);
@@ -915,7 +1459,9 @@ export function ControlCenter() {
         }
 
         const timer = window.setInterval(async () => {
-          const statusRes = await coreApi.getDeployment(deployData.deploymentId);
+          const statusRes = await coreApi.getDeployment(
+            deployData.deploymentId,
+          );
           const statusData = statusRes.data;
           setDeployment(statusData);
           setPlan(statusData.steps);
@@ -923,7 +1469,11 @@ export function ControlCenter() {
             window.clearInterval(timer);
             setShowDeploymentOverlay(false);
             if (statusData.status === "done") {
-              setSuccessNotice(t("deploySuccess"));
+              setSuccessNotice(
+                flow === "edge-attach"
+                  ? t("edgeAttachSuccess")
+                  : t("deploySuccess"),
+              );
               void fetchOwnerProfile(draft.host);
             } else if (statusData.error) {
               setError(statusData.error);
@@ -931,7 +1481,10 @@ export function ControlCenter() {
           }
         }, 1200);
       } catch (requestError) {
-        const message = requestError instanceof Error ? requestError.message : t("unknownError");
+        const message =
+          requestError instanceof Error
+            ? requestError.message
+            : t("unknownError");
         setError(message);
       }
     });
@@ -973,31 +1526,80 @@ export function ControlCenter() {
     return null;
   };
 
+  const handleCheckWhitelistIp = () => {
+    startTransition(() => {
+      setPendingAction("checkWhitelist");
+      setWhitelistLookupError(null);
+      void coreApi
+        .checkWhitelistIp(whitelistIp)
+        .then((res) => {
+          if (!res.ok) {
+            setWhitelistLookup(null);
+            setWhitelistLookupError(res.data.error ?? t("unknownError"));
+            return;
+          }
+          setWhitelistLookup(res.data);
+        })
+        .catch((requestError) => {
+          const message =
+            requestError instanceof Error
+              ? requestError.message
+              : t("unknownError");
+          setWhitelistLookup(null);
+          setWhitelistLookupError(message);
+        })
+        .finally(() => {
+          setPendingAction(null);
+        });
+    });
+  };
+
   const applyImportedProfile = (profile: InviteProfile) => {
     const importedTransport = normalizeTransport(profile.transport);
     const importedProtocol = normalizeInviteProtocol(profile.protocol);
     setImportedProfile(profile);
-    setSelectedAccessMode(draftAccessMode({ ...initialDraft, transport: importedTransport, protocol: importedProtocol }));
+    setSelectedAccessMode(
+      draftAccessMode({
+        ...initialDraft,
+        transport: importedTransport,
+        protocol: importedProtocol,
+      }),
+    );
     setDraft((current) => ({
       ...current,
       host: profile.serverHost || current.host,
       transport: importedTransport,
-      engine: resolveDraftEngine(importedTransport, importedProtocol, current.engine),
-      protocol: importedProtocol
+      engine: resolveDraftEngine(
+        importedTransport,
+        importedProtocol,
+        current.engine,
+      ),
+      protocol: importedProtocol,
     }));
     setSecret("");
   };
 
-  const resolveRuntimeIdentity = (serverDraft: ServerDraft, ownerRuntimeLabRequest?: OwnerRuntimeLabRequest) => {
+  const resolveRuntimeIdentity = (
+    serverDraft: ServerDraft,
+    ownerRuntimeLabRequest?: OwnerRuntimeLabRequest,
+  ) => {
     const transport = normalizeTransport(serverDraft.transport);
     const protocol =
-      transport === "xray" ? normalizeProtocol(serverDraft.protocol) : "direct-wireguard";
+      transport === "xray"
+        ? normalizeProtocol(serverDraft.protocol)
+        : "direct-wireguard";
     if (transport === "vk-turn-proxy+xray") {
       return { runtimeFamily: "vk-relay", activationState: "active" };
     }
     if (transport === "xray" && protocol === "vless-reality") {
+      if (ownerRuntimeLabRequest?.mode === "reality-yandex-edge") {
+        return { runtimeFamily: "reality-vps-lab", activationState: "active" };
+      }
       if (ownerRuntimeLabRequest?.mode === "reality-vps-scaffold") {
-        return { runtimeFamily: "reality-vps-lab", activationState: "scaffold_only" };
+        return {
+          runtimeFamily: "reality-vps-lab",
+          activationState: "scaffold_only",
+        };
       }
       if (
         ownerRuntimeLabRequest?.mode === "reality-vps-lab" ||
@@ -1006,10 +1608,16 @@ export function ControlCenter() {
         return { runtimeFamily: "reality-vps-lab", activationState: "active" };
       }
       if (ownerRuntimeLabRequest?.mode === "reality-whitelist-scaffold") {
-        return { runtimeFamily: "reality-whitelist-assisted", activationState: "scaffold_only" };
+        return {
+          runtimeFamily: "reality-whitelist-assisted",
+          activationState: "scaffold_only",
+        };
       }
       if (ownerRuntimeLabRequest?.mode === "reality-whitelist-lab") {
-        return { runtimeFamily: "reality-whitelist-assisted", activationState: "active" };
+        return {
+          runtimeFamily: "reality-whitelist-assisted",
+          activationState: "active",
+        };
       }
       return { runtimeFamily: "direct-reality", activationState: "active" };
     }
@@ -1022,16 +1630,22 @@ export function ControlCenter() {
     options?: {
       allowImportedProfileForOwnerRuntimeLab?: boolean;
       requireRelaySupport?: boolean;
+      requireYandexEdgeSupport?: boolean;
       forceRelayAutoselectDefaults?: boolean;
-    }
+    },
   ) => {
-    const allowImportedProfileForOwnerRuntimeLab = options?.allowImportedProfileForOwnerRuntimeLab ?? false;
+    const allowImportedProfileForOwnerRuntimeLab =
+      options?.allowImportedProfileForOwnerRuntimeLab ?? false;
     const requireRelaySupport = options?.requireRelaySupport ?? false;
-    const forceRelayAutoselectDefaults = options?.forceRelayAutoselectDefaults ?? false;
+    const requireYandexEdgeSupport =
+      options?.requireYandexEdgeSupport ?? false;
+    const forceRelayAutoselectDefaults =
+      options?.forceRelayAutoselectDefaults ?? false;
     const effectiveOwnerRuntimeLab =
       allowImportedProfileForOwnerRuntimeLab &&
       forceRelayAutoselectDefaults &&
-      (ownerRuntimeLabMode === "reality-vps-relay-lab" || ownerRuntimeLabMode === "reality-vps-lab")
+      (ownerRuntimeLabMode === "reality-vps-relay-lab" ||
+        ownerRuntimeLabMode === "reality-vps-lab")
         ? withIgareckRelayDefaults(ownerRuntimeLab)
         : ownerRuntimeLab;
     const effectiveBaseDraft: ServerDraft =
@@ -1041,38 +1655,57 @@ export function ControlCenter() {
             ...baseDraft,
             transport: "xray",
             engine: "sing-box",
-            protocol: "vless-reality"
+            protocol: "vless-reality",
           };
     const normalizedHost =
-      effectiveBaseDraft.host.trim() || importedProfile?.serverHost?.trim() || ownerProfile?.serverHost?.trim() || "";
+      effectiveBaseDraft.host.trim() ||
+      importedProfile?.serverHost?.trim() ||
+      ownerProfile?.serverHost?.trim() ||
+      "";
     const ownerProfileAvailable = Boolean(
-      (requireRelaySupport
-        ? ownerProfileSupportsRelayMode(ownerProfile, effectiveBaseDraft)
-        : ownerProfileSupportsDraft(ownerProfile, effectiveBaseDraft)) &&
-        hostsMatch(normalizedHost, ownerProfile?.serverHost)
+      (requireYandexEdgeSupport
+        ? ownerProfileSupportsYandexEdgeMode(ownerProfile, effectiveBaseDraft)
+        : requireRelaySupport
+          ? ownerProfileSupportsRelayMode(ownerProfile, effectiveBaseDraft)
+          : ownerProfileSupportsDraft(ownerProfile, effectiveBaseDraft)) &&
+      hostsMatch(normalizedHost, ownerProfile?.serverHost),
     );
     const importedProfileAvailable = Boolean(
       importedProfileMatchesHost(importedProfile, normalizedHost) &&
-        (requireRelaySupport
-          ? importedProfileSupportsRelayMode(importedProfile, effectiveBaseDraft)
-          : importedProfileSupportsDraft(importedProfile, effectiveBaseDraft))
+      (requireYandexEdgeSupport
+        ? importedProfileSupportsYandexEdgeMode(
+            importedProfile,
+            effectiveBaseDraft,
+          )
+        : requireRelaySupport
+          ? importedProfileSupportsRelayMode(
+              importedProfile,
+              effectiveBaseDraft,
+            )
+          : importedProfileSupportsDraft(importedProfile, effectiveBaseDraft)),
     );
     const usingImportedProfile = Boolean(
-      ((ownerRuntimeLabMode === "off" || allowImportedProfileForOwnerRuntimeLab) &&
-        importedProfileAvailable &&
-        !secret.trim() &&
-        !ownerProfileAvailable)
+      (ownerRuntimeLabMode === "off" ||
+        allowImportedProfileForOwnerRuntimeLab) &&
+      importedProfileAvailable &&
+      !secret.trim() &&
+      !ownerProfileAvailable,
     );
     const serverDraft: ServerDraft =
       usingImportedProfile && importedProfile
         ? {
             ...effectiveBaseDraft,
-            host: importedProfile.serverHost || normalizedHost || baseDraft.host,
-            engine: resolveDraftEngine(effectiveBaseDraft.transport, effectiveBaseDraft.protocol, effectiveBaseDraft.engine)
+            host:
+              importedProfile.serverHost || normalizedHost || baseDraft.host,
+            engine: resolveDraftEngine(
+              effectiveBaseDraft.transport,
+              effectiveBaseDraft.protocol,
+              effectiveBaseDraft.engine,
+            ),
           }
         : {
             ...effectiveBaseDraft,
-            host: normalizedHost || baseDraft.host
+            host: normalizedHost || baseDraft.host,
           };
     const useRealityStartEndpoint =
       !usingImportedProfile &&
@@ -1084,29 +1717,52 @@ export function ControlCenter() {
       ownerRuntimeLabMode === "reality-whitelist-lab" ||
       ownerRuntimeLabMode === "reality-vps-scaffold" ||
       ownerRuntimeLabMode === "reality-vps-lab" ||
-      ownerRuntimeLabMode === "reality-vps-relay-lab"
+      ownerRuntimeLabMode === "reality-vps-relay-lab" ||
+      ownerRuntimeLabMode === "reality-yandex-edge"
     ) {
       if (!isAndroidClient) {
         throw new Error(t("ownerLabAndroidOnly"));
       }
       if (!ownerProfileAvailable && !usingImportedProfile) {
         throw new Error(
-          allowImportedProfileForOwnerRuntimeLab ? t("ownerLabNeedsAccessProfile") : t("ownerLabNeedsOwnerProfile")
+          allowImportedProfileForOwnerRuntimeLab
+            ? t("ownerLabNeedsAccessProfile")
+            : t("ownerLabNeedsOwnerProfile"),
         );
       }
-      if (isOwnerRuntimeLabVpsMode(ownerRuntimeLabMode)) {
-        const usingRelayOwnerMode = isOwnerRuntimeLabRelayOwnerMode(ownerRuntimeLabMode);
-        const usingRelayAutoselect = usingRelayOwnerMode || effectiveOwnerRuntimeLab.vpsUseRelayAutoselect;
-        const vpsServerName = (
+      if (ownerRuntimeLabMode === "reality-yandex-edge") {
+        ownerRuntimeLabRequest = {
+          mode: ownerRuntimeLabMode,
+          hintServerName: "",
+          vpsServerName: "www.cloudflare.com",
+          vpsPort: 52444,
+          vpsConnectHost: yandexEdgeConnectHost,
+          vpsConnectPort: yandexEdgeConnectPort,
+          vpsTransport: "tcp",
+          vpsFlow: "xtls-rprx-vision",
+          vpsFingerprint: "chrome",
+          vpsSource: yandexEdgeSource,
+          vpsTag: yandexEdgeTag,
+        };
+      } else if (isOwnerRuntimeLabVpsMode(ownerRuntimeLabMode)) {
+        const usingRelayOwnerMode =
+          isOwnerRuntimeLabRelayOwnerMode(ownerRuntimeLabMode);
+        const usingRelayAutoselect =
+          usingRelayOwnerMode || effectiveOwnerRuntimeLab.vpsUseRelayAutoselect;
+        const vpsServerName =
           effectiveOwnerRuntimeLab.vpsServerName.trim().toLowerCase() ||
-          (usingRelayAutoselect ? "id.x5.ru" : "")
-        );
+          (usingRelayAutoselect ? "id.x5.ru" : "");
         if (!vpsServerName) {
           throw new Error(t("ownerLabVpsServerRequired"));
         }
-        const parsedVpsPort = Number.parseInt(effectiveOwnerRuntimeLab.vpsPort, 10);
+        const parsedVpsPort = Number.parseInt(
+          effectiveOwnerRuntimeLab.vpsPort,
+          10,
+        );
         const vpsPort =
-          Number.isInteger(parsedVpsPort) && parsedVpsPort > 0 && parsedVpsPort <= 65535
+          Number.isInteger(parsedVpsPort) &&
+          parsedVpsPort > 0 &&
+          parsedVpsPort <= 65535
             ? parsedVpsPort
             : usingRelayAutoselect
               ? 443
@@ -1119,38 +1775,80 @@ export function ControlCenter() {
           hintServerName: "",
           vpsServerName,
           vpsPort,
-          vpsTransport: usingRelayAutoselect ? "tcp" : effectiveOwnerRuntimeLab.vpsTransport,
-          ...((effectiveOwnerRuntimeLab.vpsFlow.trim() || usingRelayAutoselect)
-            ? { vpsFlow: effectiveOwnerRuntimeLab.vpsFlow.trim() || "xtls-rprx-vision" }
+          ...(effectiveOwnerRuntimeLab.vpsConnectHost.trim()
+            ? { vpsConnectHost: effectiveOwnerRuntimeLab.vpsConnectHost.trim() }
             : {}),
-          ...((effectiveOwnerRuntimeLab.vpsFingerprint.trim() || usingRelayAutoselect)
-            ? { vpsFingerprint: effectiveOwnerRuntimeLab.vpsFingerprint.trim() || "chrome" }
+          ...(Number.isInteger(
+            Number.parseInt(effectiveOwnerRuntimeLab.vpsConnectPort, 10),
+          ) &&
+          Number.parseInt(effectiveOwnerRuntimeLab.vpsConnectPort, 10) > 0 &&
+          Number.parseInt(effectiveOwnerRuntimeLab.vpsConnectPort, 10) <= 65535
+            ? {
+                vpsConnectPort: Number.parseInt(
+                  effectiveOwnerRuntimeLab.vpsConnectPort,
+                  10,
+                ),
+              }
+            : {}),
+          vpsTransport: usingRelayAutoselect
+            ? "tcp"
+            : effectiveOwnerRuntimeLab.vpsTransport,
+          ...(effectiveOwnerRuntimeLab.vpsFlow.trim() || usingRelayAutoselect
+            ? {
+                vpsFlow:
+                  effectiveOwnerRuntimeLab.vpsFlow.trim() || "xtls-rprx-vision",
+              }
+            : {}),
+          ...(effectiveOwnerRuntimeLab.vpsFingerprint.trim() ||
+          usingRelayAutoselect
+            ? {
+                vpsFingerprint:
+                  effectiveOwnerRuntimeLab.vpsFingerprint.trim() || "chrome",
+              }
             : {}),
           ...(effectiveOwnerRuntimeLab.vpsGrpcServiceName.trim()
-            ? { vpsGrpcServiceName: effectiveOwnerRuntimeLab.vpsGrpcServiceName.trim() }
+            ? {
+                vpsGrpcServiceName:
+                  effectiveOwnerRuntimeLab.vpsGrpcServiceName.trim(),
+              }
             : {}),
           ...(effectiveOwnerRuntimeLab.vpsGrpcAuthority.trim()
-            ? { vpsGrpcAuthority: effectiveOwnerRuntimeLab.vpsGrpcAuthority.trim() }
+            ? {
+                vpsGrpcAuthority:
+                  effectiveOwnerRuntimeLab.vpsGrpcAuthority.trim(),
+              }
             : {}),
-          ...(effectiveOwnerRuntimeLab.vpsSource.trim() ? { vpsSource: effectiveOwnerRuntimeLab.vpsSource.trim() } : {}),
-          ...(effectiveOwnerRuntimeLab.vpsTag.trim() ? { vpsTag: effectiveOwnerRuntimeLab.vpsTag.trim() } : {}),
+          ...(effectiveOwnerRuntimeLab.vpsSource.trim()
+            ? { vpsSource: effectiveOwnerRuntimeLab.vpsSource.trim() }
+            : {}),
+          ...(effectiveOwnerRuntimeLab.vpsTag.trim()
+            ? { vpsTag: effectiveOwnerRuntimeLab.vpsTag.trim() }
+            : {}),
           ...(usingRelayOwnerMode ? { vpsOwnerRealityEgress: true } : {}),
           ...(usingRelayAutoselect
             ? {
                 vpsRelayAutoselect: {
                   enabled: true,
                   ...(effectiveOwnerRuntimeLab.vpsRelaySubscriptionUrl.trim()
-                    ? { subscriptionUrl: effectiveOwnerRuntimeLab.vpsRelaySubscriptionUrl.trim() }
+                    ? {
+                        subscriptionUrl:
+                          effectiveOwnerRuntimeLab.vpsRelaySubscriptionUrl.trim(),
+                      }
                     : {}),
                   ...(effectiveOwnerRuntimeLab.vpsRelaySourceLabel.trim()
-                    ? { sourceLabel: effectiveOwnerRuntimeLab.vpsRelaySourceLabel.trim() }
-                    : {})
-                }
+                    ? {
+                        sourceLabel:
+                          effectiveOwnerRuntimeLab.vpsRelaySourceLabel.trim(),
+                      }
+                    : {}),
+                },
               }
-            : {})
+            : {}),
         };
       } else {
-        const hintServerName = effectiveOwnerRuntimeLab.hintServerName.trim().toLowerCase();
+        const hintServerName = effectiveOwnerRuntimeLab.hintServerName
+          .trim()
+          .toLowerCase();
         if (!hintServerName) {
           throw new Error(t("ownerLabHintServerRequired"));
         }
@@ -1160,26 +1858,41 @@ export function ControlCenter() {
           ...(effectiveOwnerRuntimeLab.hintCidrBucket.trim()
             ? { hintCidrBucket: effectiveOwnerRuntimeLab.hintCidrBucket.trim() }
             : {}),
-          ...(effectiveOwnerRuntimeLab.hintSource.trim() ? { hintSource: effectiveOwnerRuntimeLab.hintSource.trim() } : {}),
-          ...(effectiveOwnerRuntimeLab.hintTag.trim() ? { hintTag: effectiveOwnerRuntimeLab.hintTag.trim() } : {})
+          ...(effectiveOwnerRuntimeLab.hintSource.trim()
+            ? { hintSource: effectiveOwnerRuntimeLab.hintSource.trim() }
+            : {}),
+          ...(effectiveOwnerRuntimeLab.hintTag.trim()
+            ? { hintTag: effectiveOwnerRuntimeLab.hintTag.trim() }
+            : {}),
         };
       }
     }
-    return { serverDraft, useRealityStartEndpoint, usingImportedProfile, ownerRuntimeLabRequest };
+    return {
+      serverDraft,
+      useRealityStartEndpoint,
+      usingImportedProfile,
+      ownerRuntimeLabRequest,
+    };
   };
 
   const buildCurrentTunnelStartRequest = (baseDraft: ServerDraft = draft) => {
+    if (selectedAccessMode === "yandex-edge") {
+      return buildTunnelStartRequest(baseDraft, "reality-yandex-edge", {
+        allowImportedProfileForOwnerRuntimeLab: true,
+        requireYandexEdgeSupport: true,
+      });
+    }
     if (selectedAccessMode === "relay-via-server") {
       return buildTunnelStartRequest(baseDraft, "reality-vps-relay-lab", {
         allowImportedProfileForOwnerRuntimeLab: true,
         requireRelaySupport: true,
-        forceRelayAutoselectDefaults: true
+        forceRelayAutoselectDefaults: true,
       });
     }
     if (selectedAccessMode === "relay-direct") {
       return buildTunnelStartRequest(baseDraft, "reality-vps-lab", {
         allowImportedProfileForOwnerRuntimeLab: true,
-        forceRelayAutoselectDefaults: true
+        forceRelayAutoselectDefaults: true,
       });
     }
     return buildTunnelStartRequest(baseDraft);
@@ -1188,7 +1901,7 @@ export function ControlCenter() {
   const runningTunnelMatchesRequest = (
     tunnel: LocalTunnelState | null,
     serverDraft: ServerDraft,
-    ownerRuntimeLabRequest?: OwnerRuntimeLabRequest
+    ownerRuntimeLabRequest?: OwnerRuntimeLabRequest,
   ) => {
     if (!tunnel || tunnel.status !== "running" || !tunnel.socksAddress) {
       return false;
@@ -1196,14 +1909,28 @@ export function ControlCenter() {
     const expectedHost = serverDraft.host?.trim();
     const expectedTransport = normalizeTransport(serverDraft.transport);
     const expectedProtocol = normalizeProtocol(serverDraft.protocol);
-    const expectedRuntimeIdentity = resolveRuntimeIdentity(serverDraft, ownerRuntimeLabRequest);
-    if (expectedHost && tunnel.serverHost && tunnel.serverHost !== expectedHost) {
+    const expectedRuntimeIdentity = resolveRuntimeIdentity(
+      serverDraft,
+      ownerRuntimeLabRequest,
+    );
+    if (
+      expectedHost &&
+      tunnel.serverHost &&
+      tunnel.serverHost !== expectedHost
+    ) {
       return false;
     }
-    if (tunnel.transport !== expectedTransport || normalizeProtocol(tunnel.protocol) !== expectedProtocol) {
+    if (
+      tunnel.transport !== expectedTransport ||
+      normalizeProtocol(tunnel.protocol) !== expectedProtocol
+    ) {
       return false;
     }
-    if (expectedRuntimeIdentity.runtimeFamily && tunnel.runtimeFamily && tunnel.runtimeFamily !== expectedRuntimeIdentity.runtimeFamily) {
+    if (
+      expectedRuntimeIdentity.runtimeFamily &&
+      tunnel.runtimeFamily &&
+      tunnel.runtimeFamily !== expectedRuntimeIdentity.runtimeFamily
+    ) {
       return false;
     }
     if (
@@ -1221,7 +1948,7 @@ export function ControlCenter() {
       try {
         const [tunnelRes, proxyRes] = await Promise.all([
           coreApi.getLocalTunnelStatus(),
-          coreApi.getSystemProxyStatus()
+          coreApi.getSystemProxyStatus(),
         ]);
         const tunnelData = tunnelRes.data;
         const proxyData = proxyRes.data;
@@ -1234,7 +1961,10 @@ export function ControlCenter() {
         }
         return tunnelData;
       } catch (requestError) {
-        const message = requestError instanceof Error ? requestError.message : t("unknownError");
+        const message =
+          requestError instanceof Error
+            ? requestError.message
+            : t("unknownError");
         setError(message);
         return null;
       }
@@ -1250,14 +1980,18 @@ export function ControlCenter() {
     }
   };
 
-  const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+  const sleep = (ms: number) =>
+    new Promise((resolve) => window.setTimeout(resolve, ms));
 
   const waitForRunningTunnel = async (attempts = 18, delayMs = 1000) => {
     let tunnelData = await pollLocalTunnel(true);
     if (tunnelData?.status === "running" && tunnelData.socksAddress) {
       return tunnelData;
     }
-    if (tunnelData && (tunnelData.status === "failed" || tunnelData.status === "stopped")) {
+    if (
+      tunnelData &&
+      (tunnelData.status === "failed" || tunnelData.status === "stopped")
+    ) {
       return tunnelData;
     }
 
@@ -1267,7 +2001,10 @@ export function ControlCenter() {
       if (tunnelData?.status === "running" && tunnelData.socksAddress) {
         return tunnelData;
       }
-      if (tunnelData && (tunnelData.status === "failed" || tunnelData.status === "stopped")) {
+      if (
+        tunnelData &&
+        (tunnelData.status === "failed" || tunnelData.status === "stopped")
+      ) {
         return tunnelData;
       }
     }
@@ -1277,14 +2014,24 @@ export function ControlCenter() {
 
   const waitForStoppedTunnel = async (attempts = 20, delayMs = 300) => {
     let tunnelData = await pollLocalTunnel(true);
-    if (!tunnelData || tunnelData.status === "stopped" || tunnelData.status === "idle" || tunnelData.status === "failed") {
+    if (
+      !tunnelData ||
+      tunnelData.status === "stopped" ||
+      tunnelData.status === "idle" ||
+      tunnelData.status === "failed"
+    ) {
       return tunnelData;
     }
 
     for (let i = 0; i < attempts; i += 1) {
       await sleep(delayMs);
       tunnelData = await pollLocalTunnel(true);
-      if (!tunnelData || tunnelData.status === "stopped" || tunnelData.status === "idle" || tunnelData.status === "failed") {
+      if (
+        !tunnelData ||
+        tunnelData.status === "stopped" ||
+        tunnelData.status === "idle" ||
+        tunnelData.status === "failed"
+      ) {
         return tunnelData;
       }
     }
@@ -1296,11 +2043,20 @@ export function ControlCenter() {
     serverDraft: ServerDraft,
     ownerRuntimeLabRequest?: OwnerRuntimeLabRequest,
     attempts = 18,
-    delayMs = 700
+    delayMs = 700,
   ) => {
-    const expectedRuntimeIdentity = resolveRuntimeIdentity(serverDraft, ownerRuntimeLabRequest);
+    const expectedRuntimeIdentity = resolveRuntimeIdentity(
+      serverDraft,
+      ownerRuntimeLabRequest,
+    );
     let tunnelData = await pollLocalTunnel(true);
-    if (runningTunnelMatchesRequest(tunnelData, serverDraft, ownerRuntimeLabRequest)) {
+    if (
+      runningTunnelMatchesRequest(
+        tunnelData,
+        serverDraft,
+        ownerRuntimeLabRequest,
+      )
+    ) {
       return tunnelData;
     }
     if (
@@ -1309,14 +2065,23 @@ export function ControlCenter() {
     ) {
       return tunnelData;
     }
-    if (tunnelData && (tunnelData.status === "failed" || tunnelData.status === "stopped")) {
+    if (
+      tunnelData &&
+      (tunnelData.status === "failed" || tunnelData.status === "stopped")
+    ) {
       return tunnelData;
     }
 
     for (let i = 0; i < attempts; i += 1) {
       await sleep(delayMs);
       tunnelData = await pollLocalTunnel(true);
-      if (runningTunnelMatchesRequest(tunnelData, serverDraft, ownerRuntimeLabRequest)) {
+      if (
+        runningTunnelMatchesRequest(
+          tunnelData,
+          serverDraft,
+          ownerRuntimeLabRequest,
+        )
+      ) {
         return tunnelData;
       }
       if (
@@ -1325,7 +2090,10 @@ export function ControlCenter() {
       ) {
         return tunnelData;
       }
-      if (tunnelData && (tunnelData.status === "failed" || tunnelData.status === "stopped")) {
+      if (
+        tunnelData &&
+        (tunnelData.status === "failed" || tunnelData.status === "stopped")
+      ) {
         return tunnelData;
       }
     }
@@ -1353,15 +2121,22 @@ export function ControlCenter() {
     setPendingAction("startOwnerRuntimeLab");
     startTransition(async () => {
       try {
-        const { serverDraft, useRealityStartEndpoint, usingImportedProfile, ownerRuntimeLabRequest } = buildTunnelStartRequest(
-          draft,
-          ownerRuntimeLab.mode
-        );
+        const {
+          serverDraft,
+          useRealityStartEndpoint,
+          usingImportedProfile,
+          ownerRuntimeLabRequest,
+        } = buildTunnelStartRequest(draft, ownerRuntimeLab.mode);
         let tunnelData = localTunnel;
         if (
           tunnelData &&
-          (tunnelData.status === "running" || tunnelData.status === "starting") &&
-          !runningTunnelMatchesRequest(tunnelData, serverDraft, ownerRuntimeLabRequest)
+          (tunnelData.status === "running" ||
+            tunnelData.status === "starting") &&
+          !runningTunnelMatchesRequest(
+            tunnelData,
+            serverDraft,
+            ownerRuntimeLabRequest,
+          )
         ) {
           const stopRes = await coreApi.stopLocalTunnel();
           setLocalTunnel(stopRes.data);
@@ -1370,17 +2145,27 @@ export function ControlCenter() {
           setAndroidVpnVisualOverride(false);
         }
 
-        if (!runningTunnelMatchesRequest(tunnelData, serverDraft, ownerRuntimeLabRequest)) {
+        if (
+          !runningTunnelMatchesRequest(
+            tunnelData,
+            serverDraft,
+            ownerRuntimeLabRequest,
+          )
+        ) {
           const startApi =
-            isAndroidClient && ownerRuntimeLabRequest ? coreApi.startLocalTunnelFast : coreApi.startLocalTunnel;
+            isAndroidClient && ownerRuntimeLabRequest
+              ? coreApi.startLocalTunnelFast
+              : coreApi.startLocalTunnel;
           const startRes = await startApi(
             {
               server: serverDraft,
               secret: usingImportedProfile ? "" : secret,
               vkLink,
-              ...(ownerRuntimeLabRequest ? { ownerRuntimeLab: ownerRuntimeLabRequest } : {})
+              ...(ownerRuntimeLabRequest
+                ? { ownerRuntimeLab: ownerRuntimeLabRequest }
+                : {}),
             },
-            useRealityStartEndpoint
+            useRealityStartEndpoint,
           );
           tunnelData = startRes.data;
           setLocalTunnel(tunnelData);
@@ -1397,20 +2182,25 @@ export function ControlCenter() {
           return;
         }
 
-        tunnelData = await waitForTunnelIdentity(serverDraft, ownerRuntimeLabRequest);
+        tunnelData = await waitForTunnelIdentity(
+          serverDraft,
+          ownerRuntimeLabRequest,
+        );
         setLocalTunnel(tunnelData ?? localTunnel);
 
         if (ownerRuntimeLabRequest) {
           const whitelistRuntimeReady =
             tunnelData?.runtimeFamily === "reality-whitelist-assisted" &&
-            ((ownerRuntimeLabRequest.mode === "reality-whitelist-scaffold" && tunnelData.activationState === "scaffold_only") ||
+            ((ownerRuntimeLabRequest.mode === "reality-whitelist-scaffold" &&
+              tunnelData.activationState === "scaffold_only") ||
               (ownerRuntimeLabRequest.mode === "reality-whitelist-lab" &&
                 tunnelData.activationState === "active" &&
                 tunnelData.status === "running" &&
                 Boolean(tunnelData.socksAddress)));
           const vpsRuntimeReady =
             tunnelData?.runtimeFamily === "reality-vps-lab" &&
-            ((ownerRuntimeLabRequest.mode === "reality-vps-scaffold" && tunnelData.activationState === "scaffold_only") ||
+            ((ownerRuntimeLabRequest.mode === "reality-vps-scaffold" &&
+              tunnelData.activationState === "scaffold_only") ||
               ((ownerRuntimeLabRequest.mode === "reality-vps-lab" ||
                 ownerRuntimeLabRequest.mode === "reality-vps-relay-lab") &&
                 tunnelData.activationState === "active" &&
@@ -1422,11 +2212,11 @@ export function ControlCenter() {
                 ? t("ownerLabWhitelistLabReady")
                 : ownerRuntimeLabRequest.mode === "reality-vps-relay-lab"
                   ? t("ownerLabVpsRelayLabReady")
-                : ownerRuntimeLabRequest.mode === "reality-vps-lab"
-                  ? t("ownerLabVpsLabReady")
-                  : ownerRuntimeLabRequest.mode === "reality-vps-scaffold"
-                    ? t("ownerLabVpsScaffoldReady")
-                    : t("ownerLabWhitelistReady")
+                  : ownerRuntimeLabRequest.mode === "reality-vps-lab"
+                    ? t("ownerLabVpsLabReady")
+                    : ownerRuntimeLabRequest.mode === "reality-vps-scaffold"
+                      ? t("ownerLabVpsScaffoldReady")
+                      : t("ownerLabWhitelistReady"),
             );
             return;
           }
@@ -1436,11 +2226,11 @@ export function ControlCenter() {
                 ? t("ownerLabWhitelistLabFailed")
                 : ownerRuntimeLabRequest.mode === "reality-vps-relay-lab"
                   ? t("ownerLabVpsRelayLabFailed")
-                : ownerRuntimeLabRequest.mode === "reality-vps-lab"
-                  ? t("ownerLabVpsLabFailed")
-                  : ownerRuntimeLabRequest.mode === "reality-vps-scaffold"
-                    ? t("ownerLabVpsScaffoldFailed")
-                    : t("ownerLabWhitelistFailed"))
+                  : ownerRuntimeLabRequest.mode === "reality-vps-lab"
+                    ? t("ownerLabVpsLabFailed")
+                    : ownerRuntimeLabRequest.mode === "reality-vps-scaffold"
+                      ? t("ownerLabVpsScaffoldFailed")
+                      : t("ownerLabWhitelistFailed")),
           );
           return;
         }
@@ -1452,7 +2242,10 @@ export function ControlCenter() {
 
         setError(tunnelData?.error ?? t("tunnelStartFailed"));
       } catch (requestError) {
-        const message = requestError instanceof Error ? requestError.message : t("unknownError");
+        const message =
+          requestError instanceof Error
+            ? requestError.message
+            : t("unknownError");
         setError(message);
       } finally {
         setPendingAction(null);
@@ -1488,7 +2281,8 @@ export function ControlCenter() {
   };
 
   const describeTunnelProbeFailure = (state: LocalTunnelState) => {
-    const message = state.lastTest?.error ?? state.error ?? t("tunnelTestFailed");
+    const message =
+      state.lastTest?.error ?? state.error ?? t("tunnelTestFailed");
     if (message.includes("exit status 28")) {
       return "Local SOCKS egress timed out (curl exit 28). System proxy was not enabled; the selected VPN path did not complete its outbound handshake.";
     }
@@ -1502,13 +2296,18 @@ export function ControlCenter() {
     return data;
   };
 
-  const matchesExpectedProxy = (state: SystemProxyState, socksAddress?: string) => {
+  const matchesExpectedProxy = (
+    state: SystemProxyState,
+    socksAddress?: string,
+  ) => {
     if (!socksAddress) {
       return state.enabled;
     }
     const [expectedHost, portText] = socksAddress.split(":");
     const parsedPort = Number.parseInt(portText ?? "", 10);
-    return state.enabled && state.host === expectedHost && state.port === parsedPort;
+    return (
+      state.enabled && state.host === expectedHost && state.port === parsedPort
+    );
   };
 
   const verifySystemProxy = async (socksAddress?: string) => {
@@ -1524,7 +2323,7 @@ export function ControlCenter() {
   const enableSystemProxyForTunnel = async (socksAddress?: string) => {
     try {
       const res = await coreApi.enableSystemProxy({
-        socksAddress: socksAddress ?? ""
+        socksAddress: socksAddress ?? "",
       });
       const data = res.data;
       const verified = res.ok ? await verifySystemProxy(socksAddress) : data;
@@ -1533,7 +2332,10 @@ export function ControlCenter() {
         throw new Error(data.error ?? t("unknownError"));
       }
       if (!matchesExpectedProxy(verified, socksAddress)) {
-        throw new Error(verified.error ?? "System SOCKS proxy did not become active on the expected local tunnel port");
+        throw new Error(
+          verified.error ??
+            "System SOCKS proxy did not become active on the expected local tunnel port",
+        );
       }
       return verified;
     } catch (error) {
@@ -1545,13 +2347,21 @@ export function ControlCenter() {
 
   const prepareTunnelForSystemProxy = async () => {
     const testedTunnel = await runCurrentTunnelTestWithRetry(3, 1500);
-    if (!testedTunnel.lastTest?.ok || testedTunnel.status !== "running" || !testedTunnel.socksAddress) {
+    if (
+      !testedTunnel.lastTest?.ok ||
+      testedTunnel.status !== "running" ||
+      !testedTunnel.socksAddress
+    ) {
       throw new Error(describeTunnelProbeFailure(testedTunnel));
     }
     return testedTunnel;
   };
 
   const handleAccessModeChange = (mode: AccessMode) => {
+    const nextMode = accessModeCards.find((entry) => entry.mode === mode);
+    if (!nextMode?.available) {
+      return;
+    }
     setSelectedAccessMode(mode);
     setDraft((current) => {
       if (draftAccessMode(current) === mode) {
@@ -1561,48 +2371,42 @@ export function ControlCenter() {
     });
   };
 
-  const renderAccessModeToggle = (className?: string) => (
-    <div className={["lang-toggle", className].filter(Boolean).join(" ")} aria-label={t("runtimeMode")}>
-      <button
-        className={selectedAccessMode === "vless-reality" ? "lang-button is-active" : "lang-button"}
-        type="button"
-        aria-pressed={selectedAccessMode === "vless-reality"}
-        title={t("runtimeModeRealityHint")}
-        onClick={() => handleAccessModeChange("vless-reality")}
-      >
-        {t("runtimeModeReality")}
-      </button>
-      <button
-        className={selectedAccessMode === "vk-relay" ? "lang-button is-active" : "lang-button"}
-        type="button"
-        aria-pressed={selectedAccessMode === "vk-relay"}
-        title={t("runtimeModeVkHint")}
-        onClick={() => handleAccessModeChange("vk-relay")}
-      >
-        {t("runtimeModeVk")}
-      </button>
-      {isAndroidClient ? (
+  const renderAccessModeCards = ({
+    className,
+    closeOnSelect = false,
+  }: {
+    className?: string;
+    closeOnSelect?: boolean;
+  } = {}) => (
+    <div
+      className={["mode-grid", className].filter(Boolean).join(" ")}
+      aria-label={t("runtimeMode")}
+    >
+      {accessModeCards.map((entry) => (
         <button
-          className={selectedAccessMode === "relay-via-server" ? "lang-button is-active" : "lang-button"}
+          key={entry.mode}
+          className={[
+            "mode-card",
+            selectedAccessMode === entry.mode ? "is-active" : "",
+            entry.available ? "" : "is-disabled",
+          ]
+            .filter(Boolean)
+            .join(" ")}
           type="button"
-          aria-pressed={selectedAccessMode === "relay-via-server"}
-          title={t("runtimeModeRelayOwnerHint")}
-          onClick={() => handleAccessModeChange("relay-via-server")}
+          aria-pressed={selectedAccessMode === entry.mode}
+          disabled={!entry.available}
+          onClick={() => {
+            handleAccessModeChange(entry.mode);
+            if (closeOnSelect && entry.available) {
+              setActiveSheet(null);
+            }
+          }}
         >
-          {t("runtimeModeRelayOwner")}
+          <span className="mode-card__status">{entry.status}</span>
+          <strong>{entry.label}</strong>
+          <span>{entry.hint}</span>
         </button>
-      ) : null}
-      {isAndroidClient ? (
-        <button
-          className={selectedAccessMode === "relay-direct" ? "lang-button is-active" : "lang-button"}
-          type="button"
-          aria-pressed={selectedAccessMode === "relay-direct"}
-          title={t("runtimeModeRelayDirectHint")}
-          onClick={() => handleAccessModeChange("relay-direct")}
-        >
-          {t("runtimeModeRelayDirect")}
-        </button>
-      ) : null}
+      ))}
     </div>
   );
 
@@ -1611,13 +2415,22 @@ export function ControlCenter() {
     setPendingAction("startTunnel");
     startTransition(async () => {
       try {
-        const { serverDraft, useRealityStartEndpoint, usingImportedProfile, ownerRuntimeLabRequest } =
-          buildCurrentTunnelStartRequest();
+        const {
+          serverDraft,
+          useRealityStartEndpoint,
+          usingImportedProfile,
+          ownerRuntimeLabRequest,
+        } = buildCurrentTunnelStartRequest();
         if (
           isAndroidClient &&
           localTunnel &&
-          (localTunnel.status === "running" || localTunnel.status === "starting") &&
-          !runningTunnelMatchesRequest(localTunnel, serverDraft, ownerRuntimeLabRequest)
+          (localTunnel.status === "running" ||
+            localTunnel.status === "starting") &&
+          !runningTunnelMatchesRequest(
+            localTunnel,
+            serverDraft,
+            ownerRuntimeLabRequest,
+          )
         ) {
           const stopRes = await coreApi.stopLocalTunnel();
           setLocalTunnel(stopRes.data);
@@ -1626,15 +2439,19 @@ export function ControlCenter() {
           setAndroidVpnVisualOverride(false);
         }
         const startApi =
-          isAndroidClient && ownerRuntimeLabRequest ? coreApi.startLocalTunnelFast : coreApi.startLocalTunnel;
+          isAndroidClient && ownerRuntimeLabRequest
+            ? coreApi.startLocalTunnelFast
+            : coreApi.startLocalTunnel;
         const res = await startApi(
           {
             server: serverDraft,
             secret: usingImportedProfile ? "" : secret,
             vkLink,
-            ...(ownerRuntimeLabRequest ? { ownerRuntimeLab: ownerRuntimeLabRequest } : {})
+            ...(ownerRuntimeLabRequest
+              ? { ownerRuntimeLab: ownerRuntimeLabRequest }
+              : {}),
           },
-          useRealityStartEndpoint
+          useRealityStartEndpoint,
         );
         const data = res.data;
         setLocalTunnel(data);
@@ -1660,7 +2477,10 @@ export function ControlCenter() {
         }
         setError(tunnelData?.error ?? t("tunnelStartFailed"));
       } catch (requestError) {
-        const message = requestError instanceof Error ? requestError.message : t("unknownError");
+        const message =
+          requestError instanceof Error
+            ? requestError.message
+            : t("unknownError");
         setError(message);
       } finally {
         setPendingAction(null);
@@ -1707,30 +2527,10 @@ export function ControlCenter() {
       try {
         await runCurrentTunnelTest();
       } catch (requestError) {
-        const message = requestError instanceof Error ? requestError.message : t("unknownError");
-        setError(message);
-      } finally {
-        setPendingAction(null);
-      }
-    });
-  };
-
-  const handleRefreshOwnerProfile = () => {
-    setError(null);
-    setPendingAction("refreshOwnerProfile");
-    startTransition(async () => {
-      try {
-        const host = resolvedDraftHost.trim();
-        if (!host) {
-          setError("Host is required");
-          return;
-        }
-        const data = await fetchOwnerProfile(host);
-        if (data?.error) {
-          setError(data.error);
-        }
-      } catch (requestError) {
-        const message = requestError instanceof Error ? requestError.message : t("unknownError");
+        const message =
+          requestError instanceof Error
+            ? requestError.message
+            : t("unknownError");
         setError(message);
       } finally {
         setPendingAction(null);
@@ -1746,7 +2546,10 @@ export function ControlCenter() {
         const testedTunnel = await prepareTunnelForSystemProxy();
         await enableSystemProxyForTunnel(testedTunnel.socksAddress);
       } catch (requestError) {
-        const message = requestError instanceof Error ? requestError.message : t("unknownError");
+        const message =
+          requestError instanceof Error
+            ? requestError.message
+            : t("unknownError");
         setError(message);
       } finally {
         setPendingAction(null);
@@ -1759,14 +2562,23 @@ export function ControlCenter() {
     setPendingAction("enableVpn");
     startTransition(async () => {
       try {
-        const { serverDraft, useRealityStartEndpoint, usingImportedProfile, ownerRuntimeLabRequest } =
-          buildCurrentTunnelStartRequest();
+        const {
+          serverDraft,
+          useRealityStartEndpoint,
+          usingImportedProfile,
+          ownerRuntimeLabRequest,
+        } = buildCurrentTunnelStartRequest();
         let tunnelData = localTunnel;
         if (
           isAndroidClient &&
           tunnelData &&
-          (tunnelData.status === "running" || tunnelData.status === "starting") &&
-          !runningTunnelMatchesRequest(tunnelData, serverDraft, ownerRuntimeLabRequest)
+          (tunnelData.status === "running" ||
+            tunnelData.status === "starting") &&
+          !runningTunnelMatchesRequest(
+            tunnelData,
+            serverDraft,
+            ownerRuntimeLabRequest,
+          )
         ) {
           const stopRes = await coreApi.stopLocalTunnel();
           setLocalTunnel(stopRes.data);
@@ -1774,17 +2586,27 @@ export function ControlCenter() {
           setLocalTunnel(tunnelData ?? stopRes.data);
           setAndroidVpnVisualOverride(false);
         }
-        if (!runningTunnelMatchesRequest(tunnelData, serverDraft, ownerRuntimeLabRequest)) {
+        if (
+          !runningTunnelMatchesRequest(
+            tunnelData,
+            serverDraft,
+            ownerRuntimeLabRequest,
+          )
+        ) {
           const startApi =
-            isAndroidClient && ownerRuntimeLabRequest ? coreApi.startLocalTunnelFast : coreApi.startLocalTunnel;
+            isAndroidClient && ownerRuntimeLabRequest
+              ? coreApi.startLocalTunnelFast
+              : coreApi.startLocalTunnel;
           const startRes = await startApi(
             {
               server: serverDraft,
               secret: usingImportedProfile ? "" : secret,
               vkLink,
-              ...(ownerRuntimeLabRequest ? { ownerRuntimeLab: ownerRuntimeLabRequest } : {})
+              ...(ownerRuntimeLabRequest
+                ? { ownerRuntimeLab: ownerRuntimeLabRequest }
+                : {}),
             },
-            useRealityStartEndpoint
+            useRealityStartEndpoint,
           );
           tunnelData = startRes.data;
           setLocalTunnel(tunnelData);
@@ -1802,7 +2624,11 @@ export function ControlCenter() {
           tunnelData = await waitForRunningTunnel(18, 1000);
         }
 
-        if (!tunnelData || tunnelData.status !== "running" || !tunnelData.socksAddress) {
+        if (
+          !tunnelData ||
+          tunnelData.status !== "running" ||
+          !tunnelData.socksAddress
+        ) {
           if (isAndroidClient) {
             setAndroidVpnVisualOverride(false);
           }
@@ -1810,7 +2636,7 @@ export function ControlCenter() {
             tunnelData?.error ??
               (tunnelData?.status === "starting"
                 ? "Android local tunnel is still starting. Check the runtime log and try again in a few seconds."
-                : t("tunnelStartFailed"))
+                : t("tunnelStartFailed")),
           );
           return;
         }
@@ -1824,7 +2650,10 @@ export function ControlCenter() {
         const testedTunnel = await prepareTunnelForSystemProxy();
         await enableSystemProxyForTunnel(testedTunnel.socksAddress);
       } catch (requestError) {
-        const message = requestError instanceof Error ? requestError.message : t("unknownError");
+        const message =
+          requestError instanceof Error
+            ? requestError.message
+            : t("unknownError");
         setError(message);
       } finally {
         setPendingAction(null);
@@ -1859,11 +2688,19 @@ export function ControlCenter() {
         const stopRes = await coreApi.stopLocalTunnel();
         const stopData = stopRes.data;
         setLocalTunnel(stopData);
-        if (isAndroidClient && (stopData.status === "stopped" || stopData.status === "idle" || stopData.status === "failed")) {
+        if (
+          isAndroidClient &&
+          (stopData.status === "stopped" ||
+            stopData.status === "idle" ||
+            stopData.status === "failed")
+        ) {
           setAndroidVpnVisualOverride(false);
         }
       } catch (requestError) {
-        const message = requestError instanceof Error ? requestError.message : t("unknownError");
+        const message =
+          requestError instanceof Error
+            ? requestError.message
+            : t("unknownError");
         setError(message);
       } finally {
         setPendingAction(null);
@@ -1888,7 +2725,10 @@ export function ControlCenter() {
           setError(verified.error ?? "System SOCKS proxy is still enabled");
         }
       } catch (requestError) {
-        const message = requestError instanceof Error ? requestError.message : t("unknownError");
+        const message =
+          requestError instanceof Error
+            ? requestError.message
+            : t("unknownError");
         setError(message);
       } finally {
         setPendingAction(null);
@@ -1898,6 +2738,7 @@ export function ControlCenter() {
 
   const handleGenerateGuestProfile = () => {
     setError(null);
+    setInviteFileNotice(null);
     startTransition(async () => {
       try {
         const host = resolvedDraftHost.trim();
@@ -1909,11 +2750,14 @@ export function ControlCenter() {
         const res = await coreApi.generateGuestProfile({
           server: {
             ...draft,
-            host
+            host,
           },
           secret,
           host,
-          name: refreshedOwnerProfile?.name ?? ownerProfile?.name ?? "Odin One Access Key"
+          name:
+            refreshedOwnerProfile?.name ??
+            ownerProfile?.name ??
+            "Odin One Access Key",
         });
         const data = res.data;
         setGuestProfile(data);
@@ -1924,33 +2768,176 @@ export function ControlCenter() {
           setError(data.error ?? t("unknownError"));
         }
       } catch (requestError) {
-        const message = requestError instanceof Error ? requestError.message : t("unknownError");
+        const message =
+          requestError instanceof Error
+            ? requestError.message
+            : t("unknownError");
         setError(message);
       }
     });
   };
 
-  const handleImportProfile = () => {
+  const importProfileFromContents = (
+    contents: string,
+    options?: {
+      clearTextInput?: boolean;
+      fileName?: string;
+    },
+  ) => {
     setError(null);
+    setInviteFileNotice(null);
     startTransition(async () => {
       try {
         const res = await coreApi.importProfile({
-          shareCode: importShareCode
+          shareCode: contents,
         });
         const data = res.data;
         if (res.ok) {
           applyImportedProfile(data);
-          setImportShareCode("");
+          if (options?.clearTextInput) {
+            setImportShareCode("");
+          }
+          if (options?.fileName) {
+            setInviteFileNotice(
+              `${t("importedProfileFile")}: ${options.fileName}`,
+            );
+          }
           setSuccessNotice(`${t("imported")}: ${data.name}`);
         }
         if (!res.ok) {
           setError(data.error ?? t("unknownError"));
         }
       } catch (requestError) {
-        const message = requestError instanceof Error ? requestError.message : t("unknownError");
+        const message =
+          requestError instanceof Error
+            ? requestError.message
+            : t("unknownError");
         setError(message);
       }
     });
+  };
+
+  const handleImportProfile = () => {
+    importProfileFromContents(importShareCode, { clearTextInput: true });
+  };
+
+  const handleOpenImportProfileFile = () => {
+    setError(null);
+    importProfileFileInputRef.current?.click();
+  };
+
+  const handleImportProfileFile = async (
+    event: ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+
+    try {
+      const contents = await file.text();
+      importProfileFromContents(contents, { fileName: file.name });
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error
+          ? requestError.message
+          : t("unknownError");
+      setError(message);
+    }
+  };
+
+  const triggerBrowserInviteFileDownload = (rawJson: string, fileName: string) => {
+    const blob = new Blob([rawJson], { type: "application/json" });
+    const objectUrl = window.URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = fileName;
+    anchor.rel = "noopener";
+    anchor.click();
+    window.URL.revokeObjectURL(objectUrl);
+  };
+
+  const handleExportInviteFile = () => {
+    if (!exportableInviteProfile?.rawJson) {
+      return;
+    }
+
+    setError(null);
+    setInviteFileNotice(null);
+    setPendingAction("exportInviteFile");
+    void (async () => {
+      let androidShareOpened = false;
+      if (isAndroidClient) {
+        const shareRes = await coreApi.shareInviteFile(
+          exportableInviteFileName,
+          exportableInviteProfile.rawJson,
+        );
+        if (!shareRes.ok) {
+          setError((shareRes.data as { error?: string }).error ?? t("unknownError"));
+          setPendingAction(null);
+          return;
+        }
+        androidShareOpened = true;
+      }
+
+      try {
+        const res = await coreApi.exportInviteFile(exportableInviteProfile.rawJson);
+        const data = res.data;
+        if (res.ok && data.exportPath) {
+          setInviteFileNotice(
+            formatInviteExportNotice(
+              t,
+              data.fileName || exportableInviteFileName,
+              data.exportPath,
+            ),
+          );
+          return;
+        }
+
+        if (!isAndroidClient) {
+          triggerBrowserInviteFileDownload(
+            exportableInviteProfile.rawJson,
+            exportableInviteFileName,
+          );
+          setInviteFileNotice(
+            `${t("exportProfileFileStarted")}: ${exportableInviteFileName}`,
+          );
+          return;
+        }
+
+        if (androidShareOpened) {
+          setInviteFileNotice(t("exportProfileFileSharedNoLocal"));
+          return;
+        }
+
+        setError(t("unknownError"));
+      } catch (requestError) {
+        if (!isAndroidClient) {
+          triggerBrowserInviteFileDownload(
+            exportableInviteProfile.rawJson,
+            exportableInviteFileName,
+          );
+          setInviteFileNotice(
+            `${t("exportProfileFileStarted")}: ${exportableInviteFileName}`,
+          );
+          return;
+        }
+
+        if (androidShareOpened) {
+          setInviteFileNotice(t("exportProfileFileSharedNoLocal"));
+          return;
+        }
+
+        const message =
+          requestError instanceof Error
+            ? requestError.message
+            : t("unknownError");
+        setError(message);
+      } finally {
+        setPendingAction(null);
+      }
+    })();
   };
 
   const handleCopy = async (key: string, value?: string) => {
@@ -1964,7 +2951,8 @@ export function ControlCenter() {
         setCopiedKey((current) => (current === key ? null : current));
       }, 1800);
     } catch (copyError) {
-      const message = copyError instanceof Error ? copyError.message : t("unknownError");
+      const message =
+        copyError instanceof Error ? copyError.message : t("unknownError");
       setError(message);
     }
   };
@@ -1974,6 +2962,7 @@ export function ControlCenter() {
     setActiveAccessTab("key");
     setActiveSheet(null);
     setDraft(initialDraft);
+    setEdgeDraft(initialEdgeDraft);
     setSelectedAccessMode("vless-reality");
     setDeployPortMode("auto");
     setSecret("");
@@ -1982,6 +2971,10 @@ export function ControlCenter() {
     setPlan([]);
     setDeployment(null);
     setShowDeploymentOverlay(false);
+    setWhitelistIp(yandexEdgeConnectHost);
+    setWhitelistLookup(null);
+    setWhitelistLookupError(null);
+    setInviteFileNotice(null);
     setOwnerProfile(null);
     setGuestProfile(null);
     setImportedProfile(null);
@@ -1999,19 +2992,25 @@ export function ControlCenter() {
           <section className="phone-card home-stack">
             <div className="home-stack__scroll">
               <div className="home-section home-section--hero">
-                <div className="phone-statusbar">
-                  <span className={`phone-pill ${vpnVisualActive ? "phone-pill--ok" : ""}`}>{primaryStatusBadge}</span>
-                  {renderAccessModeToggle("home-mode-toggle")}
-                </div>
+                <button
+                  className={modeTriggerClassName}
+                  type="button"
+                  onClick={() => setActiveSheet("mode-picker")}
+                  aria-haspopup="dialog"
+                  aria-label={t("sheetModePickerTitle")}
+                >
+                  {selectedAccessModeCard.label}
+                </button>
 
                 <div className="phone-copy">
                   <h2 className="phone-title">{primaryStatusText}</h2>
-                  <p className="phone-subtitle">{currentHost}</p>
                 </div>
 
                 <button
                   className={`phone-connect ${vpnVisualActive ? "phone-connect--active" : ""} ${
-                    relayOwnerConnectAnimation ? "phone-connect--connecting" : ""
+                    relayOwnerConnectAnimation
+                      ? "phone-connect--connecting"
+                      : ""
                   }`}
                   type="button"
                   onClick={vpnActionActive ? handleDisableVPN : handleEnableVPN}
@@ -2020,19 +3019,26 @@ export function ControlCenter() {
                       ? isBusy("disableVpn")
                       : isPending ||
                         !resolvedDraftHost ||
-                        (selectedAccessMode === "relay-via-server"
+                        ((selectedAccessMode === "yandex-edge" ||
+                          selectedAccessMode === "relay-via-server" ||
+                          selectedAccessMode === "relay-direct")
                           ? !hasLocalAccessProfileForSelectedMode
-                          : !secret.trim() && !hasLocalAccessProfileForSelectedMode) ||
-                        (requiresVKLink && (!vkLink.trim() || cooldownMinutes > 0))
+                          : !secret.trim() &&
+                            !hasLocalAccessProfileForSelectedMode) ||
+                        (requiresVKLink &&
+                          (!vkLink.trim() || cooldownMinutes > 0))
                   }
                 >
                   <span className="phone-connect__label">{vpnButtonLabel}</span>
                 </button>
 
-                {error ? <p className="status-banner status-error">{error}</p> : null}
+                {error ? (
+                  <p className="status-banner status-error">{error}</p>
+                ) : null}
                 {deployment ? (
                   <p className="status-banner">
-                    {t("deploymentPrefix")} {deployment.deploymentId} / {deploymentStatusLabel}
+                    {t("deploymentPrefix")} {deployment.deploymentId} /{" "}
+                    {deploymentStatusLabel}
                     {deploymentPortSummary ? ` / ${deploymentPortSummary}` : ""}
                   </p>
                 ) : null}
@@ -2043,7 +3049,7 @@ export function ControlCenter() {
               <div className="home-section home-section--invite">
                 <div className="invite-home__head">
                   <span className="section-eyebrow">{t("sharing")}</span>
-                  <strong>{t("shareCode")}</strong>
+                  <strong>{t("importProfile")}</strong>
                 </div>
 
                 <label className="input-field input-span input-field--compact">
@@ -2059,44 +3065,24 @@ export function ControlCenter() {
                   <button
                     className="ghost"
                     type="button"
-                    onClick={handleGenerateGuestProfile}
-                    disabled={isPending || !canGenerateGuestProfile}
-                  >
-                    {t("generateShareCode")}
-                  </button>
-                  <button
-                    className="ghost"
-                    type="button"
-                    onClick={() => handleCopy("shareCode", guestProfile?.shareCode)}
-                    disabled={!guestProfile?.shareCode}
-                  >
-                    {copiedKey === "shareCode" ? t("copied") : t("copyShareCode")}
-                  </button>
-                  <button
-                    className="ghost"
-                    type="button"
                     onClick={handleImportProfile}
                     disabled={isPending || !importShareCode.trim()}
                   >
                     {t("importProfile")}
                   </button>
+                  <button
+                    className="ghost"
+                    type="button"
+                    onClick={handleOpenImportProfileFile}
+                    disabled={isPending}
+                  >
+                    {t("importProfileFile")}
+                  </button>
                 </div>
-
-                {!canGenerateGuestProfile && guestProfileHint ? (
-                  <p className="compact-note">{guestProfileHint}</p>
-                ) : null}
-
-                {guestProfile?.shareCode ? (
-                  <div className="invite-home__result">
-                    <span>{t("shareCode")}</span>
-                    <input readOnly value={guestProfile.shareCode} />
-                  </div>
-                ) : null}
 
                 {importedProfile?.localPath ? (
                   <p className="status-banner status-success">
                     {t("importedProfile")}: {importedProfile.name}
-                    {importedProfile.endpoint ? ` / ${importedProfile.endpoint}` : ""}
                   </p>
                 ) : null}
               </div>
@@ -2106,142 +3092,544 @@ export function ControlCenter() {
 
         <nav className="mobile-dock" aria-label="Primary actions">
           <button
-            className={activeSheet === "server" ? "mobile-dock__button is-active" : "mobile-dock__button"}
+            className={
+              activeSheet === "server"
+                ? "mobile-dock__button is-active"
+                : "mobile-dock__button"
+            }
             type="button"
-            onClick={() => setActiveSheet((current) => current === "server" ? null : "server")}
+            onClick={() =>
+              setActiveSheet((current) =>
+                current === "server" ? null : "server",
+              )
+            }
           >
             {t("tabServer")}
           </button>
           <button
-            className={activeSheet === "protocol" ? "mobile-dock__button is-active" : "mobile-dock__button"}
+            className={
+              activeSheet === "whitelist"
+                ? "mobile-dock__button is-active"
+                : "mobile-dock__button"
+            }
             type="button"
-            onClick={() => setActiveSheet((current) => current === "protocol" ? null : "protocol")}
+            onClick={() =>
+              setActiveSheet((current) =>
+                current === "whitelist" ? null : "whitelist",
+              )
+            }
           >
-            {t("navProtocol")}
+            {t("navWhitelist")}
           </button>
           <button
-            className={activeSheet === "logs" ? "mobile-dock__button is-active" : "mobile-dock__button"}
+            className={
+              activeSheet === "logs"
+                ? "mobile-dock__button is-active"
+                : "mobile-dock__button"
+            }
             type="button"
-            onClick={() => setActiveSheet((current) => current === "logs" ? null : "logs")}
+            onClick={() =>
+              setActiveSheet((current) => (current === "logs" ? null : "logs"))
+            }
           >
             {t("navLogs")}
           </button>
           <button
-            className={activeSheet === "more" ? "mobile-dock__button is-active" : "mobile-dock__button"}
+            className={
+              activeSheet === "more"
+                ? "mobile-dock__button is-active"
+                : "mobile-dock__button"
+            }
             type="button"
-            onClick={() => setActiveSheet((current) => current === "more" ? null : "more")}
+            onClick={() =>
+              setActiveSheet((current) => (current === "more" ? null : "more"))
+            }
           >
             {t("navMore")}
           </button>
         </nav>
       </div>
 
+      <input
+        ref={importProfileFileInputRef}
+        hidden
+        type="file"
+        accept=".json,.txt,.odin,.odinone,.odinone-access.json"
+        onChange={handleImportProfileFile}
+      />
+
+      {activeSheet === "mode-picker" ? (
+        <div
+          className="sheet-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("sheetModePickerTitle")}
+        >
+          <button
+            className="sheet-overlay__backdrop"
+            onClick={() => setActiveSheet(null)}
+            aria-label={t("close")}
+          />
+          <div className="sheet-panel">
+            <div className="sheet-panel__head">
+              <div>
+                <span className="section-eyebrow">{t("runtimeMode")}</span>
+                <h3 className="sheet-panel__title">
+                  {t("sheetModePickerTitle")}
+                </h3>
+              </div>
+              <button
+                className="ghost ghost--compact"
+                type="button"
+                onClick={() => setActiveSheet(null)}
+              >
+                {t("close")}
+              </button>
+            </div>
+
+            <p className="compact-note compact-note--panel">
+              {t("sheetModePickerText")}
+            </p>
+
+            {renderAccessModeCards({
+              className: "mode-grid--single",
+              closeOnSelect: true,
+            })}
+          </div>
+        </div>
+      ) : null}
+
       {activeSheet === "server" ? (
-        <div className="sheet-overlay" role="dialog" aria-modal="true" aria-label={t("sheetServerTitle")}>
-          <button className="sheet-overlay__backdrop" onClick={() => setActiveSheet(null)} aria-label={t("close")} />
+        <div
+          className="sheet-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("sheetServerTitle")}
+        >
+          <button
+            className="sheet-overlay__backdrop"
+            onClick={() => setActiveSheet(null)}
+            aria-label={t("close")}
+          />
           <div className="sheet-panel">
             <div className="sheet-panel__head">
               <div>
                 <span className="section-eyebrow">{t("serverInput")}</span>
                 <h3 className="sheet-panel__title">{t("sheetServerTitle")}</h3>
               </div>
-              <button className="ghost ghost--compact" type="button" onClick={() => setActiveSheet(null)}>
+              <button
+                className="ghost ghost--compact"
+                type="button"
+                onClick={() => setActiveSheet(null)}
+              >
                 {t("close")}
               </button>
             </div>
 
-            <div className="form-grid">
-              <label className="input-field">
-                <span>{t("host")}</span>
-                <input
-                  value={draft.host}
-                  onChange={(event) => setDraft((current) => ({ ...current, host: event.target.value }))}
-                  placeholder="203.0.113.42"
-                />
-              </label>
-
-              <label className="input-field">
-                <span>{t("sshPort")}</span>
-                <input
-                  value={draft.port}
-                  onChange={(event) =>
-                    setDraft((current) => ({ ...current, port: Number(event.target.value) || 22 }))
-                  }
-                  placeholder="22"
-                />
-              </label>
-
-              <label className="input-field">
-                <span>{t("user")}</span>
-                <input
-                  value={draft.username}
-                  onChange={(event) => setDraft((current) => ({ ...current, username: event.target.value }))}
-                  placeholder="root"
-                />
-              </label>
-
-              <label className="input-field input-span">
-                <div className="input-field__head">
-                  <span>{draft.authMethod === "password" ? t("password") : t("privateKey")}</span>
-                  <div className="lang-toggle" aria-label={t("authMethod")}>
-                    <button
-                      className={draft.authMethod === "password" ? "lang-button is-active" : "lang-button"}
-                      type="button"
-                      onClick={() =>
-                        setDraft((current) => ({
-                          ...current,
-                          authMethod: "password"
-                        }))
-                      }
-                    >
-                      {t("authPassword")}
-                    </button>
-                    <button
-                      className={draft.authMethod === "private-key" ? "lang-button is-active" : "lang-button"}
-                      type="button"
-                      onClick={() =>
-                        setDraft((current) => ({
-                          ...current,
-                          authMethod: "private-key"
-                        }))
-                      }
-                    >
-                      {t("authPrivateKey")}
-                    </button>
+            <div className="sheet-card-stack">
+              <section className="sheet-card">
+                <div className="sheet-card__head">
+                  <div>
+                    <span className="section-eyebrow">{t("deployStepOrigin")}</span>
+                    <strong>{t("deployStepOriginTitle")}</strong>
                   </div>
+                  <span className="sheet-card__badge">{t("modeStatusLive")}</span>
                 </div>
-                <textarea
-                  value={secret}
-                  onChange={(event) => setSecret(event.target.value)}
-                  placeholder={draft.authMethod === "password" ? "server password" : "-----BEGIN OPENSSH PRIVATE KEY-----"}
-                />
-              </label>
+                <p className="compact-note">{t("deployStepOriginText")}</p>
 
-              {requiresVKLink ? (
-                <label className="input-field input-span">
-                  <span>{t("vkCallLink")}</span>
-                  <input
-                    value={vkLink}
-                    onChange={(event) => setVKLink(event.target.value)}
-                    placeholder="https://vk.com/call/join/..."
-                  />
-                </label>
-              ) : null}
+                <div className="form-grid">
+                  <label className="input-field">
+                    <span>{t("host")}</span>
+                    <input
+                      value={draft.host}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          host: event.target.value,
+                        }))
+                      }
+                      placeholder="203.0.113.42"
+                    />
+                  </label>
 
+                  <label className="input-field">
+                    <span>{t("sshPort")}</span>
+                    <input
+                      value={draft.port}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          port: Number(event.target.value) || 22,
+                        }))
+                      }
+                      placeholder="22"
+                    />
+                  </label>
+
+                  <label className="input-field">
+                    <span>{t("user")}</span>
+                    <input
+                      value={draft.username}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          username: event.target.value,
+                        }))
+                      }
+                      placeholder="root"
+                    />
+                  </label>
+
+                  <label className="input-field input-span">
+                    <div className="input-field__head">
+                      <span>
+                        {draft.authMethod === "password"
+                          ? t("password")
+                          : t("privateKey")}
+                      </span>
+                      <div className="lang-toggle" aria-label={t("authMethod")}>
+                        <button
+                          className={
+                            draft.authMethod === "password"
+                              ? "lang-button is-active"
+                              : "lang-button"
+                          }
+                          type="button"
+                          onClick={() =>
+                            setDraft((current) => ({
+                              ...current,
+                              authMethod: "password",
+                            }))
+                          }
+                        >
+                          {t("authPassword")}
+                        </button>
+                        <button
+                          className={
+                            draft.authMethod === "private-key"
+                              ? "lang-button is-active"
+                              : "lang-button"
+                          }
+                          type="button"
+                          onClick={() =>
+                            setDraft((current) => ({
+                              ...current,
+                              authMethod: "private-key",
+                            }))
+                          }
+                        >
+                          {t("authPrivateKey")}
+                        </button>
+                      </div>
+                    </div>
+                    <textarea
+                      value={secret}
+                      onChange={(event) => setSecret(event.target.value)}
+                      placeholder={
+                        draft.authMethod === "password"
+                          ? "server password"
+                          : "-----BEGIN OPENSSH PRIVATE KEY-----"
+                      }
+                    />
+                  </label>
+
+                  <label className="input-field input-span">
+                    <div className="input-field__head">
+                      <span>{t("portSetup")}</span>
+                      <div className="lang-toggle" aria-label={t("portSetup")}>
+                        <button
+                          className={
+                            deployPortMode === "auto"
+                              ? "lang-button is-active"
+                              : "lang-button"
+                          }
+                          type="button"
+                          onClick={() => {
+                            setDeployPortMode("auto");
+                            setDraft((current) => ({
+                              ...current,
+                              vkTurnProxyPort: undefined,
+                              realityPort: undefined,
+                            }));
+                          }}
+                        >
+                          {t("portSetupAuto")}
+                        </button>
+                        <button
+                          className={
+                            deployPortMode === "manual"
+                              ? "lang-button is-active"
+                              : "lang-button"
+                          }
+                          type="button"
+                          onClick={() => setDeployPortMode("manual")}
+                        >
+                          {t("portSetupManual")}
+                        </button>
+                      </div>
+                    </div>
+                    <p className="compact-note">
+                      {deployPortMode === "manual"
+                        ? t("portSetupManualHint")
+                        : t("portSetupAutoHint")}
+                    </p>
+                  </label>
+
+                  {deployPortMode === "manual" ? (
+                    <>
+                      <label className="input-field">
+                        <span>{t("vkRelayPort")}</span>
+                        <input
+                          value={draft.vkTurnProxyPort ?? ""}
+                          onChange={(event) =>
+                            setDraft((current) => ({
+                              ...current,
+                              vkTurnProxyPort: normalizePortHint(
+                                Number.parseInt(event.target.value, 10),
+                              ),
+                            }))
+                          }
+                          placeholder="56080"
+                          inputMode="numeric"
+                        />
+                      </label>
+
+                      <label className="input-field">
+                        <span>{t("realityPort")}</span>
+                        <input
+                          value={draft.realityPort ?? ""}
+                          onChange={(event) =>
+                            setDraft((current) => ({
+                              ...current,
+                              realityPort: normalizePortHint(
+                                Number.parseInt(event.target.value, 10),
+                              ),
+                            }))
+                          }
+                          placeholder="52443"
+                          inputMode="numeric"
+                        />
+                      </label>
+                    </>
+                  ) : null}
+
+                  {requiresVKLink ? (
+                    <label className="input-field input-span">
+                      <span>{t("vkCallLink")}</span>
+                      <input
+                        value={vkLink}
+                        onChange={(event) => setVKLink(event.target.value)}
+                        placeholder="https://vk.com/call/join/..."
+                      />
+                    </label>
+                  ) : null}
+                </div>
+
+                {manualPortConfigError ? (
+                  <p className="status-banner status-error">
+                    {manualPortConfigError}
+                  </p>
+                ) : null}
+
+                <div className="sheet-actions">
+                  <button
+                    className="ghost"
+                    type="button"
+                    onClick={() => handleValidate("origin")}
+                    disabled={isPending || !draft.host || !secret.trim()}
+                  >
+                    {t("validateOrigin")}
+                  </button>
+                  <button
+                    className="primary"
+                    type="button"
+                    onClick={() => handleDeploy("origin")}
+                    disabled={
+                      isPending ||
+                      !draft.host ||
+                      !secret.trim() ||
+                      Boolean(manualPortConfigError)
+                    }
+                  >
+                    {t("startDeploy")}
+                  </button>
+                </div>
+              </section>
+
+              <section className="sheet-card">
+                <div className="sheet-card__head">
+                  <div>
+                    <span className="section-eyebrow">{t("deployStepEdge")}</span>
+                    <strong>{t("deployStepEdgeTitle")}</strong>
+                  </div>
+                  <span className="sheet-card__badge">
+                    {protocolEntryById.has("vless-reality-yandex-edge")
+                      ? t("modeStatusOptional")
+                      : t("modeStatusAttach")}
+                  </span>
+                </div>
+                <p className="compact-note">{t("deployStepEdgeText")}</p>
+
+                <div className="form-grid">
+                  <label className="input-field">
+                    <span>{t("edgeHost")}</span>
+                    <input
+                      value={edgeDraft.host}
+                      onChange={(event) =>
+                        setEdgeDraft((current) => ({
+                          ...current,
+                          host: event.target.value,
+                        }))
+                      }
+                      placeholder="203.0.113.10"
+                    />
+                  </label>
+
+                  <label className="input-field">
+                    <span>{t("sshPort")}</span>
+                    <input
+                      value={edgeDraft.port}
+                      onChange={(event) =>
+                        setEdgeDraft((current) => ({
+                          ...current,
+                          port: Number(event.target.value) || 22,
+                        }))
+                      }
+                      placeholder="22"
+                    />
+                  </label>
+
+                  <label className="input-field">
+                    <span>{t("user")}</span>
+                    <input
+                      value={edgeDraft.username}
+                      onChange={(event) =>
+                        setEdgeDraft((current) => ({
+                          ...current,
+                          username: event.target.value,
+                        }))
+                      }
+                      placeholder="root"
+                    />
+                  </label>
+
+                  <label className="input-field">
+                    <span>{t("edgePublicPort")}</span>
+                    <input
+                      value={edgeDraft.publicPort}
+                      onChange={(event) =>
+                        setEdgeDraft((current) => ({
+                          ...current,
+                          publicPort: Number(event.target.value) || 443,
+                        }))
+                      }
+                      placeholder="443"
+                      inputMode="numeric"
+                    />
+                  </label>
+
+                  <label className="input-field input-span">
+                    <div className="input-field__head">
+                      <span>
+                        {edgeDraft.authMethod === "password"
+                          ? t("password")
+                          : t("privateKey")}
+                      </span>
+                      <div className="lang-toggle" aria-label={t("authMethod")}>
+                        <button
+                          className={
+                            edgeDraft.authMethod === "password"
+                              ? "lang-button is-active"
+                              : "lang-button"
+                          }
+                          type="button"
+                          onClick={() =>
+                            setEdgeDraft((current) => ({
+                              ...current,
+                              authMethod: "password",
+                            }))
+                          }
+                        >
+                          {t("authPassword")}
+                        </button>
+                        <button
+                          className={
+                            edgeDraft.authMethod === "private-key"
+                              ? "lang-button is-active"
+                              : "lang-button"
+                          }
+                          type="button"
+                          onClick={() =>
+                            setEdgeDraft((current) => ({
+                              ...current,
+                              authMethod: "private-key",
+                            }))
+                          }
+                        >
+                          {t("authPrivateKey")}
+                        </button>
+                      </div>
+                    </div>
+                    <textarea
+                      value={edgeDraft.secret}
+                      onChange={(event) =>
+                        setEdgeDraft((current) => ({
+                          ...current,
+                          secret: event.target.value,
+                        }))
+                      }
+                      placeholder={
+                        edgeDraft.authMethod === "password"
+                          ? "edge server password"
+                          : "-----BEGIN OPENSSH PRIVATE KEY-----"
+                      }
+                    />
+                  </label>
+                </div>
+
+                <div className="sheet-actions">
+                  <button
+                    className="ghost"
+                    type="button"
+                    onClick={() => handleValidate("edge-attach")}
+                    disabled={
+                      isPending ||
+                      !draft.host ||
+                      !secret.trim() ||
+                      !edgeDraft.host ||
+                      !edgeDraft.secret.trim()
+                    }
+                  >
+                    {t("validateEdge")}
+                  </button>
+                  <button
+                    className="primary"
+                    type="button"
+                    onClick={() => handleDeploy("edge-attach")}
+                    disabled={
+                      isPending ||
+                      !draft.host ||
+                      !secret.trim() ||
+                      !edgeDraft.host ||
+                      !edgeDraft.secret.trim()
+                    }
+                  >
+                    {t("attachEdge")}
+                  </button>
+                </div>
+              </section>
             </div>
 
-            {successNotice ? <p className="status-banner status-success">{successNotice}</p> : null}
-            {manualPortConfigError ? <p className="status-banner status-error">{manualPortConfigError}</p> : null}
+            {successNotice ? (
+              <p className="status-banner status-success">{successNotice}</p>
+            ) : null}
 
             <div className="sheet-actions">
               <button
-                className="primary"
-                onClick={handleDeploy}
-                disabled={isPending || !draft.host || !secret.trim() || Boolean(manualPortConfigError)}
+                className="ghost"
+                onClick={handleResetState}
+                disabled={isPending}
               >
-                {t("startDeploy")}
-              </button>
-              <button className="ghost" onClick={handleResetState} disabled={isPending}>
                 {t("reset")}
               </button>
             </div>
@@ -2249,144 +3637,179 @@ export function ControlCenter() {
         </div>
       ) : null}
 
-      {activeSheet === "protocol" ? (
-        <div className="sheet-overlay" role="dialog" aria-modal="true" aria-label={t("sheetProtocolTitle")}>
-          <button className="sheet-overlay__backdrop" onClick={() => setActiveSheet(null)} aria-label={t("close")} />
+      {activeSheet === "whitelist" ? (
+        <div
+          className="sheet-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("sheetWhitelistTitle")}
+        >
+          <button
+            className="sheet-overlay__backdrop"
+            onClick={() => setActiveSheet(null)}
+            aria-label={t("close")}
+          />
           <div className="sheet-panel">
             <div className="sheet-panel__head">
               <div>
-                <span className="section-eyebrow">{t("protocolPack")}</span>
-                <h3 className="sheet-panel__title">{t("sheetProtocolTitle")}</h3>
+                <span className="section-eyebrow">{t("whitelistEyebrow")}</span>
+                <h3 className="sheet-panel__title">
+                  {t("sheetWhitelistTitle")}
+                </h3>
               </div>
-              <button className="ghost ghost--compact" type="button" onClick={() => setActiveSheet(null)}>
+              <button
+                className="ghost ghost--compact"
+                type="button"
+                onClick={() => setActiveSheet(null)}
+              >
                 {t("close")}
               </button>
             </div>
 
-            <div className="phone-facts">
-              <div className="phone-fact">
-                <span>{t("runtimeMode")}</span>
-                <strong>{currentTransport}</strong>
-              </div>
-              <div className="phone-fact">
-                <span>{t("activeProtocol")}</span>
-                <strong>{currentProtocol === "vless-reality" ? t("protocolReality") : t("protocolWireGuard")}</strong>
-              </div>
-              <div className="phone-fact">
-                <span>{t("portSetup")}</span>
-                <strong>{deployPortMode === "manual" ? t("portSetupManual") : t("portSetupAuto")}</strong>
-              </div>
-            </div>
-
-            <div className="form-grid">
-              <label className="input-field input-span">
-                <div className="input-field__head">
-                  <span>{t("runtimeMode")}</span>
-                  {renderAccessModeToggle()}
-                </div>
-                <p className="compact-note">
-                  {selectedAccessModeHint}
-                </p>
-              </label>
-
-              <label className="input-field input-span">
-                <div className="input-field__head">
-                  <span>{t("portSetup")}</span>
-                  <div className="lang-toggle" aria-label={t("portSetup")}>
-                    <button
-                      className={deployPortMode === "auto" ? "lang-button is-active" : "lang-button"}
-                      type="button"
-                      onClick={() => {
-                        setDeployPortMode("auto");
-                        setDraft((current) => ({
-                          ...current,
-                          vkTurnProxyPort: undefined,
-                          realityPort: undefined
-                        }));
-                      }}
-                    >
-                      {t("portSetupAuto")}
-                    </button>
-                    <button
-                      className={deployPortMode === "manual" ? "lang-button is-active" : "lang-button"}
-                      type="button"
-                      onClick={() => setDeployPortMode("manual")}
-                    >
-                      {t("portSetupManual")}
-                    </button>
+            <div className="sheet-stack">
+              <section className="sheet-card">
+                <div className="sheet-card__head">
+                  <div>
+                    <span className="section-eyebrow">
+                      {t("whitelistInputLabel")}
+                    </span>
+                    <strong>{t("whitelistCardTitle")}</strong>
                   </div>
+                  <span className="sheet-card__badge">
+                    {whitelistLookup?.cached
+                      ? t("whitelistSourceCached")
+                      : t("whitelistSourceLive")}
+                  </span>
                 </div>
-                <p className="compact-note">
-                  {deployPortMode === "manual" ? t("portSetupManualHint") : t("portSetupAutoHint")}
+
+                {t("sheetWhitelistText") ? (
+                  <p className="compact-note">{t("sheetWhitelistText")}</p>
+                ) : null}
+
+                <label className="input-field input-span">
+                  <span>{t("whitelistIpv4")}</span>
+                  <input
+                    value={whitelistIp}
+                    onChange={(event) => {
+                      setWhitelistIp(event.target.value);
+                      setWhitelistLookup(null);
+                      setWhitelistLookupError(null);
+                    }}
+                    placeholder="62.84.123.148"
+                    inputMode="decimal"
+                  />
+                </label>
+
+                <div className="sheet-actions">
+                  <button
+                    className="primary"
+                    type="button"
+                    onClick={handleCheckWhitelistIp}
+                    disabled={isPending || !whitelistIp.trim()}
+                  >
+                    {isBusy("checkWhitelist")
+                      ? t("whitelistChecking")
+                      : t("whitelistCheck")}
+                  </button>
+                </div>
+              </section>
+
+              {whitelistLookupError ? (
+                <p className="status-banner status-error">
+                  {whitelistLookupError}
                 </p>
-              </label>
+              ) : null}
 
-              {deployPortMode === "manual" ? (
+              {whitelistLookup && !whitelistLookup.valid ? (
+                <p className="status-banner status-error">
+                  {t("whitelistInvalid")}
+                </p>
+              ) : null}
+
+              {whitelistLookup?.valid ? (
                 <>
-                  <label className="input-field">
-                    <span>{t("vkRelayPort")}</span>
-                    <input
-                      value={draft.vkTurnProxyPort ?? ""}
-                      onChange={(event) =>
-                        setDraft((current) => ({
-                          ...current,
-                          vkTurnProxyPort: normalizePortHint(Number.parseInt(event.target.value, 10))
-                        }))
-                      }
-                      placeholder="56080"
-                      inputMode="numeric"
-                    />
-                  </label>
+                  <p
+                    className={
+                      whitelistLookup.matchedIp || whitelistLookup.matchedCidr
+                        ? "status-banner status-success"
+                        : "status-banner"
+                    }
+                  >
+                    {whitelistLookupSummary}
+                  </p>
 
-                  <label className="input-field">
-                    <span>{t("realityPort")}</span>
-                    <input
-                      value={draft.realityPort ?? ""}
-                      onChange={(event) =>
-                        setDraft((current) => ({
-                          ...current,
-                          realityPort: normalizePortHint(Number.parseInt(event.target.value, 10))
-                        }))
-                      }
-                      placeholder="52443"
-                      inputMode="numeric"
-                    />
-                  </label>
+                  <div className="phone-facts">
+                    <div className="phone-fact">
+                      <span>{t("whitelistExactIp")}</span>
+                      <strong>
+                        {whitelistLookup.matchedIp
+                          ? t("whitelistMatchYes")
+                          : t("whitelistMatchNo")}
+                      </strong>
+                    </div>
+                    <div className="phone-fact">
+                      <span>{t("whitelistCidr")}</span>
+                      <strong>
+                        {whitelistLookup.matchedCidr
+                          ? t("whitelistMatchYes")
+                          : t("whitelistMatchNo")}
+                      </strong>
+                    </div>
+                  </div>
+
+                  {whitelistLookup.matchedCidrs.length > 0 ? (
+                    <div className="command-card command-card--compact">
+                      <strong>{t("whitelistMatchedCidrs")}</strong>
+                      <div className="whitelist-pill-row">
+                        {whitelistLookup.matchedCidrs.map((cidr) => (
+                          <span className="whitelist-pill" key={cidr}>
+                            {cidr}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="compact-note compact-note--panel">
+                      {t("whitelistNoCidrs")}
+                    </p>
+                  )}
+
+                  {whitelistLookup.note ? (
+                    <p className="compact-note compact-note--panel">
+                      {whitelistLookup.note}
+                    </p>
+                  ) : null}
+
+                  <div className="command-card command-card--compact">
+                    <strong>{t("whitelistSource")}</strong>
+                    <textarea readOnly value={whitelistSourceSummary} />
+                    <p className="compact-note">
+                      {t("whitelistCheckedAt")}: {whitelistLookup.checkedAt}
+                    </p>
+                    <p className="compact-note">
+                      {t("whitelistFetchedAt")}:{" "}
+                      {whitelistLookup.listsFetchedAt ?? t("diagnosticsEmpty")}
+                    </p>
+                  </div>
                 </>
               ) : null}
-            </div>
-
-            {manualPortConfigError ? <p className="status-banner status-error">{manualPortConfigError}</p> : null}
-
-            <div className="sheet-actions">
-              <button
-                className="primary"
-                type="button"
-                onClick={handleStartTunnel}
-                disabled={
-                  isPending ||
-                  !resolvedDraftHost ||
-                  (!secret.trim() && !hasLocalAccessProfile) ||
-                  (requiresVKLink && !vkLink.trim()) ||
-                  (requiresVKLink && cooldownMinutes > 0)
-                }
-              >
-                {isBusy("startTunnel") ? t("startingTunnel") : t("startTunnel")}
-              </button>
-              <button className="ghost" type="button" onClick={handleStopTunnel} disabled={isPending}>
-                {isBusy("stopTunnel") ? t("stoppingTunnel") : t("stopTunnel")}
-              </button>
-              <button className="ghost" type="button" onClick={handleRunTest} disabled={isPending || localTunnel?.status !== "running"}>
-                {isBusy("runTest") ? t("testing") : t("runTest")}
-              </button>
             </div>
           </div>
         </div>
       ) : null}
 
       {activeSheet === "logs" ? (
-        <div className="sheet-overlay" role="dialog" aria-modal="true" aria-label={t("sheetLogsTitle")}>
-          <button className="sheet-overlay__backdrop" onClick={() => setActiveSheet(null)} aria-label={t("close")} />
+        <div
+          className="sheet-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("sheetLogsTitle")}
+        >
+          <button
+            className="sheet-overlay__backdrop"
+            onClick={() => setActiveSheet(null)}
+            aria-label={t("close")}
+          />
           <div className="sheet-panel">
             <div className="sheet-panel__head">
               <div>
@@ -2403,17 +3826,31 @@ export function ControlCenter() {
                   {t("sheetLogsTitle")}
                 </h3>
               </div>
-              <button className="ghost ghost--compact" type="button" onClick={() => setActiveSheet(null)}>
+              <button
+                className="ghost ghost--compact"
+                type="button"
+                onClick={() => setActiveSheet(null)}
+              >
                 {t("close")}
               </button>
             </div>
 
             <div className="sheet-stack">
               <div className="sheet-actions">
-                <button className="ghost" type="button" onClick={handleRefreshTunnelStatus} disabled={isPending}>
+                <button
+                  className="ghost"
+                  type="button"
+                  onClick={handleRefreshTunnelStatus}
+                  disabled={isPending}
+                >
                   {t("refreshStatus")}
                 </button>
-                <button className="ghost" type="button" onClick={handleRunTest} disabled={isPending || localTunnel?.status !== "running"}>
+                <button
+                  className="ghost"
+                  type="button"
+                  onClick={handleRunTest}
+                  disabled={isPending || localTunnel?.status !== "running"}
+                >
                   {isBusy("runTest") ? t("testing") : t("runTest")}
                 </button>
               </div>
@@ -2421,14 +3858,28 @@ export function ControlCenter() {
               {ownerRuntimeLabPanelVisible ? (
                 <div className="command-card">
                   <strong>{t("ownerLabTitle")}</strong>
-                  <p className="compact-note compact-note--panel">{t("ownerLabText")}</p>
+                  <p className="compact-note compact-note--panel">
+                    {t("ownerLabText")}
+                  </p>
 
-                  <div className="owner-lab-mode-stack" aria-label={t("ownerLabMode")}>
+                  <div
+                    className="owner-lab-mode-stack"
+                    aria-label={t("ownerLabMode")}
+                  >
                     <button
-                      className={ownerRuntimeLab.mode === "off" ? "lang-button owner-lab-mode-button is-active" : "lang-button owner-lab-mode-button"}
+                      className={
+                        ownerRuntimeLab.mode === "off"
+                          ? "lang-button owner-lab-mode-button is-active"
+                          : "lang-button owner-lab-mode-button"
+                      }
                       type="button"
                       aria-pressed={ownerRuntimeLab.mode === "off"}
-                      onClick={() => setOwnerRuntimeLab((current) => ({ ...current, mode: "off" }))}
+                      onClick={() =>
+                        setOwnerRuntimeLab((current) => ({
+                          ...current,
+                          mode: "off",
+                        }))
+                      }
                     >
                       {t("ownerLabModeStable")}
                     </button>
@@ -2439,9 +3890,14 @@ export function ControlCenter() {
                           : "lang-button owner-lab-mode-button"
                       }
                       type="button"
-                      aria-pressed={ownerRuntimeLab.mode === "reality-whitelist-scaffold"}
+                      aria-pressed={
+                        ownerRuntimeLab.mode === "reality-whitelist-scaffold"
+                      }
                       onClick={() =>
-                        setOwnerRuntimeLab((current) => ({ ...current, mode: "reality-whitelist-scaffold" }))
+                        setOwnerRuntimeLab((current) => ({
+                          ...current,
+                          mode: "reality-whitelist-scaffold",
+                        }))
                       }
                     >
                       {t("ownerLabModeWhitelist")}
@@ -2453,12 +3909,14 @@ export function ControlCenter() {
                           : "lang-button owner-lab-mode-button"
                       }
                       type="button"
-                      aria-pressed={ownerRuntimeLab.mode === "reality-vps-scaffold"}
+                      aria-pressed={
+                        ownerRuntimeLab.mode === "reality-vps-scaffold"
+                      }
                       onClick={() =>
                         setOwnerRuntimeLab((current) => ({
                           ...current,
                           mode: "reality-vps-scaffold",
-                          vpsUseOwnerRealityEgress: false
+                          vpsUseOwnerRealityEgress: false,
                         }))
                       }
                     >
@@ -2476,7 +3934,7 @@ export function ControlCenter() {
                         setOwnerRuntimeLab((current) => ({
                           ...current,
                           mode: "reality-vps-lab",
-                          vpsUseOwnerRealityEgress: false
+                          vpsUseOwnerRealityEgress: false,
                         }))
                       }
                     >
@@ -2489,13 +3947,15 @@ export function ControlCenter() {
                           : "lang-button owner-lab-mode-button"
                       }
                       type="button"
-                      aria-pressed={ownerRuntimeLab.mode === "reality-vps-relay-lab"}
+                      aria-pressed={
+                        ownerRuntimeLab.mode === "reality-vps-relay-lab"
+                      }
                       onClick={() =>
                         setOwnerRuntimeLab((current) => ({
                           ...withIgareckRelayDefaults(current),
                           mode: "reality-vps-relay-lab",
                           vpsUseOwnerRealityEgress: true,
-                          vpsUseRelayAutoselect: true
+                          vpsUseRelayAutoselect: true,
                         }))
                       }
                     >
@@ -2510,7 +3970,10 @@ export function ControlCenter() {
                         <input
                           value={ownerRuntimeLab.hintServerName}
                           onChange={(event) =>
-                            setOwnerRuntimeLab((current) => ({ ...current, hintServerName: event.target.value }))
+                            setOwnerRuntimeLab((current) => ({
+                              ...current,
+                              hintServerName: event.target.value,
+                            }))
                           }
                           placeholder="max.ru"
                         />
@@ -2521,7 +3984,10 @@ export function ControlCenter() {
                         <input
                           value={ownerRuntimeLab.hintCidrBucket}
                           onChange={(event) =>
-                            setOwnerRuntimeLab((current) => ({ ...current, hintCidrBucket: event.target.value }))
+                            setOwnerRuntimeLab((current) => ({
+                              ...current,
+                              hintCidrBucket: event.target.value,
+                            }))
                           }
                           placeholder="cidr-max"
                         />
@@ -2532,7 +3998,10 @@ export function ControlCenter() {
                         <input
                           value={ownerRuntimeLab.hintSource}
                           onChange={(event) =>
-                            setOwnerRuntimeLab((current) => ({ ...current, hintSource: event.target.value }))
+                            setOwnerRuntimeLab((current) => ({
+                              ...current,
+                              hintSource: event.target.value,
+                            }))
                           }
                           placeholder="operator-curated"
                         />
@@ -2543,7 +4012,10 @@ export function ControlCenter() {
                         <input
                           value={ownerRuntimeLab.hintTag}
                           onChange={(event) =>
-                            setOwnerRuntimeLab((current) => ({ ...current, hintTag: event.target.value }))
+                            setOwnerRuntimeLab((current) => ({
+                              ...current,
+                              hintTag: event.target.value,
+                            }))
                           }
                           placeholder="candidate-max-ru"
                         />
@@ -2558,35 +4030,60 @@ export function ControlCenter() {
                           <span>{t("ownerLabVpsRelayMode")}</span>
                           <div className="lang-toggle">
                             <button
-                              className={!ownerRuntimeLab.vpsUseRelayAutoselect ? "lang-button is-active" : "lang-button"}
+                              className={
+                                !ownerRuntimeLab.vpsUseRelayAutoselect
+                                  ? "lang-button is-active"
+                                  : "lang-button"
+                              }
                               type="button"
-                              aria-pressed={!ownerRuntimeLab.vpsUseRelayAutoselect}
+                              aria-pressed={
+                                !ownerRuntimeLab.vpsUseRelayAutoselect
+                              }
                               onClick={() =>
-                                setOwnerRuntimeLab((current) => ({ ...current, vpsUseRelayAutoselect: false }))
+                                setOwnerRuntimeLab((current) => ({
+                                  ...current,
+                                  vpsUseRelayAutoselect: false,
+                                }))
                               }
                             >
                               {t("ownerLabVpsManualRelay")}
                             </button>
                             <button
-                              className={ownerRuntimeLab.vpsUseRelayAutoselect ? "lang-button is-active" : "lang-button"}
+                              className={
+                                ownerRuntimeLab.vpsUseRelayAutoselect
+                                  ? "lang-button is-active"
+                                  : "lang-button"
+                              }
                               type="button"
-                              aria-pressed={ownerRuntimeLab.vpsUseRelayAutoselect}
-                              onClick={() => setOwnerRuntimeLab((current) => withIgareckRelayDefaults(current))}
+                              aria-pressed={
+                                ownerRuntimeLab.vpsUseRelayAutoselect
+                              }
+                              onClick={() =>
+                                setOwnerRuntimeLab((current) =>
+                                  withIgareckRelayDefaults(current),
+                                )
+                              }
                             >
                               {t("ownerLabVpsIgareckRelay")}
                             </button>
                           </div>
                         </label>
                       ) : (
-                        <p className="compact-note compact-note--panel">{t("ownerLabVpsRelayLockedText")}</p>
+                        <p className="compact-note compact-note--panel">
+                          {t("ownerLabVpsRelayLockedText")}
+                        </p>
                       )}
 
                       {ownerRuntimeLabVpsRelayInputsVisible ? (
                         <>
-                          <p className="compact-note compact-note--panel">{t("ownerLabVpsRelayText")}</p>
+                          <p className="compact-note compact-note--panel">
+                            {t("ownerLabVpsRelayText")}
+                          </p>
 
                           {ownerRuntimeLabVpsRelayOwnerMode ? (
-                            <p className="compact-note compact-note--panel">{t("ownerLabVpsRelayOwnerText")}</p>
+                            <p className="compact-note compact-note--panel">
+                              {t("ownerLabVpsRelayOwnerText")}
+                            </p>
                           ) : null}
 
                           <label className="input-field input-span">
@@ -2596,10 +4093,12 @@ export function ControlCenter() {
                               onChange={(event) =>
                                 setOwnerRuntimeLab((current) => ({
                                   ...current,
-                                  vpsRelaySubscriptionUrl: event.target.value
+                                  vpsRelaySubscriptionUrl: event.target.value,
                                 }))
                               }
-                              placeholder={defaultOwnerRuntimeLabRelaySubscriptionUrl}
+                              placeholder={
+                                defaultOwnerRuntimeLabRelaySubscriptionUrl
+                              }
                             />
                           </label>
 
@@ -2610,10 +4109,12 @@ export function ControlCenter() {
                               onChange={(event) =>
                                 setOwnerRuntimeLab((current) => ({
                                   ...current,
-                                  vpsRelaySourceLabel: event.target.value
+                                  vpsRelaySourceLabel: event.target.value,
                                 }))
                               }
-                              placeholder={defaultOwnerRuntimeLabRelaySourceLabel}
+                              placeholder={
+                                defaultOwnerRuntimeLabRelaySourceLabel
+                              }
                             />
                           </label>
                         </>
@@ -2621,123 +4122,175 @@ export function ControlCenter() {
 
                       {ownerRuntimeLabVpsManualInputsVisible ? (
                         <>
-                      <label className="input-field input-span">
-                        <span>{t("ownerLabVpsServerName")}</span>
-                        <input
-                          value={ownerRuntimeLab.vpsServerName}
-                          onChange={(event) =>
-                            setOwnerRuntimeLab((current) => ({ ...current, vpsServerName: event.target.value }))
-                          }
-                          placeholder="pimg.mycdn.me"
-                        />
-                      </label>
+                          <label className="input-field input-span">
+                            <span>{t("ownerLabVpsServerName")}</span>
+                            <input
+                              value={ownerRuntimeLab.vpsServerName}
+                              onChange={(event) =>
+                                setOwnerRuntimeLab((current) => ({
+                                  ...current,
+                                  vpsServerName: event.target.value,
+                                }))
+                              }
+                              placeholder="pimg.mycdn.me"
+                            />
+                          </label>
 
-                      <label className="input-field">
-                        <span>{t("ownerLabVpsPort")}</span>
-                        <input
-                          value={ownerRuntimeLab.vpsPort}
-                          onChange={(event) =>
-                            setOwnerRuntimeLab((current) => ({ ...current, vpsPort: event.target.value }))
-                          }
-                          placeholder="10443"
-                          inputMode="numeric"
-                        />
-                      </label>
+                          <label className="input-field">
+                            <span>{t("ownerLabVpsPort")}</span>
+                            <input
+                              value={ownerRuntimeLab.vpsPort}
+                              onChange={(event) =>
+                                setOwnerRuntimeLab((current) => ({
+                                  ...current,
+                                  vpsPort: event.target.value,
+                                }))
+                              }
+                              placeholder="10443"
+                              inputMode="numeric"
+                            />
+                          </label>
 
-                      <label className="input-field">
-                        <span>{t("ownerLabVpsTransport")}</span>
-                        <div className="lang-toggle">
-                          <button
-                            className={ownerRuntimeLab.vpsTransport === "tcp" ? "lang-button is-active" : "lang-button"}
-                            type="button"
-                            aria-pressed={ownerRuntimeLab.vpsTransport === "tcp"}
-                            onClick={() => setOwnerRuntimeLab((current) => ({ ...current, vpsTransport: "tcp" }))}
-                          >
-                            TCP
-                          </button>
-                          <button
-                            className={ownerRuntimeLab.vpsTransport === "grpc" ? "lang-button is-active" : "lang-button"}
-                            type="button"
-                            aria-pressed={ownerRuntimeLab.vpsTransport === "grpc"}
-                            onClick={() => setOwnerRuntimeLab((current) => ({ ...current, vpsTransport: "grpc" }))}
-                          >
-                            gRPC
-                          </button>
-                        </div>
-                      </label>
+                          <label className="input-field">
+                            <span>{t("ownerLabVpsTransport")}</span>
+                            <div className="lang-toggle">
+                              <button
+                                className={
+                                  ownerRuntimeLab.vpsTransport === "tcp"
+                                    ? "lang-button is-active"
+                                    : "lang-button"
+                                }
+                                type="button"
+                                aria-pressed={
+                                  ownerRuntimeLab.vpsTransport === "tcp"
+                                }
+                                onClick={() =>
+                                  setOwnerRuntimeLab((current) => ({
+                                    ...current,
+                                    vpsTransport: "tcp",
+                                  }))
+                                }
+                              >
+                                TCP
+                              </button>
+                              <button
+                                className={
+                                  ownerRuntimeLab.vpsTransport === "grpc"
+                                    ? "lang-button is-active"
+                                    : "lang-button"
+                                }
+                                type="button"
+                                aria-pressed={
+                                  ownerRuntimeLab.vpsTransport === "grpc"
+                                }
+                                onClick={() =>
+                                  setOwnerRuntimeLab((current) => ({
+                                    ...current,
+                                    vpsTransport: "grpc",
+                                  }))
+                                }
+                              >
+                                gRPC
+                              </button>
+                            </div>
+                          </label>
 
-                      <label className="input-field input-span">
-                        <span>{t("ownerLabVpsFlow")}</span>
-                        <input
-                          value={ownerRuntimeLab.vpsFlow}
-                          onChange={(event) =>
-                            setOwnerRuntimeLab((current) => ({ ...current, vpsFlow: event.target.value }))
-                          }
-                          placeholder="xtls-rprx-vision"
-                        />
-                      </label>
+                          <label className="input-field input-span">
+                            <span>{t("ownerLabVpsFlow")}</span>
+                            <input
+                              value={ownerRuntimeLab.vpsFlow}
+                              onChange={(event) =>
+                                setOwnerRuntimeLab((current) => ({
+                                  ...current,
+                                  vpsFlow: event.target.value,
+                                }))
+                              }
+                              placeholder="xtls-rprx-vision"
+                            />
+                          </label>
 
-                      <label className="input-field input-span">
-                        <span>{t("ownerLabVpsFingerprint")}</span>
-                        <input
-                          value={ownerRuntimeLab.vpsFingerprint}
-                          onChange={(event) =>
-                            setOwnerRuntimeLab((current) => ({ ...current, vpsFingerprint: event.target.value }))
-                          }
-                          placeholder={ownerRuntimeLab.vpsTransport === "grpc" ? "firefox" : "chrome"}
-                        />
-                      </label>
+                          <label className="input-field input-span">
+                            <span>{t("ownerLabVpsFingerprint")}</span>
+                            <input
+                              value={ownerRuntimeLab.vpsFingerprint}
+                              onChange={(event) =>
+                                setOwnerRuntimeLab((current) => ({
+                                  ...current,
+                                  vpsFingerprint: event.target.value,
+                                }))
+                              }
+                              placeholder={
+                                ownerRuntimeLab.vpsTransport === "grpc"
+                                  ? "firefox"
+                                  : "chrome"
+                              }
+                            />
+                          </label>
 
-                      <label className="input-field input-span">
-                        <span>{t("ownerLabVpsGrpcServiceName")}</span>
-                        <input
-                          value={ownerRuntimeLab.vpsGrpcServiceName}
-                          onChange={(event) =>
-                            setOwnerRuntimeLab((current) => ({ ...current, vpsGrpcServiceName: event.target.value }))
-                          }
-                          placeholder="grpc serviceName"
-                        />
-                      </label>
+                          <label className="input-field input-span">
+                            <span>{t("ownerLabVpsGrpcServiceName")}</span>
+                            <input
+                              value={ownerRuntimeLab.vpsGrpcServiceName}
+                              onChange={(event) =>
+                                setOwnerRuntimeLab((current) => ({
+                                  ...current,
+                                  vpsGrpcServiceName: event.target.value,
+                                }))
+                              }
+                              placeholder="grpc serviceName"
+                            />
+                          </label>
 
-                      <label className="input-field input-span">
-                        <span>{t("ownerLabVpsGrpcAuthority")}</span>
-                        <input
-                          value={ownerRuntimeLab.vpsGrpcAuthority}
-                          onChange={(event) =>
-                            setOwnerRuntimeLab((current) => ({ ...current, vpsGrpcAuthority: event.target.value }))
-                          }
-                          placeholder="grpc authority"
-                        />
-                      </label>
+                          <label className="input-field input-span">
+                            <span>{t("ownerLabVpsGrpcAuthority")}</span>
+                            <input
+                              value={ownerRuntimeLab.vpsGrpcAuthority}
+                              onChange={(event) =>
+                                setOwnerRuntimeLab((current) => ({
+                                  ...current,
+                                  vpsGrpcAuthority: event.target.value,
+                                }))
+                              }
+                              placeholder="grpc authority"
+                            />
+                          </label>
 
-                      <label className="input-field input-span">
-                        <span>{t("ownerLabVpsSource")}</span>
-                        <input
-                          value={ownerRuntimeLab.vpsSource}
-                          onChange={(event) =>
-                            setOwnerRuntimeLab((current) => ({ ...current, vpsSource: event.target.value }))
-                          }
-                          placeholder="operator-curated:vps-lab"
-                        />
-                      </label>
+                          <label className="input-field input-span">
+                            <span>{t("ownerLabVpsSource")}</span>
+                            <input
+                              value={ownerRuntimeLab.vpsSource}
+                              onChange={(event) =>
+                                setOwnerRuntimeLab((current) => ({
+                                  ...current,
+                                  vpsSource: event.target.value,
+                                }))
+                              }
+                              placeholder="operator-curated:vps-lab"
+                            />
+                          </label>
 
-                      <label className="input-field input-span">
-                        <span>{t("ownerLabVpsTag")}</span>
-                        <input
-                          value={ownerRuntimeLab.vpsTag}
-                          onChange={(event) =>
-                            setOwnerRuntimeLab((current) => ({ ...current, vpsTag: event.target.value }))
-                          }
-                          placeholder="reality-lab-pimg-mycdn-me-tcp"
-                        />
-                      </label>
+                          <label className="input-field input-span">
+                            <span>{t("ownerLabVpsTag")}</span>
+                            <input
+                              value={ownerRuntimeLab.vpsTag}
+                              onChange={(event) =>
+                                setOwnerRuntimeLab((current) => ({
+                                  ...current,
+                                  vpsTag: event.target.value,
+                                }))
+                              }
+                              placeholder="reality-lab-pimg-mycdn-me-tcp"
+                            />
+                          </label>
                         </>
                       ) : null}
                     </>
                   ) : null}
 
                   {ownerRuntimeLabDisabledReason ? (
-                    <p className="compact-note compact-note--panel">{ownerRuntimeLabDisabledReason}</p>
+                    <p className="compact-note compact-note--panel">
+                      {ownerRuntimeLabDisabledReason}
+                    </p>
                   ) : null}
 
                   <div className="sheet-actions">
@@ -2745,17 +4298,28 @@ export function ControlCenter() {
                       className="ghost"
                       type="button"
                       onClick={handleStartOwnerRuntimeLab}
-                      disabled={isPending || Boolean(ownerRuntimeLabDisabledReason)}
+                      disabled={
+                        isPending || Boolean(ownerRuntimeLabDisabledReason)
+                      }
                     >
-                      {isBusy("startOwnerRuntimeLab") ? t("startingTunnel") : t("ownerLabStart")}
+                      {isBusy("startOwnerRuntimeLab")
+                        ? t("startingTunnel")
+                        : t("ownerLabStart")}
                     </button>
                     <button
                       className="ghost"
                       type="button"
                       onClick={handleStopTunnel}
-                      disabled={isPending || (!localTunnel || localTunnel.status === "idle" || localTunnel.status === "stopped")}
+                      disabled={
+                        isPending ||
+                        !localTunnel ||
+                        localTunnel.status === "idle" ||
+                        localTunnel.status === "stopped"
+                      }
                     >
-                      {isBusy("stopTunnel") ? t("stoppingTunnel") : t("stopTunnel")}
+                      {isBusy("stopTunnel")
+                        ? t("stoppingTunnel")
+                        : t("stopTunnel")}
                     </button>
                   </div>
                 </div>
@@ -2798,7 +4362,9 @@ export function ControlCenter() {
 
               <div className="command-card command-card--compact">
                 <strong>{t("runtimeRelayAutoselect")}</strong>
-                <pre className="command-card__output">{runtimeRelayAutoselectSummaryDisplay}</pre>
+                <pre className="command-card__output">
+                  {runtimeRelayAutoselectSummaryDisplay}
+                </pre>
               </div>
 
               <div className="command-card command-card--compact">
@@ -2883,16 +4449,22 @@ export function ControlCenter() {
 
               <div className="command-card command-card--compact">
                 <strong>{t("runtimeLog")}</strong>
-                <pre className="command-card__output command-card__output--long">{runtimeLogDisplay}</pre>
+                <pre className="command-card__output command-card__output--long">
+                  {runtimeLogDisplay}
+                </pre>
               </div>
 
               <div className="command-card command-card--compact">
                 <strong>{t("lastTest")}</strong>
                 <p className="compact-note">
                   {localTunnel?.lastTest?.url ?? "https://example.com"}
-                  {localTunnel?.lastTest?.checkedAt ? ` / ${localTunnel.lastTest.checkedAt}` : ""}
+                  {localTunnel?.lastTest?.checkedAt
+                    ? ` / ${localTunnel.lastTest.checkedAt}`
+                    : ""}
                 </p>
-                <pre className="command-card__output">{runtimeLastTestDisplay}</pre>
+                <pre className="command-card__output">
+                  {runtimeLastTestDisplay}
+                </pre>
               </div>
 
               {curlCommand ? (
@@ -2907,53 +4479,38 @@ export function ControlCenter() {
       ) : null}
 
       {activeSheet === "more" ? (
-        <div className="sheet-overlay" role="dialog" aria-modal="true" aria-label={t("sheetMoreTitle")}>
-          <button className="sheet-overlay__backdrop" onClick={() => setActiveSheet(null)} aria-label={t("close")} />
+        <div
+          className="sheet-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("sheetMoreTitle")}
+        >
+          <button
+            className="sheet-overlay__backdrop"
+            onClick={() => setActiveSheet(null)}
+            aria-label={t("close")}
+          />
           <div className="sheet-panel">
             <div className="sheet-panel__head">
               <div>
-                <span className="section-eyebrow">{t("recoveryHints")}</span>
+                <span className="section-eyebrow">{t("guestAccess")}</span>
                 <h3 className="sheet-panel__title">{t("sheetMoreTitle")}</h3>
               </div>
-              <button className="ghost ghost--compact" type="button" onClick={() => setActiveSheet(null)}>
+              <button
+                className="ghost ghost--compact"
+                type="button"
+                onClick={() => setActiveSheet(null)}
+              >
                 {t("close")}
               </button>
             </div>
 
             <div className="sheet-stack">
-              <div className="phone-facts phone-facts--stack">
-                <div className="phone-fact">
-                  <span>{t("activeEndpoint")}</span>
-                  <strong>{ownerProfile?.serverHost ? `${ownerProfile.serverHost}:${endpointPort || "—"}` : currentHost}</strong>
-                </div>
-                <div className="phone-fact">
-                  <span>{t("tunnelEngine")}</span>
-                  <strong>{currentEngine}</strong>
-                </div>
-                <div className="phone-fact">
-                  <span>{t("protocolPack")}</span>
-                  <strong>{activeProtocolEntry ? protocolPackSummary : t("diagnosticsEmpty")}</strong>
-                </div>
-              </div>
-
-              {stagedProtocolEntries.length > 0 ? (
-                <div className="command-card command-card--compact">
-                  <strong>{t("stagedFallbacks")}</strong>
-                  <textarea readOnly value={stagedFallbackSummary} />
-                </div>
-              ) : null}
-
-              <p className="compact-note compact-note--panel">{recoveryHint}</p>
+              <p className="compact-note compact-note--panel">
+                {t("guestAccessIntro")}
+              </p>
 
               <div className="sheet-actions">
-                <button
-                  className="ghost"
-                  type="button"
-                  onClick={handleRefreshOwnerProfile}
-                  disabled={isPending || !resolvedDraftHost}
-                >
-                  {t("refreshProfile")}
-                </button>
                 <button
                   className="ghost"
                   type="button"
@@ -2962,47 +4519,47 @@ export function ControlCenter() {
                 >
                   {t("generateShareCode")}
                 </button>
-                <button className="ghost" type="button" onClick={handleImportProfile} disabled={isPending || !importShareCode.trim()}>
-                  {t("importProfile")}
+                <button
+                  className="ghost"
+                  type="button"
+                  onClick={() =>
+                    handleCopy("shareCode", exportableInviteProfile?.shareCode)
+                  }
+                  disabled={isPending || !exportableInviteProfile?.shareCode}
+                >
+                  {copiedKey === "shareCode"
+                    ? t("copied")
+                    : t("copyShareCode")}
+                </button>
+                <button
+                  className="ghost"
+                  type="button"
+                  onClick={handleExportInviteFile}
+                  disabled={
+                    isPending ||
+                    isBusy("exportInviteFile") ||
+                    !exportableInviteProfile?.rawJson
+                  }
+                >
+                  {t("exportProfileFile")}
                 </button>
               </div>
 
               {!canGenerateGuestProfile && guestProfileHint ? (
-                <p className="compact-note compact-note--panel">{guestProfileHint}</p>
+                <p className="compact-note compact-note--panel">
+                  {guestProfileHint}
+                </p>
               ) : null}
 
-              <label className="input-field input-span">
-                <span>{t("importProfile")}</span>
-                <textarea
-                  value={importShareCode}
-                  onChange={(event) => setImportShareCode(event.target.value)}
-                  placeholder={t("importPlaceholder")}
-                />
-              </label>
+              {inviteFileNotice ? (
+                <p className="status-banner status-success">{inviteFileNotice}</p>
+              ) : null}
 
-              {guestProfile?.shareCode ? (
+              {exportableInviteProfile?.shareCode ? (
                 <div className="command-card command-card--compact">
                   <strong>{t("shareCode")}</strong>
-                  <textarea readOnly value={guestProfile.shareCode} />
-                  <div className="sheet-actions">
-                    <button className="ghost" type="button" onClick={() => handleCopy("shareCode", guestProfile.shareCode)}>
-                      {copiedKey === "shareCode" ? t("copied") : t("copyShareCode")}
-                    </button>
-                    <button className="ghost" type="button" onClick={() => handleCopy("guestJson", guestProfile.rawJson)}>
-                      {copiedKey === "guestJson" ? t("copied") : t("copyJson")}
-                    </button>
-                  </div>
-                </div>
-              ) : null}
-
-              {importedProfile?.localPath ? (
-                <div className="command-card command-card--compact">
-                  <strong>{t("importedProfile")}</strong>
-                  <p className="compact-note">
-                    {importedProfile.name}
-                    {importedProfile.endpoint ? ` / ${importedProfile.endpoint}` : ""}
-                  </p>
-                  <textarea readOnly value={importedProfile.rawJson} />
+                  <p className="compact-note">{exportableInviteProfile.name}</p>
+                  <textarea readOnly value={exportableInviteProfile.shareCode} />
                 </div>
               ) : null}
             </div>
@@ -3011,30 +4568,49 @@ export function ControlCenter() {
       ) : null}
 
       {showDeploymentOverlay && plan.length > 0 ? (
-        <div className="deployment-overlay" role="dialog" aria-modal="true" aria-label={t("deploymentDetails")}>
-          <div className="deployment-overlay__backdrop" onClick={() => setShowDeploymentOverlay(false)} />
+        <div
+          className="deployment-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("deploymentDetails")}
+        >
+          <div
+            className="deployment-overlay__backdrop"
+            onClick={() => setShowDeploymentOverlay(false)}
+          />
           <div className="deployment-overlay__panel">
             <div className="deployment-overlay__head">
               <div>
                 <span className="section-eyebrow">{t("provisioning")}</span>
                 <h2 className="section-title">{t("deploymentDetails")}</h2>
               </div>
-              <button className="ghost" onClick={() => setShowDeploymentOverlay(false)} type="button">
+              <button
+                className="ghost"
+                onClick={() => setShowDeploymentOverlay(false)}
+                type="button"
+              >
                 {t("close")}
               </button>
             </div>
 
-            <StageList stages={plan.map(translateStage)} statusLabels={stageStatusLabels} />
+            <StageList
+              stages={plan.map(translateStage)}
+              statusLabels={stageStatusLabels}
+            />
 
             {deployment?.healthChecks?.length ? (
               <div className="check-list" style={{ marginTop: 18 }}>
                 {deployment.healthChecks.map((check) => (
                   <div className="check-row" key={check.key}>
                     <div>
-                      <strong>{translateCheckLabel(check.key, check.label)}</strong>
+                      <strong>
+                        {translateCheckLabel(check.key, check.label)}
+                      </strong>
                       <p>{translateCheckDetail(check.detail)}</p>
                     </div>
-                    <span className={check.ok ? "pill pill-ok" : "pill pill-off"}>
+                    <span
+                      className={check.ok ? "pill pill-ok" : "pill pill-off"}
+                    >
                       {check.ok ? t("checkOk") : t("checkFail")}
                     </span>
                   </div>
@@ -3046,15 +4622,27 @@ export function ControlCenter() {
       ) : null}
 
       {showValidationOverlay && validation ? (
-        <div className="deployment-overlay" role="dialog" aria-modal="true" aria-label={t("validationDetails")}>
-          <div className="deployment-overlay__backdrop" onClick={() => setShowValidationOverlay(false)} />
+        <div
+          className="deployment-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("validationDetails")}
+        >
+          <div
+            className="deployment-overlay__backdrop"
+            onClick={() => setShowValidationOverlay(false)}
+          />
           <div className="deployment-overlay__panel">
             <div className="deployment-overlay__head">
               <div>
                 <span className="section-eyebrow">{t("validation")}</span>
                 <h2 className="section-title">{t("validationDetails")}</h2>
               </div>
-              <button className="ghost" onClick={() => setShowValidationOverlay(false)} type="button">
+              <button
+                className="ghost"
+                onClick={() => setShowValidationOverlay(false)}
+                type="button"
+              >
                 {t("close")}
               </button>
             </div>
@@ -3063,7 +4651,9 @@ export function ControlCenter() {
               {validation.checks.map((check) => (
                 <div className="check-row" key={check.key}>
                   <div>
-                    <strong>{translateCheckLabel(check.key, check.label)}</strong>
+                    <strong>
+                      {translateCheckLabel(check.key, check.label)}
+                    </strong>
                     <p>{translateCheckDetail(check.detail)}</p>
                   </div>
                   <span className={check.ok ? "pill pill-ok" : "pill pill-off"}>

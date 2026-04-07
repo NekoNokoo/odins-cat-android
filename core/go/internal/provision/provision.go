@@ -5,6 +5,8 @@ type Transport string
 type CoreEngine string
 type TunnelProtocol string
 type StepStatus string
+type ProvisionFlow string
+type EdgeProvider string
 
 const (
 	AuthPassword   AuthMethod = "password"
@@ -20,6 +22,11 @@ const (
 	ProtocolVLESSReality    TunnelProtocol = "vless-reality"
 
 	StatusQueued StepStatus = "queued"
+
+	ProvisionFlowOrigin     ProvisionFlow = "origin"
+	ProvisionFlowEdgeAttach ProvisionFlow = "edge-attach"
+
+	EdgeProviderYandex EdgeProvider = "yandex-edge"
 )
 
 type Server struct {
@@ -34,9 +41,26 @@ type Server struct {
 	RealityPort     int            `json:"realityPort,omitempty"`
 }
 
+type EdgeServer struct {
+	Host       string     `json:"host"`
+	Port       int        `json:"port"`
+	Username   string     `json:"username"`
+	AuthMethod AuthMethod `json:"authMethod"`
+}
+
+type EdgeAttach struct {
+	Enabled    bool         `json:"enabled"`
+	Provider   EdgeProvider `json:"provider,omitempty"`
+	Server     EdgeServer   `json:"server"`
+	Secret     string       `json:"secret"`
+	PublicPort int          `json:"publicPort,omitempty"`
+}
+
 type Request struct {
-	Server Server `json:"server"`
-	Secret string `json:"secret"`
+	Server Server        `json:"server"`
+	Secret string        `json:"secret"`
+	Flow   ProvisionFlow `json:"flow,omitempty"`
+	Edge   *EdgeAttach   `json:"edge,omitempty"`
 }
 
 type Step struct {
@@ -48,10 +72,20 @@ type Step struct {
 
 type Response struct {
 	ServerHost   string              `json:"serverHost"`
+	DeployFlow   string              `json:"deployFlow,omitempty"`
 	Transport    string              `json:"transport"`
 	Steps        []Step              `json:"steps"`
 	Warnings     []string            `json:"warnings"`
 	ProtocolPack []ProtocolPackEntry `json:"protocolPack,omitempty"`
+}
+
+func normalizedProvisionFlow(flow ProvisionFlow) ProvisionFlow {
+	switch flow {
+	case ProvisionFlowEdgeAttach:
+		return flow
+	default:
+		return ProvisionFlowOrigin
+	}
 }
 
 func normalizedEngine(engine CoreEngine) CoreEngine {

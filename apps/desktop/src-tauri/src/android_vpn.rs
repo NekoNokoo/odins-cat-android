@@ -77,3 +77,10 @@ pub(crate) async fn run_connectivity_test<T: Serialize>(
 ) -> Result<Value, String> {
     run_mobile_command(app, "runConnectivityTest", payload).await
 }
+
+pub(crate) async fn share_invite_file<T: Serialize>(
+    app: &AppHandle,
+    payload: T,
+) -> Result<Value, String> {
+    run_mobile_command(app, "shareInviteFile", payload).await
+}

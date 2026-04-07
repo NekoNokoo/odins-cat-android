@@ -170,7 +170,7 @@ func renderAccessProfile(role, id, name, host string, transport Transport, endpo
 		"endpointPort":   endpointPort,
 		"createdAt":      nowRFC3339(),
 		"activeProtocol": activeProtocolID(transport),
-		"protocolPack":   buildProtocolPack(transport, wireGuardPort, realityPortFromStagedFallbacks(stagedFallbacks), vkTurnProxyPort),
+		"protocolPack":   buildProtocolPackWithFallbacks(transport, wireGuardPort, realityPortFromStagedFallbacks(stagedFallbacks), vkTurnProxyPort, stagedFallbacks),
 		"wireguard": map[string]any{
 			"serverPublicKey":  serverPublicKey,
 			"clientPrivateKey": clientPrivateKey,
