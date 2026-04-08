@@ -323,6 +323,7 @@ export interface LocalTunnelState {
   status: "idle" | "starting" | "running" | "stopped" | "failed";
   socksAddress?: string;
   bridgeAddress?: string;
+  pendingCaptchaUrl?: string;
   vkLink?: string;
   serverHost?: string;
   transport?: string;

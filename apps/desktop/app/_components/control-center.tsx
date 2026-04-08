@@ -852,6 +852,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         whitelistLookup.cidrListUrl,
       ].join("\n")
     : "";
+  const pendingVkCaptchaUrl = localTunnel?.pendingCaptchaUrl?.trim() ?? "";
   const exportableInviteProfile = guestProfile ?? importedProfile;
   const exportableInviteFileName = exportableInviteProfile
     ? buildInviteFileName(exportableInviteProfile)
@@ -3005,6 +3006,23 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     importProfileFileInputRef.current?.click();
   };
 
+  const handleOpenPendingVkCaptcha = () => {
+    if (!pendingVkCaptchaUrl) {
+      return;
+    }
+
+    setError(null);
+    startTransition(async () => {
+      const res = await coreApi.openExternalUrl(pendingVkCaptchaUrl);
+      if (!res.ok) {
+        setError(
+          (res.data as { error?: string } | undefined)?.error ??
+            t("unknownError"),
+        );
+      }
+    });
+  };
+
   const handleImportProfileFile = async (
     event: ChangeEvent<HTMLInputElement>,
   ) => {
@@ -3295,6 +3313,16 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                 </div>
 
                 <div className="invite-home__actions">
+                  {pendingVkCaptchaUrl ? (
+                    <button
+                      className="ghost"
+                      type="button"
+                      onClick={handleOpenPendingVkCaptcha}
+                      disabled={isPending}
+                    >
+                      {t("openVkCaptcha")}
+                    </button>
+                  ) : null}
                   <button
                     className="ghost"
                     type="button"
@@ -3312,6 +3340,10 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                     {t("importProfileFile")}
                   </button>
                 </div>
+
+                {pendingVkCaptchaUrl ? (
+                  <p className="status-banner">{t("vkCaptchaReady")}</p>
+                ) : null}
 
                 {importedProfile?.localPath ? (
                   <p className="status-banner status-success">

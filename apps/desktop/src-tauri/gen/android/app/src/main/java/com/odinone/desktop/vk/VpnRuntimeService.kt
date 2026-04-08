@@ -12,6 +12,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.ProxyInfo
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
@@ -50,6 +51,8 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
     private var activeRuntime: PreparedRuntime? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var lastVkProcessLogLine: String? = null
+    private var pendingVkCaptchaUrl: String? = null
+    private var lastOpenedVkCaptchaUrl: String? = null
 
     @Volatile
     private var shuttingDown = false
@@ -431,6 +434,8 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                 startupStage = "config_ready"
                 updateStartupStage(startupStage)
                 activeRuntime = prepared
+                pendingVkCaptchaUrl = null
+                lastOpenedVkCaptchaUrl = null
                 appendLog("Validated Android runtime config: ${prepared.configPath}")
                 appendDiagnostic(
                     "Prepared Android VPN runtime. source=${args.getString("startSource", "unknown")} family=${prepared.runtimeFamily} activation=${prepared.activationState} mode=${prepared.configMode} profileHash=${prepared.profileHash ?: "n/a"} features=${prepared.activeFeatures.joinToString(",")}",
@@ -446,8 +451,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
 
                 if (!prepared.vkBinaryPath.isNullOrBlank()) {
                     vkProcess = VpnRuntimeLibbox.startVkTurnProcess(prepared) { line ->
-                        lastVkProcessLogLine = line
-                        appendLog(line)
+                        handleVkProcessLogLine(line)
                         maybePromoteVkRuntimeToRunning(line)
                     }.also { process ->
                         watchVkProcess(process)
@@ -598,6 +602,8 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             val process = vkProcess
             vkProcess = null
             lastVkProcessLogLine = null
+            pendingVkCaptchaUrl = null
+            lastOpenedVkCaptchaUrl = null
 
             appendDiagnostic("Stopping libbox service before tearing down Android tunnel resources. origin=$origin")
             runCatching { commandServer?.closeService() }
@@ -670,13 +676,79 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         val running =
             captureRuntimeState(
                 VpnRuntimeLibbox.newRunningSnapshot(current, runtime).copy(
+                    pendingCaptchaUrl = null,
                     lastRecoveryAction = "vk-relay:warmup-confirmed",
                     lastStartupStage = "running",
                 ),
             )
+        pendingVkCaptchaUrl = null
         VpnRuntimeStore.write(this, running)
         runOnMainSync { updateNotification(running) }
         appendDiagnostic("VK relay warmup confirmed; Android VPN runtime transitioned to running state.")
+    }
+
+    private fun handleVkProcessLogLine(line: String) {
+        lastVkProcessLogLine = line
+        appendLog(line)
+        maybeHandleVkCaptchaPrompt(line)
+    }
+
+    private fun maybeHandleVkCaptchaPrompt(line: String) {
+        val url = extractVkCaptchaUrl(line) ?: return
+        if (pendingVkCaptchaUrl == url) {
+            return
+        }
+
+        pendingVkCaptchaUrl = url
+        val snapshot =
+            VpnRuntimeStore.update(this) { current ->
+                current.copy(
+                    pendingCaptchaUrl = url,
+                    lastRecoveryAction = "vk_manual_captcha",
+                )
+            }
+        runOnMainSync { updateNotification(snapshot) }
+        appendDiagnostic("VK manual captcha is ready: $url")
+        openVkCaptchaUrl(url, "runtime_log")
+    }
+
+    private fun extractVkCaptchaUrl(line: String): String? {
+        val marker = "Open this URL in your browser:"
+        val index = line.indexOf(marker, ignoreCase = true)
+        if (index < 0) {
+            return null
+        }
+        val raw = line.substring(index + marker.length).trim()
+        val candidate = raw.substringBefore(' ').trim().trimEnd('.', ',', ';')
+        return if (candidate.startsWith("http://") || candidate.startsWith("https://")) {
+            candidate
+        } else {
+            null
+        }
+    }
+
+    private fun openVkCaptchaUrl(
+        url: String,
+        source: String,
+    ) {
+        if (lastOpenedVkCaptchaUrl == url) {
+            return
+        }
+
+        val viewIntent =
+            Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                addCategory(Intent.CATEGORY_BROWSABLE)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+
+        runCatching {
+            lastOpenedVkCaptchaUrl = url
+            startActivity(viewIntent)
+            appendDiagnostic("Opened VK captcha in browser. source=$source")
+        }.onFailure { error ->
+            lastOpenedVkCaptchaUrl = null
+            appendDiagnostic("Failed to open VK captcha in browser. source=$source error=${error.message}")
+        }
     }
 
     private fun shouldReuseActiveRuntime(
@@ -1173,7 +1245,16 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         titleOverride: String? = null,
         bodyOverride: String? = null,
     ): AndroidNotification {
-        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+        val launchIntent =
+            state.pendingCaptchaUrl
+                ?.takeIf { it.isNotBlank() }
+                ?.let { url ->
+                    Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                        addCategory(Intent.CATEGORY_BROWSABLE)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                }
+                ?: packageManager.getLaunchIntentForPackage(packageName)
         val pendingIntent =
             launchIntent?.let {
                 PendingIntent.getActivity(
@@ -1186,7 +1267,14 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle(titleOverride ?: "Odin One")
-            .setContentText(bodyOverride ?: state.error ?: state.logTail.lastOrNull() ?: "Preparing Android VPN runtime")
+            .setContentText(
+                bodyOverride
+                    ?: when {
+                        !state.pendingCaptchaUrl.isNullOrBlank() ->
+                            "VK captcha is waiting for confirmation. Tap to continue."
+                        else -> state.error ?: state.logTail.lastOrNull() ?: "Preparing Android VPN runtime"
+                    },
+            )
             .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(true)
             .setOnlyAlertOnce(true)

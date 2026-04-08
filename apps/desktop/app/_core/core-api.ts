@@ -433,5 +433,34 @@ export const coreApi = {
         error: "Native invite file sharing is currently available only through the Android bridge."
       } as InviteFileShareResult & { error: string }
     );
+  },
+
+  async openExternalUrl(url: string) {
+    if (await prefersAndroidNativeBridge()) {
+      return invokeNative<{ ok: boolean; url?: string }>("mobile_open_external_url", {
+        url
+      });
+    }
+
+    if (typeof window !== "undefined") {
+      window.open(url, "_blank", "noopener,noreferrer");
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          ok: true,
+          url
+        }
+      };
+    }
+
+    return unsupportedResult(
+      501,
+      {
+        ok: false,
+        url,
+        error: "External URL opening is unavailable in this environment."
+      } as { ok: boolean; url?: string; error: string }
+    );
   }
 };

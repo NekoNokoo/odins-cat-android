@@ -1383,6 +1383,22 @@ pub async fn mobile_share_invite_file(
 }
 
 #[tauri::command]
+pub async fn mobile_open_external_url(app: AppHandle, url: String) -> Result<Value, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("external url is required".to_string());
+    }
+
+    android_vpn::open_external_url(
+        &app,
+        json!({
+            "url": trimmed,
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn mobile_generate_guest_profile(payload: GuestProfilePayload) -> Result<Value, String> {
     let mut ssh = MobileSshSession::connect(&payload.server, &payload.secret).await?;
     let (owner, xray_state) = load_remote_access_state(&mut ssh).await?;
@@ -1470,6 +1486,7 @@ pub fn register_mobile_commands(builder: tauri::Builder<tauri::Wry>) -> tauri::B
             mobile_import_profile,
             mobile_export_invite_file,
             mobile_share_invite_file,
+            mobile_open_external_url,
             mobile_generate_guest_profile
         ])
 }

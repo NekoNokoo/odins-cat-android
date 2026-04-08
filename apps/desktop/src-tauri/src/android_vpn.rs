@@ -91,3 +91,10 @@ pub(crate) async fn share_invite_file<T: Serialize>(
 ) -> Result<Value, String> {
     run_mobile_command(app, "shareInviteFile", payload).await
 }
+
+pub(crate) async fn open_external_url<T: Serialize>(
+    app: &AppHandle,
+    payload: T,
+) -> Result<Value, String> {
+    run_mobile_command(app, "openExternalUrl", payload).await
+}

@@ -2,6 +2,7 @@ package com.odinone.desktop.vk
 
 import android.app.Activity
 import android.content.Intent
+import android.net.Uri
 import android.net.VpnService
 import android.util.Log
 import androidx.activity.result.ActivityResult
@@ -45,6 +46,11 @@ class ShareInviteFileArgs {
     var fileName: String = "odin-one-access.odinone-access.json"
     var contents: String = ""
     var mimeType: String = "application/json"
+}
+
+@InvokeArg
+class OpenExternalUrlArgs {
+    var url: String = ""
 }
 
 @TauriPlugin
@@ -283,6 +289,40 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve(payload)
         }.onFailure { error ->
             invoke.reject(error.message ?: "Failed to open Android share sheet.")
+        }
+    }
+
+    @Command
+    fun openExternalUrl(invoke: Invoke) {
+        val args = invoke.parseArgs(OpenExternalUrlArgs::class.java)
+        val targetUrl = args.url.trim()
+        if (targetUrl.isBlank()) {
+            invoke.reject("External URL is required.")
+            return
+        }
+        if (!targetUrl.startsWith("http://") && !targetUrl.startsWith("https://")) {
+            invoke.reject("Only http and https URLs are supported.")
+            return
+        }
+
+        runCatching {
+            val viewIntent =
+                Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)).apply {
+                    addCategory(Intent.CATEGORY_BROWSABLE)
+                }
+            val chooser = Intent.createChooser(viewIntent, targetUrl).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            activity.startActivity(chooser)
+            JSObject().apply {
+                put("ok", true)
+                put("url", targetUrl)
+            }
+        }.onSuccess { payload ->
+            invoke.resolve(payload)
+        }.onFailure { error ->
+            Log.e("VpnRuntimeService", "Failed to open external URL $targetUrl", error)
+            invoke.reject(error.message ?: "Failed to open external URL.")
         }
     }
 

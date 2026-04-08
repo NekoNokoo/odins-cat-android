@@ -37,6 +37,7 @@ data class TunnelSnapshot(
     val status: String = "idle",
     val socksAddress: String? = null,
     val bridgeAddress: String? = null,
+    val pendingCaptchaUrl: String? = null,
     val vkLink: String? = null,
     val serverHost: String? = null,
     val transport: String? = null,
@@ -102,6 +103,7 @@ data class TunnelSnapshot(
         obj.put("status", status)
         obj.put("socksAddress", socksAddress)
         obj.put("bridgeAddress", bridgeAddress)
+        obj.put("pendingCaptchaUrl", pendingCaptchaUrl)
         obj.put("vkLink", vkLink)
         obj.put("serverHost", serverHost)
         obj.put("transport", transport)
@@ -200,6 +202,7 @@ data class TunnelSnapshot(
                 status = obj.getString("status", "idle") ?: "idle",
                 socksAddress = obj.getString("socksAddress", null),
                 bridgeAddress = obj.getString("bridgeAddress", null),
+                pendingCaptchaUrl = obj.getString("pendingCaptchaUrl", null),
                 vkLink = obj.getString("vkLink", null),
                 serverHost = obj.getString("serverHost", null),
                 transport = obj.getString("transport", null),
@@ -836,6 +839,7 @@ private fun stripTransientRequestFields(
         }
         remove("socksAddress")
         remove("bridgeAddress")
+        remove("pendingCaptchaUrl")
         remove("relayAutoselectEnabled")
         remove("relayAutoselectStatus")
         remove("relayAutoselectBestHost")
@@ -1162,7 +1166,12 @@ fun failedSnapshot(
     val nextLogs = ArrayList<String>(base.logTail)
     nextLogs.add(error)
     extraLogLine?.let { nextLogs.add(it) }
-    return base.copy(status = "failed", error = error, logTail = trimLogTail(nextLogs))
+    return base.copy(
+        status = "failed",
+        error = error,
+        pendingCaptchaUrl = null,
+        logTail = trimLogTail(nextLogs),
+    )
 }
 
 fun classifyRuntimeFailureCode(

@@ -268,6 +268,9 @@ const dictionaries = {
       "В буфере обмена сейчас нет ключа подключения.",
     importClipboardInvalid:
       "В буфере обмена не найден корректный ключ Odin One.",
+    vkCaptchaReady:
+      "VK запросил ручную капчу. Откройте страницу подтверждения и завершите not-robot flow.",
+    openVkCaptcha: "Открыть капчу VK",
     importProfileIntro:
       "Вставьте share code или raw JSON, либо выберите файл invite-профиля, чтобы сохранить его локально как импортированное подключение.",
     importPlaceholder: "odin1:...",
@@ -737,6 +740,9 @@ const dictionaries = {
       "There is no connection key in the clipboard right now.",
     importClipboardInvalid:
       "The clipboard does not contain a valid Odin One key.",
+    vkCaptchaReady:
+      "VK requested manual captcha. Open the confirmation page and finish the not-robot flow.",
+    openVkCaptcha: "Open VK captcha",
     importProfileIntro:
       "Paste a share code or raw JSON, or pick an invite-profile file, to save it locally as an imported connection.",
     importPlaceholder: "odin1:...",
