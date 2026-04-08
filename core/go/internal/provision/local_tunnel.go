@@ -27,6 +27,7 @@ type ownerProfile struct {
 	Transport       string              `json:"transport"`
 	ActiveProtocol  string              `json:"activeProtocol,omitempty"`
 	ServerHost      string              `json:"serverHost"`
+	VKTurnStreamCount int               `json:"vkTurnStreamCount,omitempty"`
 	VKTurnProxyPort int                 `json:"vkTurnProxyPort"`
 	EndpointPort    int                 `json:"endpointPort,omitempty"`
 	ProtocolPack    []ProtocolPackEntry `json:"protocolPack,omitempty"`
@@ -46,6 +47,7 @@ type OwnerProfileResponse struct {
 	Transport       string              `json:"transport,omitempty"`
 	ActiveProtocol  string              `json:"activeProtocol,omitempty"`
 	ServerHost      string              `json:"serverHost,omitempty"`
+	VKTurnStreamCount int               `json:"vkTurnStreamCount,omitempty"`
 	VKTurnProxyPort int                 `json:"vkTurnProxyPort,omitempty"`
 	EndpointPort    int                 `json:"endpointPort,omitempty"`
 	LocalPath       string              `json:"localPath,omitempty"`
@@ -250,8 +252,10 @@ func GetLocalOwnerProfile(host string) OwnerProfileResponse {
 	if profile.StagedFallbacks == nil {
 		profile.StagedFallbacks = map[string]any{}
 	}
+	profile.VKTurnStreamCount = effectiveVKTurnStreamCount(profile.VKTurnStreamCount)
 	ensureRealityRelayDirectFallback(profile.StagedFallbacks)
 	ensureRealityRelayOwnerEgressFallback(profile.StagedFallbacks)
+	normalizedRaw, _ := json.MarshalIndent(profile, "", "  ")
 
 	resp := OwnerProfileResponse{
 		Exists:          true,
@@ -259,10 +263,11 @@ func GetLocalOwnerProfile(host string) OwnerProfileResponse {
 		Transport:       profile.Transport,
 		ActiveProtocol:  profile.ActiveProtocol,
 		ServerHost:      profile.ServerHost,
+		VKTurnStreamCount: effectiveVKTurnStreamCount(profile.VKTurnStreamCount),
 		VKTurnProxyPort: profile.VKTurnProxyPort,
 		EndpointPort:    effectiveOwnerEndpointPort(profile),
 		LocalPath:       targetPath,
-		RawJSON:         string(data),
+		RawJSON:         string(normalizedRaw),
 		ProtocolPack: buildProtocolPackWithFallbacks(
 			Transport(profile.Transport),
 			effectiveOwnerEndpointPort(profile),
@@ -345,6 +350,7 @@ func (m *localTunnelManager) run(ctx context.Context, req Request, vkLink string
 			vkBinary,
 			"-peer", fmt.Sprintf("%s:%d", profile.ServerHost, endpointPort),
 			"-vk-link", vkLink,
+			"-n", strconv.Itoa(effectiveVKTurnStreamCount(profile.VKTurnStreamCount)),
 			"-listen", fmt.Sprintf("127.0.0.1:%d", bridgePort),
 		)
 		vkLog, _ = createLogFile("vk-turn-proxy-client")
@@ -757,6 +763,7 @@ func loadImportedProfile(host string, transport Transport) (ownerProfile, error)
 		Name:            invite.Name,
 		Transport:       invite.Transport,
 		ServerHost:      invite.ServerHost,
+		VKTurnStreamCount: effectiveVKTurnStreamCount(invite.VKTurnStreamCount),
 		VKTurnProxyPort: invite.VKTurnProxyPort,
 		EndpointPort:    effectiveInviteEndpointPort(invite),
 	}

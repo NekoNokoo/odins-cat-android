@@ -17,6 +17,9 @@ import (
 )
 
 const shareCodePrefix = "odin1:"
+const defaultVKTurnStreamCount = 10
+const minVKTurnStreamCount = 1
+const maxVKTurnStreamCount = 16
 
 type inviteProfile struct {
 	ID              string `json:"id,omitempty"`
@@ -25,6 +28,7 @@ type inviteProfile struct {
 	Protocol        string `json:"protocol"`
 	Transport       string `json:"transport"`
 	ServerHost      string `json:"serverHost"`
+	VKTurnStreamCount int  `json:"vkTurnStreamCount,omitempty"`
 	VKTurnProxyPort int    `json:"vkTurnProxyPort"`
 	WireGuardPort   int    `json:"wireGuardPort,omitempty"`
 	EndpointPort    int    `json:"endpointPort,omitempty"`
@@ -58,6 +62,7 @@ type InviteProfileResponse struct {
 	Protocol        string `json:"protocol"`
 	Transport       string `json:"transport"`
 	ServerHost      string `json:"serverHost"`
+	VKTurnStreamCount int  `json:"vkTurnStreamCount,omitempty"`
 	VKTurnProxyPort int    `json:"vkTurnProxyPort"`
 	WireGuardPort   int    `json:"wireGuardPort,omitempty"`
 	EndpointPort    int    `json:"endpointPort,omitempty"`
@@ -122,6 +127,7 @@ func GetImportedInvite(host string) InviteProfileResponse {
 }
 
 func buildInviteResponse(invite inviteProfile, localPath string) InviteProfileResponse {
+	invite.VKTurnStreamCount = effectiveVKTurnStreamCount(invite.VKTurnStreamCount)
 	stagedFallbacks := effectiveInviteStagedFallbacks(invite)
 	raw, _ := json.MarshalIndent(invite, "", "  ")
 	return InviteProfileResponse{
@@ -131,6 +137,7 @@ func buildInviteResponse(invite inviteProfile, localPath string) InviteProfileRe
 		Protocol:             invite.Protocol,
 		Transport:            invite.Transport,
 		ServerHost:           invite.ServerHost,
+		VKTurnStreamCount:    invite.VKTurnStreamCount,
 		VKTurnProxyPort:      invite.VKTurnProxyPort,
 		WireGuardPort:        invite.WireGuardPort,
 		EndpointPort:         invite.EndpointPort,
@@ -177,6 +184,7 @@ func decodeInvite(shareCode string) (inviteProfile, string, error) {
 		return invite, "", fmt.Errorf("parse invite profile: %w", err)
 	}
 	invite.Protocol = normalizedInviteProtocol(invite)
+	invite.VKTurnStreamCount = effectiveVKTurnStreamCount(invite.VKTurnStreamCount)
 	ensureRealityRelayDirectFallback(invite.StagedFallbacks)
 	ensureRealityRelayOwnerEgressFallback(invite.StagedFallbacks)
 	if invite.VLESSReality.Flow == "" && invite.Protocol == string(ProtocolVLESSReality) {
@@ -370,6 +378,7 @@ func IssueRemoteGuestProfile(req Request, name string) (InviteProfileResponse, e
 		Protocol:        string(ProtocolVLESSReality),
 		Transport:       owner.Transport,
 		ServerHost:      owner.ServerHost,
+		VKTurnStreamCount: effectiveVKTurnStreamCount(owner.VKTurnStreamCount),
 		VKTurnProxyPort: owner.VKTurnProxyPort,
 		WireGuardPort:   xrayState.WireGuardPort,
 		EndpointPort:    xrayState.Reality.Port,
@@ -917,6 +926,11 @@ func enrichInviteProfile(invite *inviteProfile, owner inviteProfile, xrayState r
 	if invite.Transport == "" {
 		invite.Transport = owner.Transport
 	}
+	if invite.VKTurnStreamCount <= 0 {
+		invite.VKTurnStreamCount = effectiveVKTurnStreamCount(owner.VKTurnStreamCount)
+	} else {
+		invite.VKTurnStreamCount = effectiveVKTurnStreamCount(invite.VKTurnStreamCount)
+	}
 	if invite.ServerHost == "" {
 		invite.ServerHost = owner.ServerHost
 	}
@@ -1003,4 +1017,11 @@ func effectiveInviteEndpointPort(invite inviteProfile) int {
 		return invite.VLESSReality.Port
 	}
 	return invite.VKTurnProxyPort
+}
+
+func effectiveVKTurnStreamCount(value int) int {
+	if value >= minVKTurnStreamCount && value <= maxVKTurnStreamCount {
+		return value
+	}
+	return defaultVKTurnStreamCount
 }

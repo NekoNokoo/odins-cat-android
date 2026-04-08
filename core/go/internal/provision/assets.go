@@ -167,6 +167,7 @@ func renderAccessProfile(role, id, name, host string, transport Transport, endpo
 		"name":           name,
 		"transport":      transport,
 		"serverHost":     host,
+		"vkTurnStreamCount": defaultVKTurnStreamCount,
 		"endpointPort":   endpointPort,
 		"createdAt":      nowRFC3339(),
 		"activeProtocol": activeProtocolID(transport),

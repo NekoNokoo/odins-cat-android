@@ -40,6 +40,9 @@ private const val DEFAULT_TUN_ADDRESS = "172.19.0.1/30"
 private const val DEFAULT_TUN_DNS_ADDRESS = "172.19.0.2"
 private const val DEFAULT_SOCKS_PORT = 58371
 private const val DEFAULT_VK_BRIDGE_PORT = 39090
+private const val DEFAULT_VK_TURN_STREAM_COUNT = 10
+private const val MIN_VK_TURN_STREAM_COUNT = 1
+private const val MAX_VK_TURN_STREAM_COUNT = 16
 private const val DEFAULT_LOG_LINES = 3000L
 private const val DEFAULT_HTTP_FALLBACK_TEST_URL = "http://example.com"
 private const val NETWORK_LENS_YANDEX_URL = "https://yandex.ru"
@@ -586,6 +589,7 @@ object VpnRuntimeLibbox {
                 }
                 val wireGuard = readWireGuardSettings(profile)
                 val bridgePort = selectUdpPort(DEFAULT_VK_BRIDGE_PORT)
+                val vkTurnStreamCount = readVkTurnStreamCount(normalizedArgs, profile)
                 val vkBinary = File(context.applicationInfo.nativeLibraryDir, "libvkturn.so")
                 if (!vkBinary.exists()) {
                     throw IllegalArgumentException("Missing bundled libvkturn.so in Android runtime")
@@ -597,7 +601,7 @@ object VpnRuntimeLibbox {
                     bridgeAddress = "127.0.0.1:$bridgePort",
                     remotePeer = "$serverHost:${wireGuard.relayPort}",
                     vkBinaryPath = vkBinary.path,
-                    vkArgs = buildVkTurnArgs(serverHost, wireGuard.relayPort, bridgePort, vkLink),
+                    vkArgs = buildVkTurnArgs(serverHost, wireGuard.relayPort, bridgePort, vkLink, vkTurnStreamCount),
                     runtimeFamily = RUNTIME_FAMILY_VK_RELAY,
                     activationState = ACTIVATION_STATE_ACTIVE,
                 )
@@ -5370,6 +5374,7 @@ object VpnRuntimeLibbox {
         relayPort: Int,
         bridgePort: Int,
         link: String,
+        streamCount: Int,
     ): List<String> {
         val linkFlag =
             if (link.contains("telemost.yandex", ignoreCase = true) || link.contains("yandex", ignoreCase = true)) {
@@ -5383,11 +5388,29 @@ object VpnRuntimeLibbox {
             linkFlag,
             link,
             "-n",
-            "16",
+            normalizeVkTurnStreamCount(streamCount).toString(),
             "-listen",
             "127.0.0.1:$bridgePort",
         )
     }
+
+    private fun readVkTurnStreamCount(
+        args: JSObject,
+        profile: JSONObject,
+    ): Int {
+        val requested = args.optInt("vkTurnStreamCount", 0)
+        if (requested > 0) {
+            return normalizeVkTurnStreamCount(requested)
+        }
+        return normalizeVkTurnStreamCount(profile.optInt("vkTurnStreamCount", 0))
+    }
+
+    private fun normalizeVkTurnStreamCount(value: Int): Int =
+        if (value in MIN_VK_TURN_STREAM_COUNT..MAX_VK_TURN_STREAM_COUNT) {
+            value
+        } else {
+            DEFAULT_VK_TURN_STREAM_COUNT
+        }
 
     private fun selectTcpPort(preferred: Int): Int {
         if (canBindTcp(preferred)) {

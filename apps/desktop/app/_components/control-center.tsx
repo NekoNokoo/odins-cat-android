@@ -224,6 +224,16 @@ const normalizePortHint = (port: number | undefined): number | undefined =>
     ? port
     : undefined;
 
+const normalizeVkTurnStreamCount = (
+  count: number | undefined,
+): number | undefined =>
+  typeof count === "number" &&
+  Number.isInteger(count) &&
+  count >= 1 &&
+  count <= 16
+    ? count
+    : undefined;
+
 const normalizeHostValue = (host: string | null | undefined) =>
   host?.trim().toLowerCase() ?? "";
 
@@ -1229,6 +1239,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             parsed.draft.engine,
           ),
           protocol: normalizedDraftProtocol,
+          vkTurnStreamCount: normalizeVkTurnStreamCount(
+            parsed.draft.vkTurnStreamCount,
+          ),
           vkTurnProxyPort: normalizePortHint(parsed.draft.vkTurnProxyPort),
           realityPort: normalizePortHint(parsed.draft.realityPort),
         });
@@ -1657,6 +1670,18 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     const res = await coreApi.getOwnerProfile(host);
     const data = res.data;
     setOwnerProfile(data);
+    if (res.ok && typeof data.vkTurnStreamCount === "number") {
+      setDraft((current) =>
+        current.host.trim() === host.trim() && current.vkTurnStreamCount == null
+          ? {
+              ...current,
+              vkTurnStreamCount: normalizeVkTurnStreamCount(
+                data.vkTurnStreamCount,
+              ),
+            }
+          : current,
+      );
+    }
     return data;
   };
 
@@ -1723,6 +1748,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         current.engine,
       ),
       protocol: importedProtocol,
+      vkTurnStreamCount:
+        normalizeVkTurnStreamCount(profile.vkTurnStreamCount) ??
+        current.vkTurnStreamCount,
     }));
     setSecret("");
   };
@@ -3686,6 +3714,28 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                         onChange={(event) => setVKLink(event.target.value)}
                         placeholder="https://vk.com/call/join/..."
                       />
+                    </label>
+                  ) : null}
+
+                  {requiresVKLink ? (
+                    <label className="input-field input-span">
+                      <span>{t("vkTurnStreamCount")}</span>
+                      <input
+                        value={draft.vkTurnStreamCount ?? ""}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            vkTurnStreamCount: normalizeVkTurnStreamCount(
+                              Number.parseInt(event.target.value, 10),
+                            ),
+                          }))
+                        }
+                        placeholder="10"
+                        inputMode="numeric"
+                      />
+                      <p className="compact-note">
+                        {t("vkTurnStreamCountHint")}
+                      </p>
                     </label>
                   ) : null}
                 </div>

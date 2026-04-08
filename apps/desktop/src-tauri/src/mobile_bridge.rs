@@ -54,6 +54,9 @@ const WHITELIST_XRAY_SERVICE_PATH: &str = "/etc/systemd/system/whitelist-xray.se
 const WHITELIST_PROXY_SERVICE_PATH: &str = "/etc/systemd/system/whitelist-vk-turn-proxy.service";
 const WHITELIST_YANDEX_EDGE_SERVICE_PATH: &str =
     "/etc/systemd/system/whitelist-yandex-edge.service";
+const VK_TURN_STREAM_COUNT_DEFAULT: u16 = 10;
+const VK_TURN_STREAM_COUNT_MIN: u16 = 1;
+const VK_TURN_STREAM_COUNT_MAX: u16 = 16;
 const DEFAULT_PROBE_HTTP_URL: &str = "http://example.com";
 const DEFAULT_PROBE_HTTPS_URL: &str = "https://example.com";
 const DEFAULT_REALITY_SERVER_NAME: &str = "www.cloudflare.com";
@@ -98,10 +101,8 @@ const WHITELIST_IP_LIST_URL: &str =
     "https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/ipwhitelist.txt";
 const WHITELIST_CIDR_LIST_URL: &str =
     "https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/cidrwhitelist.txt";
-const BUNDLED_WHITELIST_IP_LIST: &str =
-    include_str!("../resources/whitelist/ipwhitelist.txt");
-const BUNDLED_WHITELIST_CIDR_LIST: &str =
-    include_str!("../resources/whitelist/cidrwhitelist.txt");
+const BUNDLED_WHITELIST_IP_LIST: &str = include_str!("../resources/whitelist/ipwhitelist.txt");
+const BUNDLED_WHITELIST_CIDR_LIST: &str = include_str!("../resources/whitelist/cidrwhitelist.txt");
 const WHITELIST_CACHE_DIR_NAME: &str = "whitelist-cache";
 const WHITELIST_CACHE_IP_FILE_NAME: &str = "ipwhitelist.txt";
 const WHITELIST_CACHE_CIDR_FILE_NAME: &str = "cidrwhitelist.txt";
@@ -161,6 +162,8 @@ struct InviteProfileFile {
     protocol: String,
     #[serde(default)]
     transport: String,
+    #[serde(default)]
+    vk_turn_stream_count: u16,
     #[serde(default)]
     server_host: String,
     #[serde(default)]
@@ -233,6 +236,8 @@ struct OwnerProfileFile {
     #[serde(default)]
     active_protocol: String,
     #[serde(default)]
+    vk_turn_stream_count: u16,
+    #[serde(default)]
     server_host: String,
     #[serde(default)]
     vk_turn_proxy_port: u16,
@@ -263,6 +268,8 @@ struct ServerDraftPayload {
     engine: Option<String>,
     #[serde(default)]
     protocol: Option<String>,
+    #[serde(default)]
+    vk_turn_stream_count: Option<u16>,
     #[serde(default)]
     vk_turn_proxy_port: Option<u16>,
     #[serde(default)]
@@ -535,9 +542,7 @@ impl MobileSshSession {
             // egress probes). A tiny inactivity timeout can sever the SSH transport mid-rollout
             // and the next channel_open_session then surfaces as "new session: Disconnected".
             inactivity_timeout: Some(Duration::from_secs(MOBILE_SSH_INACTIVITY_TIMEOUT_SECS)),
-            keepalive_interval: Some(Duration::from_secs(
-                MOBILE_SSH_KEEPALIVE_INTERVAL_SECS,
-            )),
+            keepalive_interval: Some(Duration::from_secs(MOBILE_SSH_KEEPALIVE_INTERVAL_SECS)),
             keepalive_max: MOBILE_SSH_KEEPALIVE_MAX,
             ..<_>::default()
         });
@@ -662,9 +667,7 @@ impl MobileSshSession {
 
 fn remote_root_shell(cmd: &str) -> String {
     let quoted = quote_shell(cmd);
-    format!(
-        "if [ \"$(id -u)\" = \"0\" ]; then sh -lc {quoted}; else sudo sh -lc {quoted}; fi"
-    )
+    format!("if [ \"$(id -u)\" = \"0\" ]; then sh -lc {quoted}; else sudo sh -lc {quoted}; fi")
 }
 
 async fn upload_with_sudo(
@@ -1272,6 +1275,7 @@ pub fn mobile_get_owner_profile(app: AppHandle, host: String) -> Result<Value, S
         fs::read_to_string(&target_path).map_err(|err| format!("read owner profile: {err}"))?;
     let mut profile: OwnerProfileFile =
         serde_json::from_str(&data).map_err(|err| format!("parse owner profile: {err}"))?;
+    profile.vk_turn_stream_count = effective_vk_turn_stream_count(profile.vk_turn_stream_count);
     ensure_reality_relay_direct_fallback(&mut profile.staged_fallbacks);
     ensure_reality_relay_owner_egress_fallback(&mut profile.staged_fallbacks);
     profile.protocol_pack = build_protocol_pack_for_transport_with_fallbacks(
@@ -1295,6 +1299,7 @@ pub fn mobile_get_owner_profile(app: AppHandle, host: String) -> Result<Value, S
         "transport": profile.transport,
         "activeProtocol": profile.active_protocol,
         "serverHost": profile.server_host,
+        "vkTurnStreamCount": profile.vk_turn_stream_count,
         "vkTurnProxyPort": profile.vk_turn_proxy_port,
         "endpointPort": profile.endpoint_port,
         "localPath": target_path.to_string_lossy(),
@@ -1428,12 +1433,15 @@ pub async fn mobile_generate_guest_profile(payload: GuestProfilePayload) -> Resu
     let guest_keys = generate_wireguard_key_pair()?;
     let guest_address = next_guest_address(&owner, &guest_profiles)?;
     let guest_uuid = generate_protocol_uuid()?;
+    let requested_stream_count = requested_vk_turn_stream_count(&payload.server);
     let mut guest = InviteProfileFile {
         id: guest_id.clone(),
         role: "guest".to_string(),
         name: default_invite_name(&payload.name),
         protocol: "vless-reality".to_string(),
         transport: owner.transport.clone(),
+        vk_turn_stream_count: requested_stream_count
+            .unwrap_or_else(|| effective_vk_turn_stream_count(owner.vk_turn_stream_count)),
         server_host: owner.server_host.clone(),
         vk_turn_proxy_port: owner.vk_turn_proxy_port,
         wire_guard_port: xray_state.wire_guard_port,
@@ -1648,8 +1656,8 @@ fn read_cached_whitelist_files(app: &AppHandle) -> Result<Option<ParsedWhitelist
         return Ok(None);
     }
 
-    let ip_text = fs::read_to_string(&ip_path)
-        .map_err(|err| format!("read cached ip whitelist: {err}"))?;
+    let ip_text =
+        fs::read_to_string(&ip_path).map_err(|err| format!("read cached ip whitelist: {err}"))?;
     let cidr_text = fs::read_to_string(&cidr_path)
         .map_err(|err| format!("read cached cidr whitelist: {err}"))?;
     let metadata_text = fs::read_to_string(&meta_path)
@@ -1721,9 +1729,14 @@ fn build_invite_response(
     local_path: Option<&Path>,
     raw_json_override: Option<String>,
 ) -> Result<Value, String> {
+    let normalized_stream_count = effective_vk_turn_stream_count(invite.vk_turn_stream_count);
+    let mut normalized_invite = invite.clone();
+    normalized_invite.vk_turn_stream_count = normalized_stream_count;
     let raw_json = match raw_json_override {
-        Some(raw_json) => raw_json,
-        None => serde_json::to_string_pretty(invite)
+        Some(raw_json) => {
+            apply_vk_turn_stream_count_override(&raw_json, Some(normalized_stream_count))?
+        }
+        None => serde_json::to_string_pretty(&normalized_invite)
             .map_err(|err| format!("marshal invite response: {err}"))?,
     };
     let mut response = json!({
@@ -1733,6 +1746,7 @@ fn build_invite_response(
         "protocol": normalized_invite_protocol(invite),
         "transport": invite.transport,
         "serverHost": invite.server_host,
+        "vkTurnStreamCount": normalized_stream_count,
         "vkTurnProxyPort": invite.vk_turn_proxy_port,
         "wireGuardPort": nonzero_u16(invite.wire_guard_port),
         "endpointPort": nonzero_u16(invite.endpoint_port),
@@ -1866,6 +1880,7 @@ fn decode_invite(share_code: &str) -> Result<InviteProfileFile, String> {
     if invite.fingerprint.trim().is_empty() {
         invite.fingerprint = fallback_fingerprint(&invite);
     }
+    invite.vk_turn_stream_count = effective_vk_turn_stream_count(invite.vk_turn_stream_count);
     ensure_reality_relay_direct_fallback(&mut invite.staged_fallbacks);
     ensure_reality_relay_owner_egress_fallback(&mut invite.staged_fallbacks);
     sync_invite_reality_staged_fallbacks(&mut invite);
@@ -2140,6 +2155,20 @@ fn effective_invite_endpoint_port(invite: &InviteProfileFile) -> u16 {
         return invite.vless_reality.port;
     }
     invite.vk_turn_proxy_port
+}
+
+fn effective_vk_turn_stream_count(value: u16) -> u16 {
+    if (VK_TURN_STREAM_COUNT_MIN..=VK_TURN_STREAM_COUNT_MAX).contains(&value) {
+        value
+    } else {
+        VK_TURN_STREAM_COUNT_DEFAULT
+    }
+}
+
+fn requested_vk_turn_stream_count(server: &ServerDraftPayload) -> Option<u16> {
+    server
+        .vk_turn_stream_count
+        .filter(|value| (VK_TURN_STREAM_COUNT_MIN..=VK_TURN_STREAM_COUNT_MAX).contains(value))
 }
 
 fn optional_string(value: &str) -> Option<&str> {
@@ -2739,6 +2768,11 @@ fn enrich_invite_profile(
     if invite.transport.trim().is_empty() {
         invite.transport = owner.transport.clone();
     }
+    invite.vk_turn_stream_count = if invite.vk_turn_stream_count > 0 {
+        effective_vk_turn_stream_count(invite.vk_turn_stream_count)
+    } else {
+        effective_vk_turn_stream_count(owner.vk_turn_stream_count)
+    };
     if invite.server_host.trim().is_empty() {
         invite.server_host = owner.server_host.clone();
     }
@@ -3006,7 +3040,11 @@ async fn mobile_run_deployment(
     Ok(())
 }
 
-fn render_yandex_edge_systemd_unit(origin_host: &str, origin_port: u16, public_port: u16) -> String {
+fn render_yandex_edge_systemd_unit(
+    origin_host: &str,
+    origin_port: u16,
+    public_port: u16,
+) -> String {
     format!(
         "[Unit]\nDescription=Odin One Yandex edge passthrough\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/usr/bin/socat TCP-LISTEN:{public_port},fork,reuseaddr TCP:{origin_host}:{origin_port}\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=multi-user.target\n"
     )
@@ -3140,7 +3178,9 @@ async fn mobile_run_edge_attach(
         ))
         .await?;
     edge_ssh
-        .run(&remote_root_shell("systemctl is-active whitelist-yandex-edge.service"))
+        .run(&remote_root_shell(
+            "systemctl is-active whitelist-yandex-edge.service",
+        ))
         .await?;
     edge_ssh
         .run(&format!(
@@ -3159,21 +3199,30 @@ async fn mobile_run_edge_attach(
         .await?;
     complete_step(&app, deployment_id, 4);
 
-    let (patched_owner_profile, staged_fallbacks, protocol_pack) = patch_owner_profile_with_yandex_edge(
-        &owner_text,
-        edge.server.host.trim(),
-        public_port,
-        payload.server.host.trim(),
-        &reality,
-    )?;
+    let (patched_owner_profile, staged_fallbacks, protocol_pack) =
+        patch_owner_profile_with_yandex_edge(
+            &owner_text,
+            edge.server.host.trim(),
+            public_port,
+            payload.server.host.trim(),
+            &reality,
+        )?;
     origin
-        .upload(WHITELIST_INVITE_PATH, patched_owner_profile.as_bytes(), "0600")
+        .upload(
+            WHITELIST_INVITE_PATH,
+            patched_owner_profile.as_bytes(),
+            "0600",
+        )
         .await?;
     save_local_owner_profile(&app, &payload.server.host, patched_owner_profile.as_bytes())?;
     let fallback_manifest =
         render_staged_fallback_manifest(payload.server.host.trim(), reality.port)?;
     origin
-        .upload(WHITELIST_FALLBACKS_PATH, fallback_manifest.as_bytes(), "0644")
+        .upload(
+            WHITELIST_FALLBACKS_PATH,
+            fallback_manifest.as_bytes(),
+            "0644",
+        )
         .await?;
     let protocol_pack_manifest = render_protocol_pack_manifest(
         payload.server.host.trim(),
@@ -3421,12 +3470,7 @@ async fn resolve_deployment_reality_port(
     .await
 }
 
-fn port_candidates_with_seed(
-    start: u16,
-    end: u16,
-    preferred: Option<u16>,
-    seed: u16,
-) -> Vec<u16> {
+fn port_candidates_with_seed(start: u16, end: u16, preferred: Option<u16>, seed: u16) -> Vec<u16> {
     if start > end {
         return Vec::new();
     }
@@ -3856,6 +3900,7 @@ fn render_owner_profile(
         name: "Odin One Owner Node".to_string(),
         transport: "xray".to_string(),
         active_protocol: "vless-reality".to_string(),
+        vk_turn_stream_count: VK_TURN_STREAM_COUNT_DEFAULT,
         server_host: host.to_string(),
         vk_turn_proxy_port,
         endpoint_port: wire_guard_port,
@@ -4065,12 +4110,17 @@ fn resolve_android_runtime_request(
             if let Some(owner_runtime_lab) = owner_runtime_lab {
                 raw_json = apply_owner_runtime_lab_overrides(&raw_json, owner_runtime_lab)?;
             }
+            raw_json = apply_vk_turn_stream_count_override(
+                &raw_json,
+                requested_vk_turn_stream_count(&payload.server),
+            )?;
             return Ok(json!({
                 "serverHost": host,
                 "transport": transport,
                 "engine": engine,
                 "protocol": protocol,
                 "vkLink": payload.vk_link.trim(),
+                "vkTurnStreamCount": requested_vk_turn_stream_count(&payload.server),
                 "profileJson": raw_json,
                 "profileSource": "imported",
                 "useRealityStartEndpoint": use_reality_start_endpoint
@@ -4095,6 +4145,10 @@ fn resolve_android_runtime_request(
     if let Some(owner_runtime_lab) = owner_runtime_lab {
         raw_json = apply_owner_runtime_lab_overrides(&raw_json, owner_runtime_lab)?;
     }
+    raw_json = apply_vk_turn_stream_count_override(
+        &raw_json,
+        requested_vk_turn_stream_count(&payload.server),
+    )?;
     let owner: OwnerProfileFile =
         serde_json::from_str(&raw_json).map_err(|err| format!("parse owner profile: {err}"))?;
     if !owner_supports_requested_runtime(&owner, transport, protocol) {
@@ -4109,6 +4163,7 @@ fn resolve_android_runtime_request(
         "engine": engine,
         "protocol": protocol,
         "vkLink": payload.vk_link.trim(),
+        "vkTurnStreamCount": requested_vk_turn_stream_count(&payload.server),
         "profileJson": raw_json,
         "profileSource": "owner",
         "useRealityStartEndpoint": use_reality_start_endpoint
@@ -4173,11 +4228,17 @@ fn yandex_edge_u16_field(
 }
 
 fn resolve_yandex_edge_fallback(profile_object: &serde_json::Map<String, Value>) -> Value {
-    let staged_fallbacks = profile_object.get("stagedFallbacks").and_then(Value::as_object);
+    let staged_fallbacks = profile_object
+        .get("stagedFallbacks")
+        .and_then(Value::as_object);
     let direct_reality = staged_fallbacks
         .and_then(|value| value.get("vlessReality"))
         .and_then(Value::as_object)
-        .or_else(|| profile_object.get("vlessReality").and_then(Value::as_object));
+        .or_else(|| {
+            profile_object
+                .get("vlessReality")
+                .and_then(Value::as_object)
+        });
     let existing_edge = staged_fallbacks
         .and_then(|value| value.get("realityYandexEdge"))
         .and_then(Value::as_object);
@@ -4269,15 +4330,14 @@ fn resolve_yandex_edge_fallback(profile_object: &serde_json::Map<String, Value>)
                 .filter(|value| !value.is_empty())
         })
         .unwrap_or(YANDEX_EDGE_FLOW);
-    let fingerprint = yandex_edge_string_field(
-        existing_edge,
-        "fingerprint",
-        YANDEX_EDGE_FINGERPRINT,
-    );
+    let fingerprint =
+        yandex_edge_string_field(existing_edge, "fingerprint", YANDEX_EDGE_FINGERPRINT);
     let source = yandex_edge_string_field(existing_edge, "source", YANDEX_EDGE_SOURCE);
     let tag = yandex_edge_string_field(existing_edge, "tag", YANDEX_EDGE_TAG);
-    let connect_host = yandex_edge_string_field(existing_edge, "connectHost", YANDEX_EDGE_CONNECT_HOST);
-    let connect_port = yandex_edge_u16_field(existing_edge, "connectPort", YANDEX_EDGE_CONNECT_PORT);
+    let connect_host =
+        yandex_edge_string_field(existing_edge, "connectHost", YANDEX_EDGE_CONNECT_HOST);
+    let connect_port =
+        yandex_edge_u16_field(existing_edge, "connectPort", YANDEX_EDGE_CONNECT_PORT);
 
     yandex_edge_fallback_value_for(
         &connect_host,
@@ -4452,13 +4512,11 @@ fn apply_owner_runtime_lab_overrides(
                 _ => "scaffold",
             };
             let source = match owner_runtime_lab.mode.trim() {
-                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE => {
-                    yandex_edge_string_field(
-                        yandex_edge_reality.as_ref(),
-                        "source",
-                        YANDEX_EDGE_SOURCE,
-                    )
-                }
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE => yandex_edge_string_field(
+                    yandex_edge_reality.as_ref(),
+                    "source",
+                    YANDEX_EDGE_SOURCE,
+                ),
                 _ if owner_runtime_lab.vps_source.trim().is_empty() => {
                     "operator-curated:vps-lab".to_string()
                 }
@@ -4594,10 +4652,7 @@ fn apply_owner_runtime_lab_overrides(
                         YANDEX_EDGE_FLOW,
                     )),
                 );
-                bootstrap.insert(
-                    "serverName".to_string(),
-                    Value::String(server_name.clone()),
-                );
+                bootstrap.insert("serverName".to_string(), Value::String(server_name.clone()));
                 bootstrap.insert(
                     "publicKey".to_string(),
                     Value::String(yandex_edge_string_field(
@@ -4785,6 +4840,25 @@ fn apply_owner_runtime_lab_overrides(
 
     serde_json::to_string(&profile)
         .map_err(|err| format!("serialize owner runtime lab profile: {err}"))
+}
+
+fn apply_vk_turn_stream_count_override(
+    raw_json: &str,
+    requested_stream_count: Option<u16>,
+) -> Result<String, String> {
+    let mut profile: Value = serde_json::from_str(raw_json)
+        .map_err(|err| format!("parse access profile json: {err}"))?;
+    let profile_object = ensure_object_value(&mut profile, "access profile")?;
+    let stream_count = requested_stream_count.unwrap_or_else(|| {
+        profile_object
+            .get("vkTurnStreamCount")
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok())
+            .map(effective_vk_turn_stream_count)
+            .unwrap_or(VK_TURN_STREAM_COUNT_DEFAULT)
+    });
+    profile_object.insert("vkTurnStreamCount".to_string(), json!(stream_count));
+    serde_json::to_string_pretty(&profile).map_err(|err| format!("marshal access profile: {err}"))
 }
 
 fn ensure_object_value<'a>(
@@ -5217,6 +5291,7 @@ fn edge_server_payload(edge: &EdgeAttachPayload) -> ServerDraftPayload {
         transport: "xray".to_string(),
         engine: Some("sing-box".to_string()),
         protocol: Some("vless-reality".to_string()),
+        vk_turn_stream_count: None,
         vk_turn_proxy_port: None,
         reality_port: None,
     }
@@ -5266,11 +5341,9 @@ mod tests {
         apply_owner_runtime_lab_overrides, build_protocol_pack_for_transport_with_fallbacks,
         curated_yandex_edge_fallback_value, ensure_reality_relay_direct_fallback, ipv4_in_cidr,
         parse_ipv4_cidr, parse_whitelist_files, port_candidates_with_seed,
-        upsert_yandex_edge_fallback,
-        OwnerRuntimeLabPayload,
-        OwnerRuntimeLabRelayAutoselectPayload, OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB,
-        OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB, OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD,
-        OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_LAB,
+        upsert_yandex_edge_fallback, OwnerRuntimeLabPayload, OwnerRuntimeLabRelayAutoselectPayload,
+        OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB, OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB,
+        OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD, OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_LAB,
         OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_SCAFFOLD,
         OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE,
         OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_INTERVAL_HOURS,
@@ -5355,7 +5428,10 @@ mod tests {
         assert_eq!(ports[0], 1002);
         assert_eq!(ports.len(), 5);
         assert_eq!(
-            ports.iter().copied().collect::<std::collections::BTreeSet<_>>(),
+            ports
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
             [1000_u16, 1001, 1002, 1003, 1004].into_iter().collect()
         );
     }
@@ -5806,14 +5882,13 @@ mod tests {
     fn protocol_pack_includes_yandex_edge_entry() {
         let mut staged = serde_json::json!({});
         upsert_yandex_edge_fallback(&mut staged, curated_yandex_edge_fallback_value());
-        let entries =
-            build_protocol_pack_for_transport_with_fallbacks(
-                "xray",
-                Some(51820),
-                Some(443),
-                Some(56080),
-                Some(&staged),
-            );
+        let entries = build_protocol_pack_for_transport_with_fallbacks(
+            "xray",
+            Some(51820),
+            Some(443),
+            Some(56080),
+            Some(&staged),
+        );
         assert!(
             entries.iter().any(|entry| {
                 entry.id == "vless-reality-yandex-edge"
@@ -5967,5 +6042,86 @@ mod tests {
             .exact_ips
             .contains(&"62.84.123.148".parse::<Ipv4Addr>().expect("valid ip")));
         assert_eq!(parsed.cidrs.len(), 2);
+    }
+
+    #[test]
+    fn vk_turn_stream_count_defaults_when_missing_or_invalid() {
+        assert_eq!(
+            super::effective_vk_turn_stream_count(0),
+            super::VK_TURN_STREAM_COUNT_DEFAULT
+        );
+        assert_eq!(
+            super::effective_vk_turn_stream_count(99),
+            super::VK_TURN_STREAM_COUNT_DEFAULT
+        );
+        assert_eq!(super::effective_vk_turn_stream_count(6), 6);
+    }
+
+    #[test]
+    fn decode_invite_normalizes_vk_turn_stream_count() {
+        let raw = serde_json::json!({
+            "role": "guest",
+            "name": "Owner Node",
+            "protocol": "vless-reality",
+            "transport": "xray",
+            "serverHost": "95.81.120.226",
+            "vkTurnProxyPort": 56080,
+            "endpointPort": 55555,
+            "endpoint": "95.81.120.226:55555",
+            "vlessReality": {
+                "port": 55555,
+                "serverName": "www.cloudflare.com",
+                "publicKey": "EhIONikEgvX3cReHEHzo1fGwZVXI27XOIt6In4YGgDo",
+                "shortId": "ba81780391343b01",
+                "uuid": "b707d399-3f96-4df9-8daa-8b7b2ea23650",
+                "flow": "xtls-rprx-vision"
+            },
+            "wireguard": {
+                "serverPublicKey": "server-public",
+                "clientPrivateKey": "client-private",
+                "clientPublicKey": "client-public",
+                "address": "10.66.66.3/32",
+                "mtu": 1280
+            }
+        })
+        .to_string();
+
+        let invite = super::decode_invite(&raw).expect("invite should decode");
+        assert_eq!(
+            invite.vk_turn_stream_count,
+            super::VK_TURN_STREAM_COUNT_DEFAULT
+        );
+
+        let raw_override = serde_json::json!({
+            "role": "guest",
+            "name": "Owner Node",
+            "protocol": "vless-reality",
+            "transport": "xray",
+            "serverHost": "95.81.120.226",
+            "vkTurnStreamCount": 8,
+            "vkTurnProxyPort": 56080,
+            "endpointPort": 55555,
+            "endpoint": "95.81.120.226:55555",
+            "vlessReality": {
+                "port": 55555,
+                "serverName": "www.cloudflare.com",
+                "publicKey": "EhIONikEgvX3cReHEHzo1fGwZVXI27XOIt6In4YGgDo",
+                "shortId": "ba81780391343b01",
+                "uuid": "b707d399-3f96-4df9-8daa-8b7b2ea23650",
+                "flow": "xtls-rprx-vision"
+            },
+            "wireguard": {
+                "serverPublicKey": "server-public",
+                "clientPrivateKey": "client-private",
+                "clientPublicKey": "client-public",
+                "address": "10.66.66.3/32",
+                "mtu": 1280
+            }
+        })
+        .to_string();
+
+        let invite_override =
+            super::decode_invite(&raw_override).expect("invite with override should decode");
+        assert_eq!(invite_override.vk_turn_stream_count, 8);
     }
 }

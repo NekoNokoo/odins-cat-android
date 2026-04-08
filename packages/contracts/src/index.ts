@@ -26,6 +26,7 @@ export interface ServerDraft {
   transport: TransportMode;
   engine?: TunnelEngine;
   protocol?: TunnelProtocol;
+  vkTurnStreamCount?: number;
   vkTurnProxyPort?: number;
   realityPort?: number;
 }
@@ -68,6 +69,7 @@ export interface InviteProfile {
   protocol: "wireguard" | "vless-reality";
   transport: string;
   serverHost: string;
+  vkTurnStreamCount?: number;
   vkTurnProxyPort: number;
   wireGuardPort?: number;
   endpointPort?: number;
@@ -119,6 +121,7 @@ export interface OwnerAccessProfile {
   transport?: string;
   activeProtocol?: string;
   serverHost?: string;
+  vkTurnStreamCount?: number;
   vkTurnProxyPort?: number;
   endpointPort?: number;
   localPath?: string;

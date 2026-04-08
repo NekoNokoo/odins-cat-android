@@ -135,6 +135,9 @@ const dictionaries = {
     protocolWireGuard: "WireGuard over xray",
     protocolReality: "VLESS + REALITY",
     vkCallLink: "Ссылка на звонок VK",
+    vkTurnStreamCount: "VK stream count",
+    vkTurnStreamCountHint:
+      "Пусто = профиль или default 10. Меньше потоков обычно значит меньше капч, но и меньше запас по устойчивости звонка.",
     validateServer: "Проверить сервер",
     checking: "Проверка...",
     refreshing: "Обновление...",
@@ -607,6 +610,9 @@ const dictionaries = {
     protocolWireGuard: "WireGuard over xray",
     protocolReality: "VLESS + REALITY",
     vkCallLink: "VK call link",
+    vkTurnStreamCount: "VK stream count",
+    vkTurnStreamCountHint:
+      "Blank means profile/default 10. Fewer streams usually means fewer captchas, but also less headroom for call stability.",
     validateServer: "Validate server",
     checking: "Checking...",
     refreshing: "Refreshing...",
