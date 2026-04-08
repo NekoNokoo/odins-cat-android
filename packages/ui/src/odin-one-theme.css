@@ -94,9 +94,8 @@ select {
 }
 
 .topbar-head--compact .topbar-title {
-  flex: 0 1 auto;
-  width: auto;
-  max-width: calc(100% - 120px);
+  flex: 1 1 auto;
+  min-width: 0;
   padding: 0;
 }
 
@@ -104,15 +103,23 @@ select {
   margin-left: auto;
 }
 
-.topbar-center-accessory {
-  position: absolute;
-  left: calc(50% - 18px);
-  top: calc(50% + 4px);
-  transform: translate(-50%, -50%);
+.topbar-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.topbar-title-row h1 {
+  margin: 0;
+}
+
+.topbar-title-accessory {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  pointer-events: none;
+  flex-shrink: 0;
+  transform: translateY(3px);
 }
 
 .topbar-copy h1 {

@@ -131,6 +131,8 @@ const yandexEdgeConnectPort = 443;
 const yandexEdgeSource = "operator-curated:yandex-edge";
 const yandexEdgeTag = "yandex-edge-62-84-123-148";
 const inviteFileExtension = ".odinone-access.json";
+const androidTunnelStartingWarning =
+  "Android local tunnel is still starting. Check the runtime log and try again in a few seconds.";
 const initialEdgeDraft: EdgeDraft = {
   host: "",
   port: 22,
@@ -863,6 +865,17 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       ].join("\n")
     : "";
   const pendingVkCaptchaUrl = localTunnel?.pendingCaptchaUrl?.trim() ?? "";
+  const androidVkRelayWarmupPending = Boolean(
+    isAndroidClient &&
+      localTunnel?.runtimeFamily === "vk-relay" &&
+      localTunnel?.activationState === "active" &&
+      localTunnel?.status === "starting",
+  );
+  const androidTunnelOperational = Boolean(
+    isAndroidClient &&
+      localTunnel?.status === "running" &&
+      (localTunnel?.socksAddress || localTunnel?.runtimeFamily === "vk-relay"),
+  );
   const exportableInviteProfile = guestProfile ?? importedProfile;
   const exportableInviteFileName = exportableInviteProfile
     ? buildInviteFileName(exportableInviteProfile)
@@ -1414,6 +1427,34 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     }
     void refreshMobileNetworkLens(true);
   }, [isAndroidClient, resolvedDraftHost, selectedAccessMode]);
+
+  useEffect(() => {
+    if (!isAndroidClient || !error) {
+      return;
+    }
+
+    const normalizedError = error.trim();
+    const startupWarningVisible =
+      normalizedError === androidTunnelStartingWarning ||
+      normalizedError === t("tunnelStartFailed");
+    if (!startupWarningVisible) {
+      return;
+    }
+
+    if (
+      androidTunnelOperational ||
+      (androidVkRelayWarmupPending && Boolean(pendingVkCaptchaUrl))
+    ) {
+      setError(null);
+    }
+  }, [
+    androidTunnelOperational,
+    androidVkRelayWarmupPending,
+    error,
+    isAndroidClient,
+    pendingVkCaptchaUrl,
+    t,
+  ]);
 
   useEffect(() => {
     if (!isAndroidClient) {
@@ -2801,6 +2842,16 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         }
 
         if (
+          isAndroidClient &&
+          tunnelData?.runtimeFamily === "vk-relay" &&
+          tunnelData?.activationState === "active" &&
+          tunnelData?.status === "starting"
+        ) {
+          void pollLocalTunnel();
+          return;
+        }
+
+        if (
           !tunnelData ||
           tunnelData.status !== "running" ||
           !tunnelData.socksAddress
@@ -2811,7 +2862,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           setError(
             tunnelData?.error ??
               (tunnelData?.status === "starting"
-                ? "Android local tunnel is still starting. Check the runtime log and try again in a few seconds."
+                ? androidTunnelStartingWarning
                 : t("tunnelStartFailed")),
           );
           return;

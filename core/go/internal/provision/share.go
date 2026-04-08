@@ -17,7 +17,7 @@ import (
 )
 
 const shareCodePrefix = "odin1:"
-const defaultVKTurnStreamCount = 10
+const defaultVKTurnStreamCount = 1
 const minVKTurnStreamCount = 1
 const maxVKTurnStreamCount = 16
 

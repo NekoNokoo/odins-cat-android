@@ -1,8 +1,11 @@
 package com.odinone.desktop.vk
 
+import android.content.Intent
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.system.OsConstants
@@ -40,9 +43,24 @@ private const val DEFAULT_TUN_ADDRESS = "172.19.0.1/30"
 private const val DEFAULT_TUN_DNS_ADDRESS = "172.19.0.2"
 private const val DEFAULT_SOCKS_PORT = 58371
 private const val DEFAULT_VK_BRIDGE_PORT = 39090
-private const val DEFAULT_VK_TURN_STREAM_COUNT = 10
+private const val DEFAULT_VK_TURN_STREAM_COUNT = 1
 private const val MIN_VK_TURN_STREAM_COUNT = 1
 private const val MAX_VK_TURN_STREAM_COUNT = 16
+private val VK_CAPTCHA_BROWSER_FALLBACK_PACKAGES = listOf(
+    "com.android.chrome",
+    "com.google.android.apps.chrome",
+    "com.mi.globalbrowser",
+    "org.mozilla.firefox",
+    "org.mozilla.firefox_beta",
+    "com.yandex.browser",
+    "com.yandex.browser.beta",
+    "com.sec.android.app.sbrowser",
+    "com.microsoft.emmx",
+    "com.opera.browser",
+    "com.brave.browser",
+    "com.duckduckgo.mobile.android",
+    "com.vivaldi.browser",
+)
 private const val DEFAULT_LOG_LINES = 3000L
 private const val DEFAULT_HTTP_FALLBACK_TEST_URL = "http://example.com"
 private const val NETWORK_LENS_YANDEX_URL = "https://yandex.ru"
@@ -590,12 +608,13 @@ object VpnRuntimeLibbox {
                 val wireGuard = readWireGuardSettings(profile)
                 val bridgePort = selectUdpPort(DEFAULT_VK_BRIDGE_PORT)
                 val vkTurnStreamCount = readVkTurnStreamCount(normalizedArgs, profile)
+                val vkCaptchaBypassPackages = resolveVkCaptchaBypassPackages(context)
                 val vkBinary = File(context.applicationInfo.nativeLibraryDir, "libvkturn.so")
                 if (!vkBinary.exists()) {
                     throw IllegalArgumentException("Missing bundled libvkturn.so in Android runtime")
                 }
                 PreparedRuntime(
-                    configContent = buildWireGuardConfig(socksPort, bridgePort, wireGuard),
+                    configContent = buildWireGuardConfig(socksPort, bridgePort, wireGuard, vkCaptchaBypassPackages),
                     configPath = File(runtimeDir, "active-vk-relay.json").path,
                     socksAddress = socksAddress,
                     bridgeAddress = "127.0.0.1:$bridgePort",
@@ -604,6 +623,16 @@ object VpnRuntimeLibbox {
                     vkArgs = buildVkTurnArgs(serverHost, wireGuard.relayPort, bridgePort, vkLink, vkTurnStreamCount),
                     runtimeFamily = RUNTIME_FAMILY_VK_RELAY,
                     activationState = ACTIVATION_STATE_ACTIVE,
+                    activeFeatures =
+                        buildList {
+                            add("family:$RUNTIME_FAMILY_VK_RELAY")
+                            add("activation:$ACTIVATION_STATE_ACTIVE")
+                            add("vk-turn-streams:${normalizeVkTurnStreamCount(vkTurnStreamCount)}")
+                            if (vkCaptchaBypassPackages.isNotEmpty()) {
+                                add("pkg-exclude:${vkCaptchaBypassPackages.size}")
+                                add("vk-captcha-bypass")
+                            }
+                        },
                 )
             }
 
@@ -5253,6 +5282,7 @@ object VpnRuntimeLibbox {
         socksPort: Int,
         bridgePort: Int,
         wireGuard: WireGuardSettings,
+        excludePackages: List<String>,
     ): String =
         """
         {
@@ -5285,7 +5315,13 @@ object VpnRuntimeLibbox {
               }],
               "mtu": ${wireGuard.mtu},
               "auto_route": true,
-              "strict_route": false
+              "strict_route": false${
+                  if (excludePackages.isNotEmpty()) {
+                      ",\n              \"exclude_package\": [${excludePackages.joinToString(",") { jsonString(it) }}]"
+                  } else {
+                      ""
+                  }
+              }
             },
             {
               "type": "socks",
@@ -5368,6 +5404,47 @@ object VpnRuntimeLibbox {
           }
         }
         """.trimIndent()
+
+    private fun resolveVkCaptchaBypassPackages(context: Context): List<String> {
+        val packages = linkedSetOf<String>()
+        val packageManager = context.packageManager
+
+        fun addResolvedPackages(intent: Intent) {
+            val resolved =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    packageManager.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0))
+                } else {
+                    @Suppress("DEPRECATION")
+                    packageManager.queryIntentActivities(intent, 0)
+                }
+            resolved
+                .mapNotNull { it.activityInfo?.packageName?.trim() }
+                .filter { it.isNotBlank() && it != context.packageName }
+                .forEach(packages::add)
+        }
+
+        addResolvedPackages(
+            Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_APP_BROWSER)
+            },
+        )
+
+        addResolvedPackages(
+            Intent(Intent.ACTION_VIEW, Uri.parse("https://vk.com")).apply {
+                addCategory(Intent.CATEGORY_BROWSABLE)
+            },
+        )
+
+        VK_CAPTCHA_BROWSER_FALLBACK_PACKAGES.forEach { packageName ->
+            runCatching {
+                packageManager.getPackageInfo(packageName, 0)
+            }.onSuccess {
+                packages.add(packageName)
+            }
+        }
+
+        return packages.toList()
+    }
 
     private fun buildVkTurnArgs(
         serverHost: String,

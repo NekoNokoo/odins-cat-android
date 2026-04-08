@@ -25,10 +25,15 @@ export function AppShell({
         {compactHeader ? (
           <div className="topbar-copy topbar-copy--compact">
             <div className="topbar-head topbar-head--compact">
-              <div className="topbar-title" {...(dragRegion ? { "data-tauri-drag-region": true } : {})}>
-                <h1>{title}</h1>
+              <div
+                className={`topbar-title${titleAccessory ? " topbar-title--with-accessory" : ""}`}
+                {...(dragRegion ? { "data-tauri-drag-region": true } : {})}
+              >
+                <div className="topbar-title-row">
+                  <h1>{title}</h1>
+                  {titleAccessory ? <div className="topbar-title-accessory">{titleAccessory}</div> : null}
+                </div>
               </div>
-              {titleAccessory ? <div className="topbar-center-accessory">{titleAccessory}</div> : null}
               {headerAction ? <div className="topbar-action">{headerAction}</div> : null}
             </div>
           </div>

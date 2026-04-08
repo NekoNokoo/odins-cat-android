@@ -53,6 +53,12 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
     private var lastVkProcessLogLine: String? = null
     private var pendingVkCaptchaUrl: String? = null
     private var lastOpenedVkCaptchaUrl: String? = null
+    @Volatile
+    private var vkTunnelStartPending = false
+    @Volatile
+    private var vkTunnelActivationInFlight = false
+    @Volatile
+    private var vkStartupStartedAtMs: Long = 0L
 
     @Volatile
     private var shuttingDown = false
@@ -441,13 +447,16 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                     "Prepared Android VPN runtime. source=${args.getString("startSource", "unknown")} family=${prepared.runtimeFamily} activation=${prepared.activationState} mode=${prepared.configMode} profileHash=${prepared.profileHash ?: "n/a"} features=${prepared.activeFeatures.joinToString(",")}",
                 )
                 prepared.remotePeer?.let { appendLog("VK relay remote peer: $it") }
-
-                val server = CommandServer(this, this)
-                server.start()
-                startupStage = "command_server_ready"
-                updateStartupStage(startupStage)
-                commandServer = server
-                appendDiagnostic("CommandServer started.")
+                val vkWarmupOnly = !prepared.vkBinaryPath.isNullOrBlank()
+                if (vkWarmupOnly) {
+                    vkTunnelStartPending = true
+                    vkTunnelActivationInFlight = false
+                    vkStartupStartedAtMs = startedAt
+                } else {
+                    vkTunnelStartPending = false
+                    vkTunnelActivationInFlight = false
+                    vkStartupStartedAtMs = 0L
+                }
 
                 if (!prepared.vkBinaryPath.isNullOrBlank()) {
                     vkProcess = VpnRuntimeLibbox.startVkTurnProcess(prepared) { line ->
@@ -458,37 +467,20 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                     }
                 }
 
-                server.startOrReloadService(
-                    prepared.configContent,
-                    OverrideOptions().apply {
-                        autoRedirect = false
-                    },
-                )
-                startupStage = "service_started"
-                updateStartupStage(startupStage)
-                appendDiagnostic("libbox startOrReloadService completed.")
-                VpnRuntimeLibbox.waitForLocalSocks(prepared.socksAddress, 20_000)
-                startupStage = "socks_ready"
-                updateStartupStage(startupStage)
-                appendDiagnostic("Local SOCKS endpoint became ready at ${prepared.socksAddress}.")
-                val startupDurationMs = SystemClock.elapsedRealtime() - startedAt
-                appendDiagnostic("Android VPN runtime startup completed in ${startupDurationMs}ms.")
-
-                if (!prepared.vkBinaryPath.isNullOrBlank()) {
-                    maybePersistRestorableState(args)
+                if (vkWarmupOnly) {
                     val waiting =
                         captureRuntimeState(
                             VpnRuntimeLibbox.newVkWarmupSnapshot(VpnRuntimeStore.snapshot(this), prepared).copy(
                                 lastNetworkEvent = "startup:waiting-for-relay",
-                                lastStartupDurationMs = startupDurationMs,
                                 lastStartupStage = "waiting_for_relay",
                                 lastFailureStage = null,
                                 lastFailureCode = null,
                             ),
                         )
                     runOnMainSync { updateNotification(waiting) }
-                    appendDiagnostic("Android VPN runtime is waiting for VK relay warmup.")
+                    appendDiagnostic("Android VPN runtime is waiting for VK relay warmup before establishing the system VPN tunnel.")
                 } else {
+                    val startupDurationMs = startPreparedRuntimeTunnel(prepared, startedAt)
                     maybePersistRestorableState(args)
                     val running =
                         captureRuntimeState(
@@ -589,6 +581,35 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         }
     }
 
+    private fun startPreparedRuntimeTunnel(
+        prepared: PreparedRuntime,
+        startedAt: Long,
+    ): Long {
+        var startupStage = "command_server_ready"
+        val server = CommandServer(this, this)
+        server.start()
+        updateStartupStage(startupStage)
+        commandServer = server
+        appendDiagnostic("CommandServer started.")
+
+        server.startOrReloadService(
+            prepared.configContent,
+            OverrideOptions().apply {
+                autoRedirect = false
+            },
+        )
+        startupStage = "service_started"
+        updateStartupStage(startupStage)
+        appendDiagnostic("libbox startOrReloadService completed.")
+        VpnRuntimeLibbox.waitForLocalSocks(prepared.socksAddress, 20_000)
+        startupStage = "socks_ready"
+        updateStartupStage(startupStage)
+        appendDiagnostic("Local SOCKS endpoint became ready at ${prepared.socksAddress}.")
+        val startupDurationMs = SystemClock.elapsedRealtime() - startedAt
+        appendDiagnostic("Android VPN runtime startup completed in ${startupDurationMs}ms.")
+        return startupDurationMs
+    }
+
     private fun closeRuntimeResources(origin: String) {
         if (shuttingDown) {
             appendDiagnostic("closeRuntimeResources ignored because shutdown is already in progress. origin=$origin")
@@ -604,6 +625,9 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             lastVkProcessLogLine = null
             pendingVkCaptchaUrl = null
             lastOpenedVkCaptchaUrl = null
+            vkTunnelStartPending = false
+            vkTunnelActivationInFlight = false
+            vkStartupStartedAtMs = 0L
 
             appendDiagnostic("Stopping libbox service before tearing down Android tunnel resources. origin=$origin")
             runCatching { commandServer?.closeService() }
@@ -669,6 +693,21 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         if (!line.contains("Established DTLS connection!") && !line.contains("relayed-address=")) {
             return
         }
+        if (vkTunnelStartPending) {
+            pendingVkCaptchaUrl = null
+            val ready =
+                captureRuntimeState { current ->
+                    current.copy(
+                        pendingCaptchaUrl = null,
+                        lastRecoveryAction = "vk-relay:warmup-confirmed",
+                        lastStartupStage = "relay_ready",
+                    )
+                }
+            runOnMainSync { updateNotification(ready) }
+            appendDiagnostic("VK relay warmup confirmed before Android VPN tunnel start.")
+            scheduleVkTunnelActivation()
+            return
+        }
         val current = VpnRuntimeStore.snapshot(this)
         if (current.status == "running") {
             return
@@ -685,6 +724,63 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         VpnRuntimeStore.write(this, running)
         runOnMainSync { updateNotification(running) }
         appendDiagnostic("VK relay warmup confirmed; Android VPN runtime transitioned to running state.")
+    }
+
+    private fun scheduleVkTunnelActivation() {
+        if (!vkTunnelStartPending || vkTunnelActivationInFlight) {
+            return
+        }
+        vkTunnelActivationInFlight = true
+        thread(name = "odin-one-vk-activate-tunnel", isDaemon = true) {
+            completeVkTunnelActivation()
+        }
+    }
+
+    private fun completeVkTunnelActivation() {
+        synchronized(lifecycleLock) {
+            val prepared = activeRuntime ?: run {
+                vkTunnelActivationInFlight = false
+                return
+            }
+            if (prepared.vkBinaryPath.isNullOrBlank() || !vkTunnelStartPending || shuttingDown) {
+                vkTunnelActivationInFlight = false
+                return
+            }
+            try {
+                appendDiagnostic("Establishing Android VPN tunnel after VK relay warmup confirmation.")
+                updateStartupStage("command_server_ready")
+                val startedAt = vkStartupStartedAtMs.takeIf { it > 0L } ?: SystemClock.elapsedRealtime()
+                val startupDurationMs = startPreparedRuntimeTunnel(prepared, startedAt)
+                val running =
+                    captureRuntimeState(
+                        VpnRuntimeLibbox.newRunningSnapshot(VpnRuntimeStore.snapshot(this), prepared).copy(
+                            pendingCaptchaUrl = null,
+                            lastNetworkEvent = "startup:running",
+                            lastStartupDurationMs = startupDurationMs,
+                            lastStartupStage = "running",
+                            lastFailureStage = null,
+                            lastFailureCode = null,
+                            lastRecoveryAction = "vk-relay:warmup-confirmed",
+                        ),
+                    )
+                pendingVkCaptchaUrl = null
+                vkTunnelStartPending = false
+                vkTunnelActivationInFlight = false
+                vkStartupStartedAtMs = 0L
+                runOnMainSync { updateNotification(running) }
+                appendDiagnostic("Android VPN runtime transitioned to running state after VK relay warmup.")
+            } catch (error: Exception) {
+                vkTunnelStartPending = false
+                vkTunnelActivationInFlight = false
+                vkStartupStartedAtMs = 0L
+                val failureCurrent = VpnRuntimeStore.snapshot(this)
+                handleFailure(
+                    message = error.message ?: "Android VPN runtime failed to finish VK relay startup.",
+                    extraLogLine = "Android VPN startup aborted while establishing the tunnel after VK relay warmup.",
+                    stage = failureCurrent.lastStartupStage ?: "relay_ready",
+                )
+            }
+        }
     }
 
     private fun handleVkProcessLogLine(line: String) {
