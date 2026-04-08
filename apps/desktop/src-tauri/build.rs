@@ -5,7 +5,7 @@ use std::{
     time::SystemTime,
 };
 
-const VK_TURN_PROXY_VERSION: &str = "v1.3.0";
+const VK_TURN_PROXY_VERSION: &str = "v1.6.0";
 
 fn main() {
     println!("cargo:rerun-if-changed=../../../core/go/cmd/mvpd");

@@ -2295,6 +2295,20 @@ class VpnRuntimeLibboxTest {
             classifyRuntimeFailureCode("vk-turn-proxy Android bridge exited with code 1", "running"),
         )
         assertEquals(
+            "vk_captcha_wait",
+            classifyRuntimeFailureCode(
+                "vk-turn-proxy Android bridge exited with code 1\nLast vk-turn-proxy log: CAPTCHA_WAIT_REQUIRED: global lockout active",
+                "running",
+            ),
+        )
+        assertEquals(
+            "vk_captcha_fatal",
+            classifyRuntimeFailureCode(
+                "vk-turn-proxy Android bridge exited with code 1\nLast vk-turn-proxy log: FATAL_CAPTCHA_FAILED_NO_STREAMS",
+                "running",
+            ),
+        )
+        assertEquals(
             "scaffold_only",
             classifyRuntimeFailureCode("Android CDN / anti-whitelist mode is scaffolded only on this branch.", "prepare_runtime"),
         )

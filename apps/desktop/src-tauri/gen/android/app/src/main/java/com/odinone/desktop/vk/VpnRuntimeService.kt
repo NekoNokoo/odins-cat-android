@@ -572,7 +572,10 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                     failedSnapshot(failureBase, message, extraLogLine).copy(
                         lastNetworkEvent = "failure",
                         lastFailureStage = stage,
-                        lastFailureCode = classifyRuntimeFailureCode(message, stage),
+                        lastFailureCode = classifyRuntimeFailureCode(
+                            listOfNotNull(message, extraLogLine).joinToString("\n"),
+                            stage,
+                        ),
                     ),
                 )
             runOnMainSync { updateNotification(next) }

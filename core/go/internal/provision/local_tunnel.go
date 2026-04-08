@@ -1077,7 +1077,7 @@ func ensureLocalVKClientBinary() (string, error) {
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return "", err
 	}
-	targetPath := filepath.Join(targetDir, "vk-turn-proxy-client-darwin-arm64-v1.3.0")
+	targetPath := filepath.Join(targetDir, "vk-turn-proxy-client-darwin-arm64-v1.6.0")
 	if info, err := os.Stat(targetPath); err == nil && time.Since(info.ModTime()) < 12*time.Hour {
 		return targetPath, nil
 	}
@@ -1090,7 +1090,7 @@ func ensureLocalVKClientBinary() (string, error) {
 		resolveGoBinary(),
 		"install",
 		"-ldflags=-checklinkname=0",
-		"github.com/cacggghp/vk-turn-proxy/client@v1.3.0",
+		"github.com/cacggghp/vk-turn-proxy/client@v1.6.0",
 	)
 	cmd.Env = append(os.Environ(), "GOPATH="+goPathDir, "GOOS=darwin", "GOARCH=arm64", "CGO_ENABLED=0")
 	if output, err := cmd.CombinedOutput(); err != nil {

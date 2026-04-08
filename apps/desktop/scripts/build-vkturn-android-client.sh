@@ -15,7 +15,7 @@ if [[ -z "$GO_BINARY" || ! -x "$GO_BINARY" ]]; then
   exit 1
 fi
 
-VKTURN_VERSION="${VKTURN_VERSION:-v1.3.0}"
+VKTURN_VERSION="${VKTURN_VERSION:-v1.6.0}"
 GOPROXY_VALUE="${GOPROXY:-https://proxy.golang.org,direct}"
 TARGET_PATH="${TARGET_PATH:-${REPO_ROOT}/apps/desktop/src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a/libvkturn.so}"
 

@@ -5,6 +5,8 @@ import type {
   InviteFileShareResult,
   InviteProfile,
   LocalTunnelState,
+  MobileNetworkLensRequest,
+  MobileNetworkLensResult,
   OwnerRuntimeLabRequest,
   OwnerAccessProfile,
   ProvisionRequest,
@@ -380,6 +382,23 @@ export const coreApi = {
           "https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/cidrwhitelist.txt",
         error: "Whitelist IP lookup is currently available only through the Android native bridge."
       } satisfies WhitelistLookupResult
+    );
+  },
+
+  async inspectMobileNetworkLens(payload: MobileNetworkLensRequest) {
+    if (await prefersAndroidNativeBridge()) {
+      return invokeNative<MobileNetworkLensResult>("mobile_inspect_network_lens", { payload });
+    }
+    return unsupportedResult(
+      501,
+      {
+        available: false,
+        checkedAt: new Date().toISOString(),
+        networkType: "unknown",
+        isCellular: false,
+        whitelistStatus: "unknown",
+        note: "Mobile whitelist detection is currently available only through the Android native bridge."
+      } satisfies MobileNetworkLensResult
     );
   },
 

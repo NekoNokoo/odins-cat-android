@@ -34,6 +34,13 @@ class ConnectivityTestArgs {
 }
 
 @InvokeArg
+class NetworkLensArgs {
+    var originHost: String = ""
+    var tunnelHost: String? = null
+    var cellularOnly: Boolean = true
+}
+
+@InvokeArg
 class ShareInviteFileArgs {
     var fileName: String = "odin-one-access.odinone-access.json"
     var contents: String = ""
@@ -195,6 +202,35 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
                         sync = true,
                     )
                 invoke.resolve(failed.toJsObject())
+            }
+        }
+    }
+
+    @Command
+    fun inspectNetworkLens(invoke: Invoke) {
+        val args = invoke.parseArgs(NetworkLensArgs::class.java)
+        thread(name = "odin-one-network-lens", isDaemon = true) {
+            runCatching {
+                VpnRuntimeLibbox.inspectNetworkLens(
+                    context = activity,
+                    originHost = args.originHost,
+                    tunnelHost = args.tunnelHost,
+                    cellularOnly = args.cellularOnly,
+                )
+            }.onSuccess { result ->
+                invoke.resolve(result)
+            }.onFailure { error ->
+                Log.e("VpnRuntimeService", "inspectNetworkLens crashed before producing a result", error)
+                invoke.resolve(
+                    JSObject().apply {
+                        put("available", false)
+                        put("checkedAt", currentTimestamp())
+                        put("networkType", "unknown")
+                        put("isCellular", false)
+                        put("whitelistStatus", "unknown")
+                        put("error", error.message ?: "Android network lens crashed.")
+                    },
+                )
             }
         }
     }

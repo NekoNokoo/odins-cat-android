@@ -77,7 +77,10 @@ select {
 }
 
 .topbar-head--compact {
+  position: relative;
+  display: flex;
   align-items: center;
+  justify-content: space-between;
 }
 
 .topbar-title {
@@ -88,6 +91,28 @@ select {
 
 .topbar-action {
   flex-shrink: 0;
+}
+
+.topbar-head--compact .topbar-title {
+  flex: 0 1 auto;
+  width: auto;
+  max-width: calc(100% - 120px);
+  padding: 0;
+}
+
+.topbar-head--compact .topbar-action {
+  margin-left: auto;
+}
+
+.topbar-center-accessory {
+  position: absolute;
+  left: calc(50% - 18px);
+  top: calc(50% + 4px);
+  transform: translate(-50%, -50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
 }
 
 .topbar-copy h1 {

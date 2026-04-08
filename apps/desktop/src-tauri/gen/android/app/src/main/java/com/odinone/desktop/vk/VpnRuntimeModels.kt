@@ -1171,6 +1171,8 @@ fun classifyRuntimeFailureCode(
 ): String {
     val normalizedMessage = message?.trim().orEmpty().lowercase()
     return when {
+        normalizedMessage.contains("fatal_captcha_failed_no_streams") -> "vk_captcha_fatal"
+        normalizedMessage.contains("captcha_wait_required") -> "vk_captcha_wait"
         normalizedMessage.contains("vless + reality access profile is incomplete") -> "profile_incomplete"
         normalizedMessage.contains("access profile") || normalizedMessage.contains("profile") -> "profile_invalid"
         normalizedMessage.contains("scaffolded only") -> "scaffold_only"

@@ -19,6 +19,7 @@ import io.nekohasekai.libbox.SystemProxyStatus
 import io.nekohasekai.libbox.WIFIState
 import java.io.File
 import java.net.HttpURLConnection
+import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetSocketAddress
 import java.net.NetworkInterface as JavaNetworkInterface
@@ -29,6 +30,7 @@ import java.net.URL
 import java.security.MessageDigest
 import java.security.KeyStore
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.concurrent.thread
 import org.json.JSONArray
 import org.json.JSONObject
@@ -40,6 +42,11 @@ private const val DEFAULT_SOCKS_PORT = 58371
 private const val DEFAULT_VK_BRIDGE_PORT = 39090
 private const val DEFAULT_LOG_LINES = 3000L
 private const val DEFAULT_HTTP_FALLBACK_TEST_URL = "http://example.com"
+private const val NETWORK_LENS_YANDEX_URL = "https://yandex.ru"
+private const val NETWORK_LENS_GOOGLE_URL = "https://google.com"
+private const val NETWORK_LENS_GEOLOOKUP_URL_PREFIX = "https://ipwho.is/"
+private const val NETWORK_LENS_TIMEOUT_MS = 4500
+private const val NETWORK_LENS_GEOLOOKUP_CACHE_TTL_MS = 6 * 60 * 60 * 1000L
 private const val RUNTIME_FAMILY_DIRECT_REALITY = "direct-reality"
 private const val RUNTIME_FAMILY_REALITY_WHITELIST_ASSISTED = "reality-whitelist-assisted"
 private const val RUNTIME_FAMILY_REALITY_VPS_LAB = "reality-vps-lab"
@@ -128,6 +135,28 @@ data class PreparedRuntime(
     val profileHash: String? = null,
     val networkReloadOnChange: Boolean = false,
     val networkReloadDebounceMs: Long = REALITY_NETWORK_RELOAD_DEBOUNCE_DEFAULT_MS,
+)
+
+private data class NetworkLensProbeOutcome(
+    val url: String,
+    val ok: Boolean,
+    val httpStatus: Int? = null,
+    val error: String? = null,
+    val checkedAt: String = currentTimestamp(),
+)
+
+private data class NetworkLensEndpointDetails(
+    val host: String,
+    val ip: String? = null,
+    val countryCode: String? = null,
+    val country: String? = null,
+    val error: String? = null,
+)
+
+private data class CachedGeoLookup(
+    val countryCode: String? = null,
+    val country: String? = null,
+    val expiresAtMs: Long,
 )
 
 private data class RealitySettings(
@@ -425,6 +454,7 @@ private class NetworkInterfaceArray(
 object VpnRuntimeLibbox {
     @Volatile
     private var initialized = false
+    private val geoLookupCache = ConcurrentHashMap<String, CachedGeoLookup>()
 
     fun ensureInitialized(context: Context) {
         if (initialized) {
@@ -788,6 +818,281 @@ object VpnRuntimeLibbox {
             Log.w("VpnRuntimeService", "Failed to persist relay autoselect probe history", error)
         }
         return updated
+    }
+
+    fun inspectNetworkLens(
+        context: Context,
+        originHost: String,
+        tunnelHost: String?,
+        cellularOnly: Boolean = true,
+    ): JSObject {
+        val checkedAt = currentTimestamp()
+        val connectivity =
+            context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return JSObject().apply {
+                    put("available", false)
+                    put("checkedAt", checkedAt)
+                    put("networkType", "unknown")
+                    put("isCellular", false)
+                    put("whitelistStatus", "unknown")
+                    put("error", "ConnectivityManager is unavailable.")
+                }
+
+        val cellularNetwork = findPreferredCellularNetwork(connectivity)
+        val fallbackNetwork = resolveUnderlyingDefaultNetwork(connectivity)
+        val selectedNetwork = cellularNetwork ?: fallbackNetwork
+        val selectedCapabilities = selectedNetwork?.let(connectivity::getNetworkCapabilities)
+        val selectedLinkProperties = selectedNetwork?.let(connectivity::getLinkProperties)
+        val selectedNetworkType = selectedCapabilities.toNetworkType()
+        val selectedIsCellular =
+            selectedCapabilities?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true
+
+        val response =
+            JSObject().apply {
+                put("available", selectedNetwork != null)
+                put("checkedAt", checkedAt)
+                put("networkType", selectedNetworkType)
+                put("isCellular", selectedIsCellular)
+                selectedLinkProperties?.interfaceName?.let { put("interfaceName", it) }
+                put("whitelistStatus", "unknown")
+            }
+
+        if (selectedNetwork == null) {
+            response.put("note", "No usable underlying network is available right now.")
+            return response
+        }
+
+        if (originHost.trim().isNotEmpty()) {
+            response.put("origin", endpointDetailsToJsObject(describeNetworkLensEndpoint(selectedNetwork, originHost)))
+        }
+        if (!tunnelHost.isNullOrBlank()) {
+            response.put("tunnel", endpointDetailsToJsObject(describeNetworkLensEndpoint(selectedNetwork, tunnelHost)))
+        }
+
+        val whitelistProbeNetwork =
+            when {
+                cellularOnly -> cellularNetwork
+                else -> selectedNetwork
+            }
+        val whitelistCapabilities = whitelistProbeNetwork?.let(connectivity::getNetworkCapabilities)
+        val whitelistIsCellular =
+            whitelistCapabilities?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true
+
+        if (whitelistProbeNetwork == null || !whitelistIsCellular) {
+            response.put(
+                "note",
+                "Whitelist detection is paused until a mobile data network is available.",
+            )
+            return response
+        }
+
+        connectivity.getLinkProperties(whitelistProbeNetwork)?.interfaceName?.let {
+            response.put("interfaceName", it)
+        }
+        response.put("networkType", whitelistCapabilities.toNetworkType())
+        response.put("isCellular", true)
+
+        val yandexProbe = executeBoundHttpProbe(whitelistProbeNetwork, NETWORK_LENS_YANDEX_URL)
+        val googleProbe = executeBoundHttpProbe(whitelistProbeNetwork, NETWORK_LENS_GOOGLE_URL)
+
+        response.put("yandexProbe", networkLensProbeToJsObject(yandexProbe))
+        response.put("googleProbe", networkLensProbeToJsObject(googleProbe))
+        response.put(
+            "whitelistStatus",
+            when {
+                yandexProbe.ok && !googleProbe.ok -> "active"
+                yandexProbe.ok && googleProbe.ok -> "inactive"
+                else -> "unknown"
+            },
+        )
+        if (!yandexProbe.ok && !googleProbe.ok) {
+            response.put("note", "Both mobile-network probes failed, so the whitelist state is unknown.")
+        } else if (!yandexProbe.ok) {
+            response.put("note", "The Yandex mobile-network probe failed, so the whitelist state is unknown.")
+        }
+        return response
+    }
+
+    private fun executeBoundHttpProbe(
+        network: android.net.Network,
+        targetUrl: String,
+    ): NetworkLensProbeOutcome {
+        val checkedAt = currentTimestamp()
+        return runCatching {
+            val connection =
+                (network.openConnection(URL(targetUrl)) as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = NETWORK_LENS_TIMEOUT_MS
+                    readTimeout = NETWORK_LENS_TIMEOUT_MS
+                    instanceFollowRedirects = false
+                }
+            try {
+                val code = connection.responseCode
+                val ok = code in 200..399
+                NetworkLensProbeOutcome(
+                    url = targetUrl,
+                    ok = ok,
+                    httpStatus = code,
+                    error = if (ok) null else "HTTP $code",
+                    checkedAt = checkedAt,
+                )
+            } finally {
+                connection.disconnect()
+            }
+        }.getOrElse { error ->
+            NetworkLensProbeOutcome(
+                url = targetUrl,
+                ok = false,
+                error = error.message ?: "Bound HTTP probe failed.",
+                checkedAt = checkedAt,
+            )
+        }
+    }
+
+    private fun describeNetworkLensEndpoint(
+        network: android.net.Network,
+        host: String,
+    ): NetworkLensEndpointDetails {
+        val trimmedHost = host.trim()
+        if (trimmedHost.isEmpty()) {
+            return NetworkLensEndpointDetails(host = trimmedHost, error = "Host is empty.")
+        }
+        val ip = resolveIpv4OnNetwork(network, trimmedHost)
+            ?: return NetworkLensEndpointDetails(
+                host = trimmedHost,
+                error = "IPv4 resolution failed on the current network.",
+            )
+        val geo = lookupGeoForIp(network, ip)
+        return NetworkLensEndpointDetails(
+            host = trimmedHost,
+            ip = ip,
+            countryCode = geo?.countryCode,
+            country = geo?.country,
+        )
+    }
+
+    private fun resolveIpv4OnNetwork(
+        network: android.net.Network,
+        host: String,
+    ): String? {
+        val trimmedHost = host.trim()
+        if (trimmedHost.isEmpty()) {
+            return null
+        }
+        trimmedHost.toIpv4LiteralOrNull()?.let { return it }
+        return runCatching {
+            network
+                .getAllByName(trimmedHost)
+                .firstOrNull { it is Inet4Address }
+                ?.hostAddress
+        }.getOrNull()
+    }
+
+    private fun lookupGeoForIp(
+        network: android.net.Network,
+        ip: String,
+    ): CachedGeoLookup? {
+        val now = System.currentTimeMillis()
+        geoLookupCache[ip]?.takeIf { it.expiresAtMs > now }?.let { return it }
+
+        val fetched =
+            runCatching {
+                val connection =
+                    (network.openConnection(URL("$NETWORK_LENS_GEOLOOKUP_URL_PREFIX$ip")) as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        connectTimeout = NETWORK_LENS_TIMEOUT_MS
+                        readTimeout = NETWORK_LENS_TIMEOUT_MS
+                        instanceFollowRedirects = true
+                    }
+                try {
+                    val code = connection.responseCode
+                    if (code !in 200..399) {
+                        null
+                    } else {
+                        val body = connection.inputStream.bufferedReader().use { reader -> reader.readText() }
+                        val payload = JSONObject(body)
+                        val countryCode =
+                            payload.optString("country_code")
+                                .ifBlank { payload.optString("countryCode") }
+                                .trim()
+                                .uppercase(Locale.ROOT)
+                                .ifBlank { null }
+                        val country = payload.optString("country").trim().ifBlank { null }
+                        CachedGeoLookup(
+                            countryCode = countryCode,
+                            country = country,
+                            expiresAtMs = now + NETWORK_LENS_GEOLOOKUP_CACHE_TTL_MS,
+                        )
+                    }
+                } finally {
+                    connection.disconnect()
+                }
+            }.getOrNull()
+        if (fetched != null) {
+            geoLookupCache[ip] = fetched
+        }
+        return fetched
+    }
+
+    private fun findPreferredCellularNetwork(
+        connectivity: ConnectivityManager,
+    ): android.net.Network? =
+        connectivity.allNetworks
+            .mapNotNull { network ->
+                val capabilities = connectivity.getNetworkCapabilities(network) ?: return@mapNotNull null
+                if (!isUsableUnderlyingNetwork(capabilities) ||
+                    !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+                ) {
+                    return@mapNotNull null
+                }
+                network to (scoreUnderlyingNetwork(capabilities) + 25)
+            }.maxByOrNull { (_, score) -> score }
+            ?.first
+
+    private fun endpointDetailsToJsObject(details: NetworkLensEndpointDetails): JSObject =
+        JSObject().apply {
+            put("host", details.host)
+            details.ip?.let { put("ip", it) }
+            details.countryCode?.let { put("countryCode", it) }
+            details.country?.let { put("country", it) }
+            details.error?.let { put("error", it) }
+        }
+
+    private fun networkLensProbeToJsObject(probe: NetworkLensProbeOutcome): JSObject =
+        JSObject().apply {
+            put("url", probe.url)
+            put("ok", probe.ok)
+            probe.httpStatus?.let { put("httpStatus", it) }
+            probe.error?.let { put("error", it) }
+            put("checkedAt", probe.checkedAt)
+        }
+
+    private fun NetworkCapabilities?.toNetworkType(): String =
+        when {
+            this == null -> "unknown"
+            hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+            hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+            else -> "other"
+        }
+
+    private fun String.toIpv4LiteralOrNull(): String? {
+        val parts = trim().split('.')
+        if (parts.size != 4) {
+            return null
+        }
+        return if (parts.all { part ->
+                val octet = part.toIntOrNull()
+                part.isNotEmpty() &&
+                    part.all(Char::isDigit) &&
+                    octet != null &&
+                    octet in 0..255
+            }
+        ) {
+            trim()
+        } else {
+            null
+        }
     }
 
     private fun executeHttpProbeWithLocalSocksRetries(

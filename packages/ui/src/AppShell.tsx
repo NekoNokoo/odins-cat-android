@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 export function AppShell({
   kicker,
   title,
+  titleAccessory,
   subtitle,
   headerAction,
   dragRegion = false,
@@ -11,6 +12,7 @@ export function AppShell({
 }: {
   kicker?: string;
   title: string;
+  titleAccessory?: ReactNode;
   subtitle?: string;
   headerAction?: ReactNode;
   dragRegion?: boolean;
@@ -26,6 +28,7 @@ export function AppShell({
               <div className="topbar-title" {...(dragRegion ? { "data-tauri-drag-region": true } : {})}>
                 <h1>{title}</h1>
               </div>
+              {titleAccessory ? <div className="topbar-center-accessory">{titleAccessory}</div> : null}
               {headerAction ? <div className="topbar-action">{headerAction}</div> : null}
             </div>
           </div>

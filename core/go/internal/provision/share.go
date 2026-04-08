@@ -182,6 +182,7 @@ func decodeInvite(shareCode string) (inviteProfile, string, error) {
 	if invite.VLESSReality.Flow == "" && invite.Protocol == string(ProtocolVLESSReality) {
 		invite.VLESSReality.Flow = "xtls-rprx-vision"
 	}
+	syncInviteRealityStagedFallbacks(&invite)
 	if err := validateInvite(invite); err != nil {
 		return invite, "", err
 	}
@@ -853,7 +854,59 @@ func effectiveInviteStagedFallbacks(invite inviteProfile) map[string]any {
 	}
 	ensureRealityRelayDirectFallback(staged)
 	ensureRealityRelayOwnerEgressFallback(staged)
-	return staged
+	normalized := invite
+	normalized.StagedFallbacks = staged
+	syncInviteRealityStagedFallbacks(&normalized)
+	return normalized.StagedFallbacks
+}
+
+func syncInviteRealityStagedFallbacks(invite *inviteProfile) {
+	if invite == nil || invite.StagedFallbacks == nil {
+		return
+	}
+	port := invite.VLESSReality.Port
+	serverName := strings.TrimSpace(invite.VLESSReality.ServerName)
+	publicKey := strings.TrimSpace(invite.VLESSReality.PublicKey)
+	shortID := strings.TrimSpace(invite.VLESSReality.ShortID)
+	uuid := strings.TrimSpace(invite.VLESSReality.UUID)
+	flow := strings.TrimSpace(invite.VLESSReality.Flow)
+	if flow == "" {
+		flow = "xtls-rprx-vision"
+	}
+	if port <= 0 || serverName == "" || publicKey == "" || shortID == "" || uuid == "" {
+		return
+	}
+
+	if raw, ok := invite.StagedFallbacks["vlessReality"]; ok {
+		if fallback, ok := raw.(map[string]any); ok {
+			fallback["port"] = port
+			fallback["serverName"] = serverName
+			fallback["publicKey"] = publicKey
+			fallback["shortId"] = shortID
+			fallback["uuid"] = uuid
+			fallback["flow"] = flow
+		}
+	}
+
+	if raw, ok := invite.StagedFallbacks["realityRelayOwnerEgress"]; ok {
+		if fallback, ok := raw.(map[string]any); ok {
+			fallback["ownerEgressPort"] = port
+		}
+	}
+
+	if raw, ok := invite.StagedFallbacks["realityYandexEdge"]; ok {
+		if fallback, ok := raw.(map[string]any); ok {
+			fallback["originPort"] = port
+			fallback["serverName"] = serverName
+			fallback["publicKey"] = publicKey
+			fallback["shortId"] = shortID
+			fallback["uuid"] = uuid
+			fallback["flow"] = flow
+			if strings.TrimSpace(invite.ServerHost) != "" {
+				fallback["originHost"] = strings.TrimSpace(invite.ServerHost)
+			}
+		}
+	}
 }
 
 func enrichInviteProfile(invite *inviteProfile, owner inviteProfile, xrayState remoteXrayState) {
@@ -912,6 +965,7 @@ func enrichInviteProfile(invite *inviteProfile, owner inviteProfile, xrayState r
 			}
 		}
 	}
+	syncInviteRealityStagedFallbacks(invite)
 	if invite.EndpointPort == 0 {
 		if invite.Protocol == string(ProtocolVLESSReality) {
 			invite.EndpointPort = effectiveRealityPort(owner, xrayState)

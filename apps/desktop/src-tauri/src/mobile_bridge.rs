@@ -395,6 +395,17 @@ pub(crate) struct LocalTunnelTestPayload {
     url: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MobileNetworkLensPayload {
+    #[serde(default)]
+    origin_host: String,
+    #[serde(default)]
+    tunnel_host: String,
+    #[serde(default = "default_true")]
+    cellular_only: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CheckEntry {
@@ -1225,6 +1236,22 @@ pub async fn mobile_run_local_tunnel_test(
 }
 
 #[tauri::command]
+pub async fn mobile_inspect_network_lens(
+    app: AppHandle,
+    payload: MobileNetworkLensPayload,
+) -> Result<Value, String> {
+    android_vpn::inspect_network_lens(
+        &app,
+        json!({
+            "originHost": payload.origin_host.trim(),
+            "tunnelHost": optional_string(&payload.tunnel_host),
+            "cellularOnly": payload.cellular_only,
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
 pub fn mobile_get_owner_profile(app: AppHandle, host: String) -> Result<Value, String> {
     if host.trim().is_empty() {
         return Ok(json!({
@@ -1437,6 +1464,7 @@ pub fn register_mobile_commands(builder: tauri::Builder<tauri::Wry>) -> tauri::B
             mobile_stop_local_tunnel,
             mobile_get_local_tunnel_status,
             mobile_run_local_tunnel_test,
+            mobile_inspect_network_lens,
             mobile_get_owner_profile,
             mobile_get_imported_profile,
             mobile_import_profile,
@@ -1504,7 +1532,7 @@ fn bundled_whitelist_source() -> Result<ParsedWhitelistFiles, String> {
 
 async fn fetch_remote_whitelist_files() -> Result<(String, String, String), String> {
     let client = reqwest::Client::builder()
-        .user_agent("odin-one-mobile-bridge/0.5.1")
+        .user_agent("odin-one-mobile-bridge/0.5.2")
         .build()
         .map_err(|err| format!("build whitelist HTTP client: {err}"))?;
 
@@ -1715,7 +1743,69 @@ fn invite_effective_staged_fallbacks(invite: &InviteProfileFile) -> Value {
     let mut staged = invite.staged_fallbacks.clone();
     ensure_reality_relay_direct_fallback(&mut staged);
     ensure_reality_relay_owner_egress_fallback(&mut staged);
-    staged
+    let mut normalized = invite.clone();
+    normalized.staged_fallbacks = staged;
+    sync_invite_reality_staged_fallbacks(&mut normalized);
+    normalized.staged_fallbacks
+}
+
+fn sync_invite_reality_staged_fallbacks(invite: &mut InviteProfileFile) {
+    let port = invite.vless_reality.port;
+    let server_name = invite.vless_reality.server_name.trim();
+    let public_key = invite.vless_reality.public_key.trim();
+    let short_id = invite.vless_reality.short_id.trim();
+    let uuid = invite.vless_reality.uuid.trim();
+    let flow = if invite.vless_reality.flow.trim().is_empty() {
+        DEFAULT_REALITY_FLOW
+    } else {
+        invite.vless_reality.flow.trim()
+    };
+    if port == 0
+        || server_name.is_empty()
+        || public_key.is_empty()
+        || short_id.is_empty()
+        || uuid.is_empty()
+    {
+        return;
+    }
+
+    let Some(staged) = invite.staged_fallbacks.as_object_mut() else {
+        return;
+    };
+
+    let vless = staged
+        .entry("vlessReality".to_string())
+        .or_insert_with(|| json!({}));
+    if let Some(vless) = vless.as_object_mut() {
+        vless.insert("port".to_string(), json!(port));
+        vless.insert("serverName".to_string(), json!(server_name));
+        vless.insert("publicKey".to_string(), json!(public_key));
+        vless.insert("shortId".to_string(), json!(short_id));
+        vless.insert("uuid".to_string(), json!(uuid));
+        vless.insert("flow".to_string(), json!(flow));
+    }
+
+    if let Some(owner_egress) = staged
+        .get_mut("realityRelayOwnerEgress")
+        .and_then(Value::as_object_mut)
+    {
+        owner_egress.insert("ownerEgressPort".to_string(), json!(port));
+    }
+
+    if let Some(edge) = staged
+        .get_mut("realityYandexEdge")
+        .and_then(Value::as_object_mut)
+    {
+        edge.insert("originPort".to_string(), json!(port));
+        edge.insert("serverName".to_string(), json!(server_name));
+        edge.insert("publicKey".to_string(), json!(public_key));
+        edge.insert("shortId".to_string(), json!(short_id));
+        edge.insert("uuid".to_string(), json!(uuid));
+        edge.insert("flow".to_string(), json!(flow));
+        if !invite.server_host.trim().is_empty() {
+            edge.insert("originHost".to_string(), json!(invite.server_host.trim()));
+        }
+    }
 }
 
 fn invite_effective_reality_port(invite: &InviteProfileFile) -> Option<u16> {
@@ -1761,6 +1851,7 @@ fn decode_invite(share_code: &str) -> Result<InviteProfileFile, String> {
     }
     ensure_reality_relay_direct_fallback(&mut invite.staged_fallbacks);
     ensure_reality_relay_owner_egress_fallback(&mut invite.staged_fallbacks);
+    sync_invite_reality_staged_fallbacks(&mut invite);
 
     validate_invite(&invite)?;
     Ok(invite)
@@ -2048,6 +2139,10 @@ fn nonzero_u16(value: u16) -> Option<u16> {
     } else {
         Some(value)
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn string_field(value: Option<&Value>) -> &str {
@@ -2681,6 +2776,7 @@ fn enrich_invite_profile(
             }
         }
     }
+    sync_invite_reality_staged_fallbacks(invite);
     if invite.endpoint_port == 0 {
         invite.endpoint_port = if invite.protocol == "vless-reality" {
             effective_reality_port(owner, xray_state)
@@ -3605,7 +3701,7 @@ fn build_staged_fallbacks(
         },
         "realityRelayOwnerEgress": {
             "status": if promoted { "ready" } else { "staged" },
-            "ownerEgressPort": REALITY_FALLBACK_MIN_PORT,
+            "ownerEgressPort": reality_port,
             "subscriptionUrl": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL,
             "sourceLabel": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL,
             "description": "Experimental relay-assisted REALITY mode. The client picks a curated external REALITY relay first, then moves egress back to your Odin One server."
@@ -5762,6 +5858,69 @@ mod tests {
         assert_eq!(
             staged["realityYandexEdge"]["originPort"].as_u64(),
             Some(YANDEX_EDGE_ORIGIN_PORT as u64)
+        );
+    }
+
+    #[test]
+    fn decode_invite_syncs_guest_reality_into_staged_yandex_edge_and_owner_egress() {
+        let raw = serde_json::json!({
+            "id": "guest-009",
+            "role": "guest",
+            "name": "Odin One Owner Node",
+            "protocol": "vless-reality",
+            "transport": "xray",
+            "serverHost": "95.81.120.226",
+            "endpointPort": 55555,
+            "endpoint": "95.81.120.226:55555",
+            "fingerprint": "482471d931882079",
+            "status": "active",
+            "vlessReality": {
+                "port": 55555,
+                "serverName": "www.cloudflare.com",
+                "publicKey": "EhIONikEgvX3cReHEHzo1fGwZVXI27XOIt6In4YGgDo",
+                "shortId": "ba81780391343b01",
+                "uuid": "b707d399-3f96-4df9-8daa-8b7b2ea23650",
+                "flow": "xtls-rprx-vision"
+            },
+            "stagedFallbacks": {
+                "vlessReality": {
+                    "port": 55555,
+                    "serverName": "www.cloudflare.com",
+                    "publicKey": "EhIONikEgvX3cReHEHzo1fGwZVXI27XOIt6In4YGgDo",
+                    "shortId": "ba81780391343b01",
+                    "uuid": "7e56811d-4815-474a-a2a2-9cb869aeae5b",
+                    "flow": "xtls-rprx-vision"
+                },
+                "realityRelayOwnerEgress": {
+                    "ownerEgressPort": 52443
+                },
+                "realityYandexEdge": {
+                    "connectHost": "62.84.123.148",
+                    "connectPort": 443,
+                    "originHost": "95.81.120.226",
+                    "originPort": 55555,
+                    "serverName": "www.cloudflare.com",
+                    "publicKey": "EhIONikEgvX3cReHEHzo1fGwZVXI27XOIt6In4YGgDo",
+                    "shortId": "ba81780391343b01",
+                    "uuid": "7e56811d-4815-474a-a2a2-9cb869aeae5b",
+                    "flow": "xtls-rprx-vision"
+                }
+            }
+        })
+        .to_string();
+
+        let invite = super::decode_invite(&raw).expect("invite should decode");
+        assert_eq!(
+            invite.staged_fallbacks["vlessReality"]["uuid"].as_str(),
+            Some("b707d399-3f96-4df9-8daa-8b7b2ea23650")
+        );
+        assert_eq!(
+            invite.staged_fallbacks["realityYandexEdge"]["uuid"].as_str(),
+            Some("b707d399-3f96-4df9-8daa-8b7b2ea23650")
+        );
+        assert_eq!(
+            invite.staged_fallbacks["realityRelayOwnerEgress"]["ownerEgressPort"].as_u64(),
+            Some(55555)
         );
     }
 

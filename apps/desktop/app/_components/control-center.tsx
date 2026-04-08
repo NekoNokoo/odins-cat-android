@@ -14,6 +14,8 @@ import type {
   EdgeAttachDraft,
   InviteProfile,
   LocalTunnelState,
+  MobileNetworkEndpoint,
+  MobileNetworkLensResult,
   OwnerRuntimeLabRequest,
   OwnerAccessProfile,
   ProtocolPackEntry,
@@ -69,6 +71,10 @@ type PendingAction =
   | "enableSystemProxy"
   | "disableSystemProxy"
   | null;
+
+type ControlCenterProps = {
+  onNetworkLensChange?: (lens: MobileNetworkLensResult | null) => void;
+};
 
 type OwnerRuntimeLabMode =
   | "off"
@@ -492,6 +498,29 @@ const sanitizeInviteFilePart = (value: string) =>
 const buildInviteFileName = (profile: InviteProfile) =>
   `${sanitizeInviteFilePart(profile.serverHost || "server")}-${sanitizeInviteFilePart(profile.name || "invite")}${inviteFileExtension}`;
 
+const regionDisplayLocale = (locale: "ru" | "en") =>
+  locale === "ru" ? "ru-RU" : "en-US";
+
+const countryFlagFromCode = (countryCode?: string | null) => {
+  const normalized = countryCode?.trim().toUpperCase();
+  if (!normalized || normalized.length !== 2) {
+    return "";
+  }
+  return String.fromCodePoint(
+    normalized.charCodeAt(0) - 65 + 0x1f1e6,
+    normalized.charCodeAt(1) - 65 + 0x1f1e6,
+  );
+};
+
+const looksLikeInvitePayload = (value: string) => {
+  const trimmed = value.trim();
+  return (
+    trimmed.startsWith("odin1:") ||
+    trimmed.startsWith("{") ||
+    trimmed.startsWith("[")
+  );
+};
+
 const formatInviteExportNotice = (
   t: ReturnType<typeof useI18n>["t"],
   fileName: string,
@@ -507,7 +536,7 @@ const formatInviteExportNotice = (
   return `${t("saved")}: ${fileName}`;
 };
 
-export function ControlCenter() {
+export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const { locale, t } = useI18n();
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("server");
   const [activeAccessTab, setActiveAccessTab] = useState<AccessTab>("key");
@@ -530,6 +559,8 @@ export function ControlCenter() {
   const [whitelistLookupError, setWhitelistLookupError] = useState<
     string | null
   >(null);
+  const [mobileNetworkLens, setMobileNetworkLens] =
+    useState<MobileNetworkLensResult | null>(null);
   const importProfileFileInputRef = useRef<HTMLInputElement | null>(null);
   const [localTunnel, setLocalTunnel] = useState<LocalTunnelState | null>(null);
   const [systemProxy, setSystemProxy] = useState<SystemProxyState | null>(null);
@@ -1065,6 +1096,62 @@ export function ControlCenter() {
   const selectedAccessModeCard =
     accessModeCards.find((entry) => entry.mode === selectedAccessMode) ??
     accessModeCards[0];
+  const regionNames =
+    typeof Intl !== "undefined" && "DisplayNames" in Intl
+      ? new Intl.DisplayNames([regionDisplayLocale(locale)], {
+          type: "region",
+        })
+      : null;
+  const formatNetworkEndpoint = (endpoint?: MobileNetworkEndpoint | null) => {
+    const countryCode = endpoint?.countryCode?.trim().toUpperCase() ?? "";
+    const localizedCountry =
+      (countryCode && regionNames?.of(countryCode)) ||
+      endpoint?.country?.trim() ||
+      t("routeLensUnknownCountry");
+    const flag = countryFlagFromCode(countryCode);
+    return {
+      host: endpoint?.host?.trim() ?? "",
+      ip: endpoint?.ip?.trim() ?? "",
+      countryCode,
+      country: localizedCountry,
+      flag,
+      error: endpoint?.error?.trim() ?? "",
+    };
+  };
+  const routeLensOrigin = formatNetworkEndpoint(mobileNetworkLens?.origin);
+  const routeLensTunnel = formatNetworkEndpoint(mobileNetworkLens?.tunnel);
+  const routeLensOriginDisplay = routeLensOrigin.ip || routeLensOrigin.host;
+  const routeLensTunnelDisplay = routeLensTunnel.ip || routeLensTunnel.host;
+  const routeLensNetworkLabel =
+    mobileNetworkLens?.networkType === "cellular"
+      ? t("routeLensNetworkCellular")
+      : mobileNetworkLens?.networkType === "wifi"
+        ? t("routeLensNetworkWifi")
+        : mobileNetworkLens?.networkType === "ethernet"
+          ? t("routeLensNetworkEthernet")
+          : mobileNetworkLens?.networkType === "other"
+            ? t("routeLensNetworkOther")
+            : t("routeLensNetworkUnknown");
+  const routeLensWhitelistLabel =
+    mobileNetworkLens?.whitelistStatus === "active"
+      ? t("whitelistStateActive")
+      : mobileNetworkLens?.whitelistStatus === "inactive"
+        ? t("whitelistStateInactive")
+        : t("whitelistStateUnknown");
+  const routeLensWhitelistTone =
+    mobileNetworkLens?.whitelistStatus === "active"
+      ? "active"
+      : mobileNetworkLens?.whitelistStatus === "inactive"
+        ? "inactive"
+        : "unknown";
+  const routeLensNote =
+    mobileNetworkLens?.note?.trim() ||
+    (!mobileNetworkLens?.isCellular ? t("whitelistProbeCellularOnly") : "");
+  const routeLensVisible = Boolean(
+    isAndroidClient &&
+      (routeLensOriginDisplay ||
+        (selectedAccessMode === "yandex-edge" && routeLensTunnelDisplay)),
+  );
   const ownerRuntimeLabPanelVisible =
     isAndroidClient && ownerRuntimeLabUnlocked;
   const ownerRuntimeLabHintInputsVisible =
@@ -1282,6 +1369,7 @@ export function ControlCenter() {
     void fetchCoreHealth();
     void fetchSystemProxyStatus();
     pollLocalTunnel(true);
+    void refreshMobileNetworkLens();
   }, []);
 
   useEffect(() => {
@@ -1304,6 +1392,30 @@ export function ControlCenter() {
 
     return () => window.clearInterval(intervalId);
   }, [activeSheet, isAndroidClient, localTunnel?.status]);
+
+  useEffect(() => {
+    if (!isAndroidClient) {
+      setMobileNetworkLens(null);
+      return;
+    }
+    void refreshMobileNetworkLens(true);
+  }, [isAndroidClient, resolvedDraftHost, selectedAccessMode]);
+
+  useEffect(() => {
+    if (!isAndroidClient) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void refreshMobileNetworkLens(true);
+    }, 30000);
+
+    return () => window.clearInterval(intervalId);
+  }, [isAndroidClient, resolvedDraftHost, selectedAccessMode]);
+
+  useEffect(() => {
+    onNetworkLensChange?.(mobileNetworkLens);
+  }, [mobileNetworkLens, onNetworkLensChange]);
 
   useEffect(() => {
     if (!isAndroidClient) {
@@ -1498,6 +1610,41 @@ export function ControlCenter() {
       return data;
     } catch {
       setCoreHealth(null);
+      return null;
+    }
+  };
+
+  const refreshMobileNetworkLens = async (quiet = false) => {
+    if (!isAndroidClient) {
+      setMobileNetworkLens(null);
+      return null;
+    }
+
+    const originHost = resolvedDraftHost.trim();
+    const tunnelHost =
+      selectedAccessMode === "yandex-edge" ? yandexEdgeConnectHost : "";
+    if (!originHost && !tunnelHost) {
+      setMobileNetworkLens(null);
+      return null;
+    }
+
+    try {
+      const result = await coreApi.inspectMobileNetworkLens({
+        originHost,
+        ...(tunnelHost ? { tunnelHost } : {}),
+        cellularOnly: true,
+      });
+      const data = result.data;
+      if (data) {
+        setMobileNetworkLens(data);
+      } else if (!quiet) {
+        setMobileNetworkLens(null);
+      }
+      return data ?? null;
+    } catch {
+      if (!quiet) {
+        setMobileNetworkLens(null);
+      }
       return null;
     }
   };
@@ -2821,6 +2968,38 @@ export function ControlCenter() {
     importProfileFromContents(importShareCode, { clearTextInput: true });
   };
 
+  const handleImportProfileFromClipboard = () => {
+    setError(null);
+    setInviteFileNotice(null);
+    startTransition(async () => {
+      try {
+        if (
+          typeof navigator === "undefined" ||
+          !navigator.clipboard?.readText
+        ) {
+          setError(t("importClipboardUnavailable"));
+          return;
+        }
+        const contents = (await navigator.clipboard.readText()).trim();
+        if (!contents) {
+          setError(t("importClipboardEmpty"));
+          return;
+        }
+        if (!looksLikeInvitePayload(contents)) {
+          setError(t("importClipboardInvalid"));
+          return;
+        }
+        importProfileFromContents(contents);
+      } catch (requestError) {
+        const message =
+          requestError instanceof Error
+            ? requestError.message
+            : t("unknownError");
+        setError(message || t("importClipboardUnavailable"));
+      }
+    });
+  };
+
   const handleOpenImportProfileFile = () => {
     setError(null);
     importProfileFileInputRef.current?.click();
@@ -2974,6 +3153,7 @@ export function ControlCenter() {
     setWhitelistIp(yandexEdgeConnectHost);
     setWhitelistLookup(null);
     setWhitelistLookupError(null);
+    setMobileNetworkLens(null);
     setInviteFileNotice(null);
     setOwnerProfile(null);
     setGuestProfile(null);
@@ -3042,6 +3222,68 @@ export function ControlCenter() {
                     {deploymentPortSummary ? ` / ${deploymentPortSummary}` : ""}
                   </p>
                 ) : null}
+
+                {routeLensVisible ? (
+                  <div className="home-network-card">
+                    <div className="home-network-card__head">
+                      <span className="section-eyebrow">
+                        {routeLensNetworkLabel}
+                      </span>
+                      <span
+                        className={`home-whitelist-pill home-whitelist-pill--${routeLensWhitelistTone}`}
+                      >
+                        {routeLensWhitelistLabel}
+                      </span>
+                    </div>
+
+                    <div
+                      className={`home-network-card__grid ${
+                        selectedAccessMode === "yandex-edge" &&
+                        routeLensOriginDisplay &&
+                        routeLensTunnelDisplay
+                          ? ""
+                          : "home-network-card__grid--single"
+                      }`}
+                    >
+                      {routeLensOriginDisplay ? (
+                        <div className="home-network-hop">
+                          <span>{t("routeLensOrigin")}</span>
+                          <strong>{routeLensOriginDisplay}</strong>
+                          <p>
+                            {routeLensOrigin.flag
+                              ? `${routeLensOrigin.flag} ${routeLensOrigin.country}`
+                              : routeLensOrigin.country}
+                          </p>
+                          {routeLensOrigin.host &&
+                          routeLensOrigin.host !== routeLensOriginDisplay ? (
+                            <code>{routeLensOrigin.host}</code>
+                          ) : null}
+                        </div>
+                      ) : null}
+
+                      {selectedAccessMode === "yandex-edge" &&
+                      routeLensTunnelDisplay ? (
+                        <div className="home-network-hop">
+                          <span>{t("routeLensTunnel")}</span>
+                          <strong>{routeLensTunnelDisplay}</strong>
+                          <p>
+                            {routeLensTunnel.flag
+                              ? `${routeLensTunnel.flag} ${routeLensTunnel.country}`
+                              : routeLensTunnel.country}
+                          </p>
+                          {routeLensTunnel.host &&
+                          routeLensTunnel.host !== routeLensTunnelDisplay ? (
+                            <code>{routeLensTunnel.host}</code>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+
+                    {routeLensNote ? (
+                      <p className="home-network-card__note">{routeLensNote}</p>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
 
               <div className="home-divider" />
@@ -3052,21 +3294,12 @@ export function ControlCenter() {
                   <strong>{t("importProfile")}</strong>
                 </div>
 
-                <label className="input-field input-span input-field--compact">
-                  <span>{t("importProfile")}</span>
-                  <input
-                    value={importShareCode}
-                    onChange={(event) => setImportShareCode(event.target.value)}
-                    placeholder={t("importPlaceholder")}
-                  />
-                </label>
-
                 <div className="invite-home__actions">
                   <button
                     className="ghost"
                     type="button"
-                    onClick={handleImportProfile}
-                    disabled={isPending || !importShareCode.trim()}
+                    onClick={handleImportProfileFromClipboard}
+                    disabled={isPending}
                   >
                     {t("importProfile")}
                   </button>
@@ -4554,6 +4787,37 @@ export function ControlCenter() {
               {inviteFileNotice ? (
                 <p className="status-banner status-success">{inviteFileNotice}</p>
               ) : null}
+
+              <div className="command-card command-card--compact">
+                <strong>{t("manualImportTitle")}</strong>
+                <p className="compact-note">{t("importProfileIntro")}</p>
+                <label className="input-field input-span input-field--compact">
+                  <span>{t("manualImportTitle")}</span>
+                  <input
+                    value={importShareCode}
+                    onChange={(event) => setImportShareCode(event.target.value)}
+                    placeholder={t("importPlaceholder")}
+                  />
+                </label>
+                <div className="sheet-actions">
+                  <button
+                    className="ghost"
+                    type="button"
+                    onClick={handleImportProfile}
+                    disabled={isPending || !importShareCode.trim()}
+                  >
+                    {t("importProfile")}
+                  </button>
+                  <button
+                    className="ghost"
+                    type="button"
+                    onClick={handleOpenImportProfileFile}
+                    disabled={isPending}
+                  >
+                    {t("importProfileFile")}
+                  </button>
+                </div>
+              </div>
 
               {exportableInviteProfile?.shareCode ? (
                 <div className="command-card command-card--compact">

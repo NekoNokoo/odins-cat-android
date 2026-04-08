@@ -229,6 +229,52 @@ export interface InviteFileShareResult {
   contentUri?: string;
 }
 
+export type MobileNetworkType =
+  | "cellular"
+  | "wifi"
+  | "ethernet"
+  | "other"
+  | "unknown";
+
+export type WhitelistRuntimeStatus = "active" | "inactive" | "unknown";
+
+export interface MobileNetworkProbeResult {
+  url: string;
+  ok: boolean;
+  httpStatus?: number;
+  error?: string;
+  checkedAt?: string;
+}
+
+export interface MobileNetworkEndpoint {
+  host: string;
+  ip?: string;
+  countryCode?: string;
+  country?: string;
+  error?: string;
+}
+
+export interface MobileNetworkLensRequest {
+  originHost: string;
+  tunnelHost?: string;
+  cellularOnly?: boolean;
+}
+
+export interface MobileNetworkLensResult {
+  available: boolean;
+  checkedAt: string;
+  networkType: MobileNetworkType;
+  interfaceName?: string;
+  isCellular: boolean;
+  whitelistStatus: WhitelistRuntimeStatus;
+  note?: string;
+  yandexProbe?: MobileNetworkProbeResult;
+  googleProbe?: MobileNetworkProbeResult;
+  origin?: MobileNetworkEndpoint;
+  tunnel?: MobileNetworkEndpoint;
+  error?: string;
+}
+
 export interface LocalTunnelStartRequest {
   server: ServerDraft;
   secret: string;

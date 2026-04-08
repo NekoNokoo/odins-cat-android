@@ -252,7 +252,7 @@ func buildStagedFallbacks(realityPort int, realityPublicKey, realityShortID, rea
 		},
 		"realityRelayOwnerEgress": map[string]any{
 			"status":          "ready",
-			"ownerEgressPort": realityFallbackMinPort,
+			"ownerEgressPort": realityPort,
 			"subscriptionUrl": relayAutoselectDefaultURL,
 			"sourceLabel":     relayAutoselectDefaultSourceLabel,
 			"description":     "Experimental relay-assisted REALITY mode. The client picks a curated external REALITY relay first, then moves egress back to your Odin One server.",

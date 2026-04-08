@@ -62,6 +62,23 @@ const dictionaries = {
       "Точного IP в списке нет, но он входит в разрешённый CIDR.",
     whitelistResultMissing:
       "В текущих ipwhitelist.txt и cidrwhitelist.txt совпадений не найдено.",
+    whitelistCatActive: "Белые списки сейчас включены на мобильной сети.",
+    whitelistCatInactive: "Белые списки сейчас не обнаружены на мобильной сети.",
+    whitelistCatUnknown:
+      "Статус белых списков пока неизвестен. Проверка ждёт мобильную сеть.",
+    whitelistStateActive: "WHITE LIST ON",
+    whitelistStateInactive: "WHITE LIST OFF",
+    whitelistStateUnknown: "WHITE LIST ?",
+    whitelistProbeCellularOnly:
+      "Проверка белых списков работает только через мобильную сеть вне VPN.",
+    routeLensOrigin: "FOREIGN SERVER",
+    routeLensTunnel: "TUNNEL HOP",
+    routeLensUnknownCountry: "Страна не определена",
+    routeLensNetworkCellular: "4G / LTE",
+    routeLensNetworkWifi: "WI-FI",
+    routeLensNetworkEthernet: "ETHERNET",
+    routeLensNetworkOther: "NETWORK",
+    routeLensNetworkUnknown: "NETWORK ?",
     serverInput: "Данные сервера",
     remoteNode: "Удалённый узел",
     host: "Хост",
@@ -245,9 +262,16 @@ const dictionaries = {
     importProfile: "Импортировать ключ",
     importProfileFile: "Импортировать файлом",
     importedProfileFile: "Импортирован файл",
+    importClipboardUnavailable:
+      "Буфер обмена недоступен. Откройте ПОДЕЛИТЬСЯ и вставьте ключ вручную.",
+    importClipboardEmpty:
+      "В буфере обмена сейчас нет ключа подключения.",
+    importClipboardInvalid:
+      "В буфере обмена не найден корректный ключ Odin One.",
     importProfileIntro:
       "Вставьте share code или raw JSON, либо выберите файл invite-профиля, чтобы сохранить его локально как импортированное подключение.",
     importPlaceholder: "odin1:...",
+    manualImportTitle: "Вставить вручную",
     importedProfile: "Импортированное подключение",
     imported: "Импортирован",
     importedAt: "Импортировано",
@@ -506,6 +530,24 @@ const dictionaries = {
       "The exact IP is not listed, but it is inside an allowed CIDR.",
     whitelistResultMissing:
       "No match was found in the current ipwhitelist.txt or cidrwhitelist.txt.",
+    whitelistCatActive: "A mobile-network whitelist is currently active.",
+    whitelistCatInactive:
+      "No mobile-network whitelist is currently detected.",
+    whitelistCatUnknown:
+      "The whitelist state is still unknown. Waiting for a mobile network probe.",
+    whitelistStateActive: "WHITE LIST ON",
+    whitelistStateInactive: "WHITE LIST OFF",
+    whitelistStateUnknown: "WHITE LIST ?",
+    whitelistProbeCellularOnly:
+      "Whitelist detection only runs over the mobile network outside the VPN.",
+    routeLensOrigin: "FOREIGN SERVER",
+    routeLensTunnel: "TUNNEL HOP",
+    routeLensUnknownCountry: "Country unavailable",
+    routeLensNetworkCellular: "4G / LTE",
+    routeLensNetworkWifi: "WI-FI",
+    routeLensNetworkEthernet: "ETHERNET",
+    routeLensNetworkOther: "NETWORK",
+    routeLensNetworkUnknown: "NETWORK ?",
     serverInput: "Server Input",
     remoteNode: "Remote node",
     host: "Host",
@@ -689,9 +731,16 @@ const dictionaries = {
     importProfile: "Import key",
     importProfileFile: "Import file",
     importedProfileFile: "Imported file",
+    importClipboardUnavailable:
+      "Clipboard access is unavailable. Open SHARE and paste the key manually.",
+    importClipboardEmpty:
+      "There is no connection key in the clipboard right now.",
+    importClipboardInvalid:
+      "The clipboard does not contain a valid Odin One key.",
     importProfileIntro:
       "Paste a share code or raw JSON, or pick an invite-profile file, to save it locally as an imported connection.",
     importPlaceholder: "odin1:...",
+    manualImportTitle: "Paste manually",
     importedProfile: "Imported connection",
     imported: "Imported",
     importedAt: "Imported at",
