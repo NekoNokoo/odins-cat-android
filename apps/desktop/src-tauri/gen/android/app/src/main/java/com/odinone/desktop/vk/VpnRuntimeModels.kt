@@ -76,6 +76,7 @@ data class TunnelSnapshot(
     val whitelistHintTag: String? = null,
     val startSource: String? = null,
     val profileHash: String? = null,
+    val excludePackages: List<String> = emptyList(),
     val configMode: String? = null,
     val activeFeatures: List<String> = emptyList(),
     val alwaysOnEnabled: Boolean? = null,
@@ -142,6 +143,7 @@ data class TunnelSnapshot(
         obj.put("whitelistHintTag", whitelistHintTag)
         obj.put("startSource", startSource)
         obj.put("profileHash", profileHash)
+        obj.put("excludePackages", JSArray(excludePackages))
         obj.put("configMode", configMode)
         obj.put("activeFeatures", JSArray(activeFeatures))
         obj.put("alwaysOnEnabled", alwaysOnEnabled)
@@ -241,6 +243,7 @@ data class TunnelSnapshot(
                 whitelistHintTag = obj.getString("whitelistHintTag", null),
                 startSource = obj.getString("startSource", null),
                 profileHash = obj.getString("profileHash", null),
+                excludePackages = normalizeSplitTunnelPackages(parseStringArray(obj, "excludePackages")),
                 configMode = obj.getString("configMode", null),
                 activeFeatures = parseStringArray(obj, "activeFeatures"),
                 alwaysOnEnabled = optBooleanOrNull(obj, "alwaysOnEnabled"),
@@ -1016,6 +1019,8 @@ fun matchesTunnelRequest(
             protocol = args.getString("protocol", null),
             activationState = args.getString("activationState", null),
         ) &&
+        normalizeSplitTunnelPackages(snapshot.excludePackages) ==
+            normalizeSplitTunnelPackages(parseStringArray(args, "excludePackages")) &&
         normalizeTunnelArg(snapshot.vkLink) == normalizeTunnelArg(args.getString("vkLink", null))
 
 fun classifySystemRestoreAvailability(
@@ -1139,6 +1144,7 @@ fun startSnapshotFromArgs(args: JSObject, logLine: String): TunnelSnapshot =
             whitelistHintTag = args.getString("whitelistHintTag", null),
             startSource = args.getString("startSource", null),
             profileHash = args.getString("profileHash", null),
+            excludePackages = normalizeSplitTunnelPackages(parseStringArray(args, "excludePackages")),
             configMode = args.getString("configMode", null),
             sessionId = sessionMarker,
             sessionStartedAt = sessionMarker,

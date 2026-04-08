@@ -340,7 +340,16 @@ pub(crate) struct LocalTunnelStartPayload {
     #[serde(default)]
     vk_link: String,
     #[serde(default)]
+    exclude_packages: Vec<String>,
+    #[serde(default)]
     owner_runtime_lab: Option<OwnerRuntimeLabPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SplitTunnelSelectionPayload {
+    #[serde(default)]
+    exclude_packages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1255,6 +1264,30 @@ pub async fn mobile_inspect_network_lens(
 }
 
 #[tauri::command]
+pub async fn mobile_list_installed_apps(app: AppHandle) -> Result<Value, String> {
+    android_vpn::list_installed_apps(&app).await
+}
+
+#[tauri::command]
+pub async fn mobile_get_split_tunnel_selection(app: AppHandle) -> Result<Value, String> {
+    android_vpn::get_split_tunnel_selection(&app).await
+}
+
+#[tauri::command]
+pub async fn mobile_set_split_tunnel_selection(
+    app: AppHandle,
+    payload: SplitTunnelSelectionPayload,
+) -> Result<Value, String> {
+    android_vpn::set_split_tunnel_selection(
+        &app,
+        json!({
+            "excludePackages": normalize_package_list(&payload.exclude_packages),
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
 pub fn mobile_get_owner_profile(app: AppHandle, host: String) -> Result<Value, String> {
     if host.trim().is_empty() {
         return Ok(json!({
@@ -1489,6 +1522,9 @@ pub fn register_mobile_commands(builder: tauri::Builder<tauri::Wry>) -> tauri::B
             mobile_get_local_tunnel_status,
             mobile_run_local_tunnel_test,
             mobile_inspect_network_lens,
+            mobile_list_installed_apps,
+            mobile_get_split_tunnel_selection,
+            mobile_set_split_tunnel_selection,
             mobile_get_owner_profile,
             mobile_get_imported_profile,
             mobile_import_profile,
@@ -1557,7 +1593,7 @@ fn bundled_whitelist_source() -> Result<ParsedWhitelistFiles, String> {
 
 async fn fetch_remote_whitelist_files() -> Result<(String, String, String), String> {
     let client = reqwest::Client::builder()
-        .user_agent("odin-one-mobile-bridge/0.5.2")
+        .user_agent("odin-one-mobile-bridge/0.6.0")
         .build()
         .map_err(|err| format!("build whitelist HTTP client: {err}"))?;
 
@@ -4081,6 +4117,31 @@ fn fallback_port_from_value(raw: Option<&Value>, key: &str, fallback: u16) -> u1
         .unwrap_or(fallback)
 }
 
+fn normalize_package_list(packages: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for package in packages {
+        let value = package.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if seen.insert(value.to_string()) {
+            normalized.push(value.to_string());
+        }
+    }
+    normalized
+}
+
+fn apply_exclude_packages_to_request(request: &mut Value, exclude_packages: &[String]) {
+    if let Some(object) = request.as_object_mut() {
+        if exclude_packages.is_empty() {
+            object.remove("excludePackages");
+        } else {
+            object.insert("excludePackages".to_string(), json!(exclude_packages));
+        }
+    }
+}
+
 fn resolve_android_runtime_request(
     app: &AppHandle,
     payload: &LocalTunnelStartPayload,
@@ -4090,6 +4151,7 @@ fn resolve_android_runtime_request(
         return Err("host is required".to_string());
     }
 
+    let exclude_packages = normalize_package_list(&payload.exclude_packages);
     let transport = requested_transport(&payload.server);
     let protocol = requested_protocol(&payload.server);
     let engine = requested_engine(transport, protocol);
@@ -4114,7 +4176,7 @@ fn resolve_android_runtime_request(
                 &raw_json,
                 requested_vk_turn_stream_count(&payload.server),
             )?;
-            return Ok(json!({
+            let mut request = json!({
                 "serverHost": host,
                 "transport": transport,
                 "engine": engine,
@@ -4124,7 +4186,9 @@ fn resolve_android_runtime_request(
                 "profileJson": raw_json,
                 "profileSource": "imported",
                 "useRealityStartEndpoint": use_reality_start_endpoint
-            }));
+            });
+            apply_exclude_packages_to_request(&mut request, &exclude_packages);
+            return Ok(request);
         }
     }
 
@@ -4157,7 +4221,7 @@ fn resolve_android_runtime_request(
         ));
     }
 
-    Ok(json!({
+    let mut request = json!({
         "serverHost": host,
         "transport": transport,
         "engine": engine,
@@ -4167,7 +4231,9 @@ fn resolve_android_runtime_request(
         "profileJson": raw_json,
         "profileSource": "owner",
         "useRealityStartEndpoint": use_reality_start_endpoint
-    }))
+    });
+    apply_exclude_packages_to_request(&mut request, &exclude_packages);
+    Ok(request)
 }
 
 fn requested_owner_runtime_lab(

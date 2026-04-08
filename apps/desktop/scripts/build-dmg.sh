@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_PATH="$ROOT_DIR/src-tauri/target/release/bundle/macos/Odin One VK.app"
 DMG_DIR="$ROOT_DIR/src-tauri/target/release/bundle/dmg"
-DMG_PATH="$DMG_DIR/Odin One VK_0.1.1_aarch64.dmg"
+DMG_PATH="$DMG_DIR/Odin One VK_0.6.0_aarch64.dmg"
 STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/odin-one-dmg.XXXXXX")"
 
 cleanup() {

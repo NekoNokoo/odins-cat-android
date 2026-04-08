@@ -3,14 +3,15 @@ import type {
   DeployStage,
   InviteFileExportResult,
   InviteFileShareResult,
+  InstalledAppInfo,
   InviteProfile,
+  LocalTunnelStartRequest,
   LocalTunnelState,
   MobileNetworkLensRequest,
   MobileNetworkLensResult,
-  OwnerRuntimeLabRequest,
   OwnerAccessProfile,
   ProvisionRequest,
-  ServerDraft,
+  SplitTunnelSelection,
   SystemProxyState,
   ValidationResponse,
   WhitelistLookupResult
@@ -29,11 +30,6 @@ export type CoreApiResult<T> = {
   ok: boolean;
   status: number;
   data: T;
-};
-
-type LocalTunnelStartRequest = ProvisionRequest & {
-  vkLink: string;
-  ownerRuntimeLab?: OwnerRuntimeLabRequest;
 };
 
 type SystemProxyEnableRequest = {
@@ -399,6 +395,45 @@ export const coreApi = {
         whitelistStatus: "unknown",
         note: "Mobile whitelist detection is currently available only through the Android native bridge."
       } satisfies MobileNetworkLensResult
+    );
+  },
+
+  async listInstalledApps() {
+    if (await prefersAndroidNativeBridge()) {
+      return invokeNative<{ apps: InstalledAppInfo[] }>("mobile_list_installed_apps");
+    }
+    return unsupportedResult(
+      501,
+      {
+        apps: [],
+        error: "Installed app listing is currently available only through the Android native bridge."
+      } as { apps: InstalledAppInfo[]; error: string }
+    );
+  },
+
+  async getSplitTunnelSelection() {
+    if (await prefersAndroidNativeBridge()) {
+      return invokeNative<SplitTunnelSelection>("mobile_get_split_tunnel_selection");
+    }
+    return unsupportedResult(
+      501,
+      {
+        excludePackages: [],
+        error: "Split tunnel selection is currently available only through the Android native bridge."
+      } as SplitTunnelSelection & { error: string }
+    );
+  },
+
+  async setSplitTunnelSelection(payload: SplitTunnelSelection) {
+    if (await prefersAndroidNativeBridge()) {
+      return invokeNative<SplitTunnelSelection>("mobile_set_split_tunnel_selection", { payload });
+    }
+    return unsupportedResult(
+      501,
+      {
+        excludePackages: payload.excludePackages,
+        error: "Split tunnel selection is currently available only through the Android native bridge."
+      } as SplitTunnelSelection & { error: string }
     );
   },
 

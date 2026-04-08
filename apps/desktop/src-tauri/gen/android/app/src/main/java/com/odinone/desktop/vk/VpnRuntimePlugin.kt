@@ -12,10 +12,12 @@ import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
+import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import java.io.File
 import kotlin.concurrent.thread
+import org.json.JSONArray
 
 @InvokeArg
 class StartTunnelArgs {
@@ -24,6 +26,7 @@ class StartTunnelArgs {
     lateinit var engine: String
     lateinit var protocol: String
     var vkLink: String? = null
+    var excludePackages: Array<String>? = null
     var profileJson: String? = null
     var profileSource: String? = null
     var useRealityStartEndpoint: Boolean = false
@@ -39,6 +42,11 @@ class NetworkLensArgs {
     var originHost: String = ""
     var tunnelHost: String? = null
     var cellularOnly: Boolean = true
+}
+
+@InvokeArg
+class SplitTunnelSelectionArgs {
+    var excludePackages: Array<String> = emptyArray()
 }
 
 @InvokeArg
@@ -66,15 +74,18 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
         argsJson.put("engine", args.engine)
         argsJson.put("protocol", args.protocol)
         argsJson.put("vkLink", args.vkLink)
+        args.excludePackages?.let { argsJson.put("excludePackages", JSArray(normalizeSplitTunnelPackages(it.toList()))) }
         argsJson.put("profileJson", args.profileJson)
         argsJson.put("profileSource", args.profileSource)
         argsJson.put("useRealityStartEndpoint", args.useRealityStartEndpoint)
         val normalizedArgs =
             VpnRuntimeLibbox.normalizeRuntimeArgs(
                 activity,
-                mergePersistedHiddenRuntimeOverrides(
-                    previousRequest = VpnRuntimeRestoreStore.readStartRequest(activity),
-                    incomingRequest = argsJson,
+                mergePersistedSplitTunnelSelection(
+                    mergePersistedHiddenRuntimeOverrides(
+                        previousRequest = VpnRuntimeRestoreStore.readStartRequest(activity),
+                        incomingRequest = argsJson,
+                    ),
                 ),
             )
         normalizedArgs.put("startSource", "app")
@@ -242,6 +253,32 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
+    fun listInstalledApps(invoke: Invoke) {
+        invoke.resolve(
+            JSObject().apply {
+                put(
+                    "apps",
+                    JSArray(
+                        listInstalledApps(activity).map { app -> app.toJsObject() },
+                    ),
+                )
+            },
+        )
+    }
+
+    @Command
+    fun getSplitTunnelSelection(invoke: Invoke) {
+        invoke.resolve(SplitTunnelSelectionStore.read(activity).toJsObject())
+    }
+
+    @Command
+    fun setSplitTunnelSelection(invoke: Invoke) {
+        val args = invoke.parseArgs(SplitTunnelSelectionArgs::class.java)
+        val stored = SplitTunnelSelectionStore.write(activity, args.excludePackages.toList())
+        invoke.resolve(stored.toJsObject())
+    }
+
+    @Command
     fun shareInviteFile(invoke: Invoke) {
         val args = invoke.parseArgs(ShareInviteFileArgs::class.java)
         if (args.contents.isBlank()) {
@@ -330,9 +367,11 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
         val normalizedArgs =
             VpnRuntimeLibbox.normalizeRuntimeArgs(
                 activity,
-                mergePersistedHiddenRuntimeOverrides(
-                    previousRequest = VpnRuntimeRestoreStore.readStartRequest(activity),
-                    incomingRequest = args,
+                mergePersistedSplitTunnelSelection(
+                    mergePersistedHiddenRuntimeOverrides(
+                        previousRequest = VpnRuntimeRestoreStore.readStartRequest(activity),
+                        incomingRequest = args,
+                    ),
                 ),
             )
         val current = VpnRuntimeStore.snapshot(activity)
@@ -399,4 +438,27 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
                 activity.startService(intent)
             }
         }.exceptionOrNull()
+
+    private fun mergePersistedSplitTunnelSelection(request: JSObject): JSObject =
+        JSObject(request.toString()).apply {
+            val incoming = optJSONArray("excludePackages")?.let(::parseRequestedPackages).orEmpty()
+            if (incoming.isNotEmpty()) {
+                put("excludePackages", JSArray(normalizeSplitTunnelPackages(incoming)))
+                return@apply
+            }
+            val persisted = SplitTunnelSelectionStore.read(activity).excludePackages
+            if (persisted.isNotEmpty()) {
+                put("excludePackages", JSArray(persisted))
+            }
+        }
+
+    private fun parseRequestedPackages(array: JSONArray): List<String> =
+        buildList(array.length()) {
+            for (index in 0 until array.length()) {
+                val value = array.optString(index, "").trim()
+                if (value.isNotEmpty()) {
+                    add(value)
+                }
+            }
+        }
 }

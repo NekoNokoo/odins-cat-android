@@ -278,10 +278,22 @@ export interface MobileNetworkLensResult {
   error?: string;
 }
 
+export interface InstalledAppInfo {
+  packageName: string;
+  appName: string;
+  systemApp?: boolean;
+}
+
+export interface SplitTunnelSelection {
+  excludePackages: string[];
+  updatedAt?: string;
+}
+
 export interface LocalTunnelStartRequest {
   server: ServerDraft;
   secret: string;
   vkLink: string;
+  excludePackages?: string[];
   ownerRuntimeLab?: OwnerRuntimeLabRequest;
 }
 
@@ -358,6 +370,7 @@ export interface LocalTunnelState {
   whitelistHintTag?: string;
   startSource?: string;
   profileHash?: string;
+  excludePackages?: string[];
   configMode?: string;
   activeFeatures?: string[];
   alwaysOnEnabled?: boolean;

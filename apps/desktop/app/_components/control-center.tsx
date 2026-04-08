@@ -2,6 +2,7 @@
 
 import {
   useEffect,
+  useEffectEvent,
   useRef,
   useState,
   useTransition,
@@ -12,6 +13,7 @@ import type {
   DeploymentState,
   DeployStage,
   EdgeAttachDraft,
+  InstalledAppInfo,
   InviteProfile,
   LocalTunnelState,
   MobileNetworkEndpoint,
@@ -21,6 +23,7 @@ import type {
   ProtocolPackEntry,
   ProvisionFlow,
   ServerDraft,
+  SplitTunnelSelection,
   SystemProxyState,
   ValidationResponse,
   WhitelistLookupResult,
@@ -43,6 +46,7 @@ type WorkspaceTab = "server" | "access" | "tunnel";
 type AccessTab = "key" | "share" | "import";
 type MobileSheet =
   | "server"
+  | "apps"
   | "mode-picker"
   | "whitelist"
   | "logs"
@@ -524,6 +528,27 @@ const countryFlagFromCode = (countryCode?: string | null) => {
   );
 };
 
+const normalizePackageNames = (packages?: string[] | null) =>
+  Array.from(
+    new Set(
+      (packages ?? [])
+        .map((value) => value.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ).sort((left, right) => left.localeCompare(right));
+
+const samePackageSelection = (
+  left?: string[] | null,
+  right?: string[] | null,
+) => {
+  const normalizedLeft = normalizePackageNames(left);
+  const normalizedRight = normalizePackageNames(right);
+  if (normalizedLeft.length !== normalizedRight.length) {
+    return false;
+  }
+  return normalizedLeft.every((value, index) => value === normalizedRight[index]);
+};
+
 const looksLikeInvitePayload = (value: string) => {
   const trimmed = value.trim();
   return (
@@ -576,6 +601,14 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const importProfileFileInputRef = useRef<HTMLInputElement | null>(null);
   const [localTunnel, setLocalTunnel] = useState<LocalTunnelState | null>(null);
   const [systemProxy, setSystemProxy] = useState<SystemProxyState | null>(null);
+  const [installedApps, setInstalledApps] = useState<InstalledAppInfo[]>([]);
+  const [splitTunnelSelection, setSplitTunnelSelection] =
+    useState<SplitTunnelSelection>({ excludePackages: [] });
+  const [splitTunnelAppsLoaded, setSplitTunnelAppsLoaded] = useState(false);
+  const [splitTunnelAppsLoading, setSplitTunnelAppsLoading] = useState(false);
+  const [splitTunnelSaving, setSplitTunnelSaving] = useState(false);
+  const [splitTunnelError, setSplitTunnelError] = useState<string | null>(null);
+  const [splitTunnelSearch, setSplitTunnelSearch] = useState("");
   const [ownerProfile, setOwnerProfile] = useState<OwnerAccessProfile | null>(
     null,
   );
@@ -606,6 +639,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const curlCommand = localTunnel?.socksAddress
     ? `curl --socks5-hostname ${localTunnel.socksAddress} -I https://example.com`
     : "";
+  const splitTunnelExcludePackages = normalizePackageNames(
+    splitTunnelSelection.excludePackages,
+  );
   const requiresVKLink = selectedAccessMode === "vk-relay";
   const resolvedDraftHost =
     draft.host.trim() ||
@@ -640,6 +676,16 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     );
   const runtimeTunnelActive =
     localTunnel?.status === "running" || androidInterfaceEstablished;
+  const activeTunnelExcludePackages = normalizePackageNames(
+    localTunnel?.excludePackages,
+  );
+  const splitTunnelReconnectRequired =
+    isAndroidClient &&
+    runtimeTunnelActive &&
+    !samePackageSelection(
+      activeTunnelExcludePackages,
+      splitTunnelExcludePackages,
+    );
   const vpnModeActive =
     runtimeTunnelActive &&
     (isAndroidClient || isAndroidVpnRuntime || systemProxyActive);
@@ -1200,6 +1246,162 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const ownerRuntimeLabDisabledReason = ownerRuntimeLabRequiresOwnerProfile
     ? t("ownerLabNeedsOwnerProfile")
     : null;
+  const splitTunnelSelectedSet = new Set(splitTunnelExcludePackages);
+  const splitTunnelSearchQuery = splitTunnelSearch.trim().toLowerCase();
+  const splitTunnelVisibleApps = [...installedApps]
+    .filter((app) => {
+      if (!splitTunnelSearchQuery) {
+        return true;
+      }
+      const packageName = app.packageName.trim().toLowerCase();
+      const appName = app.appName.trim().toLowerCase();
+      return (
+        appName.includes(splitTunnelSearchQuery) ||
+        packageName.includes(splitTunnelSearchQuery)
+      );
+    })
+    .sort((left, right) => {
+      const leftSelected = splitTunnelSelectedSet.has(
+        left.packageName.trim().toLowerCase(),
+      );
+      const rightSelected = splitTunnelSelectedSet.has(
+        right.packageName.trim().toLowerCase(),
+      );
+      if (leftSelected !== rightSelected) {
+        return leftSelected ? -1 : 1;
+      }
+      if ((left.systemApp ?? false) !== (right.systemApp ?? false)) {
+        return left.systemApp ? 1 : -1;
+      }
+      return (
+        left.appName.localeCompare(right.appName, locale) ||
+        left.packageName.localeCompare(right.packageName)
+      );
+    });
+  const splitTunnelStatusLabel =
+    splitTunnelExcludePackages.length > 0
+      ? `${t("splitTunnelSelectedApps")}: ${splitTunnelExcludePackages.length}`
+      : t("splitTunnelStatusOff");
+
+  const loadSplitTunnelSelection = async () => {
+    if (!isAndroidClient) {
+      return;
+    }
+
+    try {
+      const res = await coreApi.getSplitTunnelSelection();
+      const data = res.data;
+      setSplitTunnelSelection({
+        excludePackages: normalizePackageNames(data.excludePackages),
+        ...(data.updatedAt ? { updatedAt: data.updatedAt } : {}),
+      });
+      if (!res.ok) {
+        const nextError = (data as { error?: string }).error ?? t("unknownError");
+        setSplitTunnelError(nextError);
+      }
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error
+          ? requestError.message
+          : t("unknownError");
+      setSplitTunnelError(message);
+    }
+  };
+
+  const loadInstalledApps = async () => {
+    if (!isAndroidClient) {
+      return;
+    }
+
+    setSplitTunnelAppsLoading(true);
+    setSplitTunnelError(null);
+    try {
+      const res = await coreApi.listInstalledApps();
+      const data = res.data;
+      setInstalledApps(data.apps ?? []);
+      setSplitTunnelAppsLoaded(true);
+      if (!res.ok) {
+        throw new Error(
+          (data as { error?: string }).error ?? t("unknownError"),
+        );
+      }
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error
+          ? requestError.message
+          : t("unknownError");
+      setSplitTunnelError(message);
+    } finally {
+      setSplitTunnelAppsLoading(false);
+    }
+  };
+
+  const persistSplitTunnelSelection = async (nextPackages: string[]) => {
+    if (!isAndroidClient) {
+      return;
+    }
+
+    const previousSelection = splitTunnelSelection;
+    const normalizedPackages = normalizePackageNames(nextPackages);
+    setSplitTunnelSaving(true);
+    setSplitTunnelError(null);
+    setSplitTunnelSelection({
+      excludePackages: normalizedPackages,
+      updatedAt: previousSelection.updatedAt,
+    });
+
+    try {
+      const res = await coreApi.setSplitTunnelSelection({
+        excludePackages: normalizedPackages,
+      });
+      const data = res.data;
+      setSplitTunnelSelection({
+        excludePackages: normalizePackageNames(data.excludePackages),
+        ...(data.updatedAt ? { updatedAt: data.updatedAt } : {}),
+      });
+      if (!res.ok) {
+        throw new Error(
+          (data as { error?: string }).error ?? t("unknownError"),
+        );
+      }
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error
+          ? requestError.message
+          : t("unknownError");
+      setSplitTunnelSelection(previousSelection);
+      setSplitTunnelError(message);
+    } finally {
+      setSplitTunnelSaving(false);
+    }
+  };
+
+  const handleToggleSplitTunnelPackage = (packageName: string) => {
+    if (splitTunnelSaving) {
+      return;
+    }
+    const normalizedPackage = packageName.trim().toLowerCase();
+    if (!normalizedPackage) {
+      return;
+    }
+    const nextPackages = splitTunnelSelectedSet.has(normalizedPackage)
+      ? splitTunnelExcludePackages.filter((value) => value !== normalizedPackage)
+      : [...splitTunnelExcludePackages, normalizedPackage];
+    void persistSplitTunnelSelection(nextPackages);
+  };
+
+  const handleClearSplitTunnelSelection = () => {
+    if (splitTunnelSaving || splitTunnelExcludePackages.length === 0) {
+      return;
+    }
+    void persistSplitTunnelSelection([]);
+  };
+  const loadSplitTunnelSelectionEffect = useEffectEvent(() => {
+    void loadSplitTunnelSelection();
+  });
+  const loadInstalledAppsEffect = useEffectEvent(() => {
+    void loadInstalledApps();
+  });
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1398,6 +1600,30 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     pollLocalTunnel(true);
     void refreshMobileNetworkLens();
   }, []);
+
+  useEffect(() => {
+    if (!isAndroidClient) {
+      return;
+    }
+    loadSplitTunnelSelectionEffect();
+  }, [isAndroidClient]);
+
+  useEffect(() => {
+    if (
+      !isAndroidClient ||
+      activeSheet !== "apps" ||
+      splitTunnelAppsLoaded ||
+      splitTunnelAppsLoading
+    ) {
+      return;
+    }
+    loadInstalledAppsEffect();
+  }, [
+    activeSheet,
+    isAndroidClient,
+    splitTunnelAppsLoaded,
+    splitTunnelAppsLoading,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !isAndroidClient) {
@@ -2088,6 +2314,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       serverDraft,
       useRealityStartEndpoint,
       usingImportedProfile,
+      excludePackages: splitTunnelExcludePackages,
       ownerRuntimeLabRequest,
     };
   };
@@ -2119,6 +2346,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     tunnel: LocalTunnelState | null,
     serverDraft: ServerDraft,
     ownerRuntimeLabRequest?: OwnerRuntimeLabRequest,
+    excludePackages: string[] = splitTunnelExcludePackages,
   ) => {
     if (!tunnel || tunnel.status !== "running" || !tunnel.socksAddress) {
       return false;
@@ -2155,6 +2383,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       tunnel.activationState &&
       tunnel.activationState !== expectedRuntimeIdentity.activationState
     ) {
+      return false;
+    }
+    if (!samePackageSelection(tunnel.excludePackages, excludePackages)) {
       return false;
     }
     return true;
@@ -2259,6 +2490,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const waitForTunnelIdentity = async (
     serverDraft: ServerDraft,
     ownerRuntimeLabRequest?: OwnerRuntimeLabRequest,
+    excludePackages: string[] = splitTunnelExcludePackages,
     attempts = 18,
     delayMs = 700,
   ) => {
@@ -2272,6 +2504,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         tunnelData,
         serverDraft,
         ownerRuntimeLabRequest,
+        excludePackages,
       )
     ) {
       return tunnelData;
@@ -2297,6 +2530,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           tunnelData,
           serverDraft,
           ownerRuntimeLabRequest,
+          excludePackages,
         )
       ) {
         return tunnelData;
@@ -2342,6 +2576,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           serverDraft,
           useRealityStartEndpoint,
           usingImportedProfile,
+          excludePackages,
           ownerRuntimeLabRequest,
         } = buildTunnelStartRequest(draft, ownerRuntimeLab.mode);
         let tunnelData = localTunnel;
@@ -2353,6 +2588,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             tunnelData,
             serverDraft,
             ownerRuntimeLabRequest,
+            excludePackages,
           )
         ) {
           const stopRes = await coreApi.stopLocalTunnel();
@@ -2367,6 +2603,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             tunnelData,
             serverDraft,
             ownerRuntimeLabRequest,
+            excludePackages,
           )
         ) {
           const startApi =
@@ -2378,6 +2615,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
               server: serverDraft,
               secret: usingImportedProfile ? "" : secret,
               vkLink,
+              ...(isAndroidClient && excludePackages.length > 0
+                ? { excludePackages }
+                : {}),
               ...(ownerRuntimeLabRequest
                 ? { ownerRuntimeLab: ownerRuntimeLabRequest }
                 : {}),
@@ -2402,6 +2642,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         tunnelData = await waitForTunnelIdentity(
           serverDraft,
           ownerRuntimeLabRequest,
+          excludePackages,
         );
         setLocalTunnel(tunnelData ?? localTunnel);
 
@@ -2636,6 +2877,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           serverDraft,
           useRealityStartEndpoint,
           usingImportedProfile,
+          excludePackages,
           ownerRuntimeLabRequest,
         } = buildCurrentTunnelStartRequest();
         if (
@@ -2647,6 +2889,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             localTunnel,
             serverDraft,
             ownerRuntimeLabRequest,
+            excludePackages,
           )
         ) {
           const stopRes = await coreApi.stopLocalTunnel();
@@ -2664,6 +2907,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             server: serverDraft,
             secret: usingImportedProfile ? "" : secret,
             vkLink,
+            ...(isAndroidClient && excludePackages.length > 0
+              ? { excludePackages }
+              : {}),
             ...(ownerRuntimeLabRequest
               ? { ownerRuntimeLab: ownerRuntimeLabRequest }
               : {}),
@@ -2783,6 +3029,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           serverDraft,
           useRealityStartEndpoint,
           usingImportedProfile,
+          excludePackages,
           ownerRuntimeLabRequest,
         } = buildCurrentTunnelStartRequest();
         let tunnelData = localTunnel;
@@ -2795,6 +3042,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             tunnelData,
             serverDraft,
             ownerRuntimeLabRequest,
+            excludePackages,
           )
         ) {
           const stopRes = await coreApi.stopLocalTunnel();
@@ -2808,6 +3056,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             tunnelData,
             serverDraft,
             ownerRuntimeLabRequest,
+            excludePackages,
           )
         ) {
           const startApi =
@@ -2819,6 +3068,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
               server: serverDraft,
               secret: usingImportedProfile ? "" : secret,
               vkLink,
+              ...(isAndroidClient && excludePackages.length > 0
+                ? { excludePackages }
+                : {}),
               ...(ownerRuntimeLabRequest
                 ? { ownerRuntimeLab: ownerRuntimeLabRequest }
                 : {}),
@@ -3434,7 +3686,15 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           </section>
         </div>
 
-        <nav className="mobile-dock" aria-label="Primary actions">
+        <nav
+          className={[
+            "mobile-dock",
+            isAndroidClient ? "mobile-dock--with-apps" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          aria-label="Primary actions"
+        >
           <button
             className={
               activeSheet === "server"
@@ -3450,6 +3710,21 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           >
             {t("tabServer")}
           </button>
+          {isAndroidClient ? (
+            <button
+              className={
+                activeSheet === "apps"
+                  ? "mobile-dock__button is-active"
+                  : "mobile-dock__button"
+              }
+              type="button"
+              onClick={() =>
+                setActiveSheet((current) => (current === "apps" ? null : "apps"))
+              }
+            >
+              {t("navApps")}
+            </button>
+          ) : null}
           <button
             className={
               activeSheet === "whitelist"
@@ -3998,6 +4273,159 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
               >
                 {t("reset")}
               </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {activeSheet === "apps" ? (
+        <div
+          className="sheet-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("sheetAppsTitle")}
+        >
+          <button
+            className="sheet-overlay__backdrop"
+            onClick={() => setActiveSheet(null)}
+            aria-label={t("close")}
+          />
+          <div className="sheet-panel sheet-panel--apps">
+            <div className="sheet-panel__head">
+              <div>
+                <span className="section-eyebrow">{t("navApps")}</span>
+                <h3 className="sheet-panel__title">{t("sheetAppsTitle")}</h3>
+              </div>
+              <button
+                className="ghost ghost--compact"
+                type="button"
+                onClick={() => setActiveSheet(null)}
+              >
+                {t("close")}
+              </button>
+            </div>
+
+            <div className="sheet-panel__scroll">
+              <div className="sheet-stack">
+                <section className="sheet-card">
+                  <div className="sheet-card__head">
+                    <div>
+                      <span className="section-eyebrow">
+                        {t("splitTunnelTitle")}
+                      </span>
+                      <strong>{splitTunnelStatusLabel}</strong>
+                    </div>
+                    <span className="sheet-card__badge">
+                      {splitTunnelExcludePackages.length > 0
+                        ? t("stateEnabled")
+                        : t("stateDisabled")}
+                    </span>
+                  </div>
+                  <p className="compact-note">{t("sheetAppsText")}</p>
+
+                  <div className="sheet-actions">
+                    <button
+                      className="ghost"
+                      type="button"
+                      onClick={handleClearSplitTunnelSelection}
+                      disabled={
+                        splitTunnelSaving ||
+                        splitTunnelExcludePackages.length === 0
+                      }
+                    >
+                      {t("splitTunnelClear")}
+                    </button>
+                  </div>
+                </section>
+
+                {splitTunnelReconnectRequired ? (
+                  <p className="status-banner">
+                    {t("splitTunnelReconnectNotice")}
+                  </p>
+                ) : null}
+
+                {splitTunnelError ? (
+                  <p className="status-banner status-error">
+                    {splitTunnelError}
+                  </p>
+                ) : null}
+
+                <label className="input-field input-span">
+                  <span>{t("splitTunnelSearch")}</span>
+                  <input
+                    value={splitTunnelSearch}
+                    onChange={(event) => setSplitTunnelSearch(event.target.value)}
+                    placeholder={t("splitTunnelSearchPlaceholder")}
+                  />
+                </label>
+
+                {splitTunnelAppsLoading ? (
+                  <p className="compact-note compact-note--panel">
+                    {t("splitTunnelLoadingApps")}
+                  </p>
+                ) : null}
+
+                {!splitTunnelAppsLoading &&
+                splitTunnelAppsLoaded &&
+                installedApps.length === 0 ? (
+                  <p className="compact-note compact-note--panel">
+                    {t("splitTunnelEmpty")}
+                  </p>
+                ) : null}
+
+                {!splitTunnelAppsLoading &&
+                splitTunnelAppsLoaded &&
+                installedApps.length > 0 &&
+                splitTunnelVisibleApps.length === 0 ? (
+                  <p className="compact-note compact-note--panel">
+                    {t("splitTunnelNoResults")}
+                  </p>
+                ) : null}
+
+                {splitTunnelVisibleApps.length > 0 ? (
+                  <div className="split-app-list">
+                    {splitTunnelVisibleApps.map((app) => {
+                      const normalizedPackage = app.packageName
+                        .trim()
+                        .toLowerCase();
+                      const selected =
+                        splitTunnelSelectedSet.has(normalizedPackage);
+                      return (
+                        <button
+                          key={app.packageName}
+                          className={[
+                            "split-app-card",
+                            selected ? "is-active" : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ")}
+                          type="button"
+                          onClick={() =>
+                            handleToggleSplitTunnelPackage(app.packageName)
+                          }
+                          disabled={splitTunnelSaving}
+                          aria-pressed={selected}
+                        >
+                          <div className="split-app-card__copy">
+                            <strong>{app.appName}</strong>
+                            <span>{app.packageName}</span>
+                          </div>
+                          <div className="split-app-card__meta">
+                            {app.systemApp ? (
+                              <span className="split-app-card__badge">
+                                {t("splitTunnelSystemApp")}
+                              </span>
+                            ) : null}
+                            <span className="split-app-card__toggle">
+                              {selected ? t("stateEnabled") : t("stateDisabled")}
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
             </div>
           </div>
         </div>

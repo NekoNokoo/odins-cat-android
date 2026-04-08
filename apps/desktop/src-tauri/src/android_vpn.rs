@@ -85,6 +85,21 @@ pub(crate) async fn inspect_network_lens<T: Serialize>(
     run_mobile_command(app, "inspectNetworkLens", payload).await
 }
 
+pub(crate) async fn list_installed_apps(app: &AppHandle) -> Result<Value, String> {
+    run_mobile_command(app, "listInstalledApps", ()).await
+}
+
+pub(crate) async fn get_split_tunnel_selection(app: &AppHandle) -> Result<Value, String> {
+    run_mobile_command(app, "getSplitTunnelSelection", ()).await
+}
+
+pub(crate) async fn set_split_tunnel_selection<T: Serialize>(
+    app: &AppHandle,
+    payload: T,
+) -> Result<Value, String> {
+    run_mobile_command(app, "setSplitTunnelSelection", payload).await
+}
+
 pub(crate) async fn share_invite_file<T: Serialize>(
     app: &AppHandle,
     payload: T,

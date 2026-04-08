@@ -25,11 +25,13 @@ const dictionaries = {
     tabAccess: "Доступ",
     tabTunnel: "Туннель",
     navProtocol: "Режим",
+    navApps: "Split App",
     navWhitelist: "White IP",
     navLogs: "Логи",
     navMore: "ПОДЕЛИТЬСЯ",
     sheetServerTitle: "Сервер",
     sheetProtocolTitle: "Режим",
+    sheetAppsTitle: "Split App",
     sheetWhitelistTitle: "White IP / CIDR",
     sheetLogsTitle: "Логи и тест",
     sheetMoreTitle: "ПОДЕЛИТЬСЯ",
@@ -54,6 +56,20 @@ const dictionaries = {
     whitelistUsingCache:
       "GitHub сейчас не обновился, поэтому показан сохранённый кэш списков.",
     whitelistInvalid: "Введите корректный IPv4-адрес.",
+    splitTunnelTitle: "Split tunneling",
+    sheetAppsText:
+      "Выбранные приложения идут в обход VPN напрямую. Остальной трафик продолжает идти через VPN как обычно.",
+    splitTunnelSearch: "Поиск приложений",
+    splitTunnelSearchPlaceholder: "Telegram, Chrome, com.bank.app",
+    splitTunnelSelectedApps: "Приложений в обход",
+    splitTunnelStatusOff: "Ни одно приложение не выведено из VPN.",
+    splitTunnelClear: "Очистить список",
+    splitTunnelReconnectNotice:
+      "Чтобы применить обновлённый список обхода, переподключите VPN.",
+    splitTunnelLoadingApps: "Загружаем установленные приложения...",
+    splitTunnelEmpty: "На этом устройстве не найдено установленных приложений.",
+    splitTunnelNoResults: "По этому запросу приложения не найдены.",
+    splitTunnelSystemApp: "system",
     whitelistResultExactAndCidr:
       "IP найден и в точном whitelist, и внутри разрешённого CIDR.",
     whitelistResultIpOnly:
@@ -499,11 +515,13 @@ const dictionaries = {
     tabAccess: "Access",
     tabTunnel: "Tunnel",
     navProtocol: "Mode",
+    navApps: "Split App",
     navWhitelist: "White IP",
     navLogs: "Logs",
     navMore: "SHARE",
     sheetServerTitle: "Server",
     sheetProtocolTitle: "Mode",
+    sheetAppsTitle: "Split App",
     sheetWhitelistTitle: "White IP / CIDR",
     sheetLogsTitle: "Logs & test",
     sheetMoreTitle: "SHARE",
@@ -528,6 +546,20 @@ const dictionaries = {
     whitelistUsingCache:
       "The GitHub refresh failed, so the app is showing the saved whitelist cache.",
     whitelistInvalid: "Enter a valid IPv4 address.",
+    splitTunnelTitle: "Split tunneling",
+    sheetAppsText:
+      "Selected apps bypass the VPN and use the direct network path. Everything else continues to use the VPN as usual.",
+    splitTunnelSearch: "Search apps",
+    splitTunnelSearchPlaceholder: "Telegram, Chrome, com.bank.app",
+    splitTunnelSelectedApps: "Bypass apps",
+    splitTunnelStatusOff: "No apps are bypassing the VPN right now.",
+    splitTunnelClear: "Clear list",
+    splitTunnelReconnectNotice:
+      "Reconnect the VPN to apply the updated bypass app list.",
+    splitTunnelLoadingApps: "Loading installed apps...",
+    splitTunnelEmpty: "No installed apps were found on this device.",
+    splitTunnelNoResults: "No apps match this search.",
+    splitTunnelSystemApp: "system",
     whitelistResultExactAndCidr:
       "The IP is present both as an exact whitelist entry and inside an allowed CIDR.",
     whitelistResultIpOnly:

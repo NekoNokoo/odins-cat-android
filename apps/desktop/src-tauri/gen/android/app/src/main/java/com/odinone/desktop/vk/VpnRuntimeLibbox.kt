@@ -608,13 +608,16 @@ object VpnRuntimeLibbox {
                 val wireGuard = readWireGuardSettings(profile)
                 val bridgePort = selectUdpPort(DEFAULT_VK_BRIDGE_PORT)
                 val vkTurnStreamCount = readVkTurnStreamCount(normalizedArgs, profile)
+                val requestedExcludePackages = normalizeSplitTunnelPackages(parseStringArray(normalizedArgs, "excludePackages"))
                 val vkCaptchaBypassPackages = resolveVkCaptchaBypassPackages(context)
+                val effectiveExcludePackages =
+                    normalizeSplitTunnelPackages(vkCaptchaBypassPackages + requestedExcludePackages)
                 val vkBinary = File(context.applicationInfo.nativeLibraryDir, "libvkturn.so")
                 if (!vkBinary.exists()) {
                     throw IllegalArgumentException("Missing bundled libvkturn.so in Android runtime")
                 }
                 PreparedRuntime(
-                    configContent = buildWireGuardConfig(socksPort, bridgePort, wireGuard, vkCaptchaBypassPackages),
+                    configContent = buildWireGuardConfig(socksPort, bridgePort, wireGuard, effectiveExcludePackages),
                     configPath = File(runtimeDir, "active-vk-relay.json").path,
                     socksAddress = socksAddress,
                     bridgeAddress = "127.0.0.1:$bridgePort",
@@ -628,8 +631,13 @@ object VpnRuntimeLibbox {
                             add("family:$RUNTIME_FAMILY_VK_RELAY")
                             add("activation:$ACTIVATION_STATE_ACTIVE")
                             add("vk-turn-streams:${normalizeVkTurnStreamCount(vkTurnStreamCount)}")
+                            if (effectiveExcludePackages.isNotEmpty()) {
+                                add("pkg-exclude:${effectiveExcludePackages.size}")
+                            }
+                            if (requestedExcludePackages.isNotEmpty()) {
+                                add("split-tunnel:exclude:${requestedExcludePackages.size}")
+                            }
                             if (vkCaptchaBypassPackages.isNotEmpty()) {
-                                add("pkg-exclude:${vkCaptchaBypassPackages.size}")
                                 add("vk-captcha-bypass")
                             }
                         },
