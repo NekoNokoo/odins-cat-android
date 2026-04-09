@@ -1,6 +1,6 @@
-# Odin One VK
+# Odin's Cat
 
-`Odin One VK` is a self-hosted VPN client for macOS and Android that deploys and runs dual-mode access on your own server:
+`Odin's Cat` is a self-hosted VPN client for macOS and Android that deploys and runs dual-mode access on your own server:
 
 - direct `VLESS + REALITY`
 - `VK relay` via `vk-turn-proxy + xray`

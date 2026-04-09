@@ -234,7 +234,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
 
         val builder =
             Builder()
-                .setSession("Odin One")
+                .setSession("Odin's Cat")
                 .setMtu(options.mtu)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -294,7 +294,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
     }
 
     override fun sendNotification(notification: Notification) {
-        val title = notification.title.takeUnless { it.isNullOrBlank() } ?: "Odin One"
+        val title = notification.title.takeUnless { it.isNullOrBlank() } ?: "Odin's Cat"
         val body =
             notification.body.takeUnless { it.isNullOrBlank() }
                 ?: notification.subtitle.takeUnless { it.isNullOrBlank() }
@@ -1310,10 +1310,10 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         manager.createNotificationChannel(
             NotificationChannel(
                 NOTIFICATION_CHANNEL_ID,
-                "Odin One VPN",
+                "Odin's Cat VPN",
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
-                description = "Foreground status for the Odin One Android VPN runtime"
+                description = "Foreground status for the Odin's Cat Android VPN runtime"
             },
         )
     }
@@ -1362,7 +1362,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             }
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle(titleOverride ?: "Odin One")
+            .setContentTitle(titleOverride ?: "Odin's Cat")
             .setContentText(
                 bodyOverride
                     ?: when {

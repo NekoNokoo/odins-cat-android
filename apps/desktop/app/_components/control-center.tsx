@@ -564,7 +564,10 @@ const formatInviteExportNotice = (
   exportPath: string,
 ) => {
   const normalizedPath = exportPath.replace(/\\/g, "/");
-  if (normalizedPath.includes("/Download/Odin One/")) {
+  if (
+    normalizedPath.includes("/Download/Odin One/") ||
+    normalizedPath.includes("/Download/Odin's Cat/")
+  ) {
     return `${t("saved")}: ${fileName}\n${t("exportProfileFileSavedDownload")}`;
   }
   if (normalizedPath.includes("/exports/")) {
@@ -785,7 +788,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       "edge-ssh-check":
         "Проверяет Yandex edge-хост и возможность аккуратно выполнить privileged setup.",
       "runtime-prep":
-        "Создаёт изолированные директории Odin One и проверяет сетевую готовность.",
+        "Создаёт изолированные директории Odin's Cat и проверяет сетевую готовность.",
       "edge-runtime-prep":
         "Ставит socat на edge-хост и пишет manifest для TCP passthrough.",
       "install-binaries":
@@ -3236,7 +3239,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           name:
             refreshedOwnerProfile?.name ??
             ownerProfile?.name ??
-            "Odin One Access Key",
+            "Odin's Cat Access Key",
         });
         const data = res.data;
         setGuestProfile(data);

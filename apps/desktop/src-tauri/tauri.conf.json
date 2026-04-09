@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Odin One VK",
+  "productName": "Odin's Cat",
   "version": "0.6.0",
   "identifier": "com.odinone.desktop.vk",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Odin One",
+        "title": "Odin's Cat",
         "width": 470,
         "height": 1040,
         "minWidth": 430,

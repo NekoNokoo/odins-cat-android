@@ -2108,7 +2108,7 @@ fn imported_profile_path(
 
 fn invite_export_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = match app.path().download_dir() {
-        Ok(downloads) => downloads.join("Odin One"),
+        Ok(downloads) => downloads.join("Odin's Cat"),
         Err(_) => app_root_dir(app)?.join("exports"),
     };
     fs::create_dir_all(&dir).map_err(|err| format!("create invite export directory: {err}"))?;
@@ -2288,7 +2288,7 @@ async fn run_remote_egress_checks(ssh: &mut MobileSshSession) -> (Vec<CheckEntry
 
 fn default_invite_name(name: &str) -> String {
     if name.trim().is_empty() {
-        "Odin One Guest".to_string()
+        "Odin's Cat Guest".to_string()
     } else {
         name.trim().to_string()
     }
@@ -3013,14 +3013,14 @@ async fn mobile_run_deployment(
         Some(&staged_fallbacks),
     )?;
     let xray_unit = render_systemd_unit(
-        "Odin One Xray",
+        "Odin's Cat Xray",
         &format!(
             "{} run -config {}",
             WHITELIST_XRAY_BINARY_PATH, WHITELIST_XRAY_CONFIG_PATH
         ),
     );
     let proxy_unit = render_systemd_unit(
-        "Odin One vk-turn-proxy",
+        "Odin's Cat vk-turn-proxy",
         &format!(
             "{} -listen 0.0.0.0:{} -connect 127.0.0.1:{}",
             WHITELIST_PROXY_BINARY_PATH, turn_port, wire_guard_port
@@ -3082,7 +3082,7 @@ fn render_yandex_edge_systemd_unit(
     public_port: u16,
 ) -> String {
     format!(
-        "[Unit]\nDescription=Odin One Yandex edge passthrough\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/usr/bin/socat TCP-LISTEN:{public_port},fork,reuseaddr TCP:{origin_host}:{origin_port}\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=multi-user.target\n"
+        "[Unit]\nDescription=Odin's Cat Yandex edge passthrough\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/usr/bin/socat TCP-LISTEN:{public_port},fork,reuseaddr TCP:{origin_host}:{origin_port}\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=multi-user.target\n"
     )
 }
 
@@ -3425,7 +3425,7 @@ async fn resolve_remote_udp_port(
     if let Some(requested_port) = requested.filter(|port| *port > 0) {
         if excluded.contains(&requested_port) {
             return Err(format!(
-                "{label} UDP port {requested_port} conflicts with another Odin One service"
+                "{label} UDP port {requested_port} conflicts with another Odin's Cat service"
             ));
         }
         if remote_udp_port_is_free(ssh, requested_port).await? {
@@ -3801,13 +3801,13 @@ fn build_staged_fallbacks(
             "ownerEgressPort": reality_port,
             "subscriptionUrl": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL,
             "sourceLabel": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL,
-            "description": "Experimental relay-assisted REALITY mode. The client picks a curated external REALITY relay first, then moves egress back to your Odin One server."
+            "description": "Experimental relay-assisted REALITY mode. The client picks a curated external REALITY relay first, then moves egress back to your Odin's Cat server."
         },
         "realityRelayDirect": {
             "status": "ready",
             "subscriptionUrl": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL,
             "sourceLabel": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL,
-            "description": "Experimental direct relay mode. The client picks a curated external REALITY relay from the hourly igareck feed and sends traffic through it without a second hop to your Odin One server."
+            "description": "Experimental direct relay mode. The client picks a curated external REALITY relay from the hourly igareck feed and sends traffic through it without a second hop to your Odin's Cat server."
         },
         "naive": {
             "status": "staged",
@@ -3867,7 +3867,7 @@ fn render_staged_fallback_manifest(host: &str, reality_port: u16) -> Result<Stri
                 "engine": "sing-box",
                 "port": REALITY_FALLBACK_MIN_PORT,
                 "network": "tcp",
-                "notes": "Experimental relay-assisted path that enters through a curated external REALITY relay and then returns egress to the Odin One server."
+                "notes": "Experimental relay-assisted path that enters through a curated external REALITY relay and then returns egress to the Odin's Cat server."
             },
             {
                 "id": "reality-relay-direct",
@@ -3933,7 +3933,7 @@ fn render_owner_profile(
     staged_fallbacks: Value,
 ) -> Result<String, String> {
     let profile = OwnerProfileFile {
-        name: "Odin One Owner Node".to_string(),
+        name: "Odin's Cat Owner Node".to_string(),
         transport: "xray".to_string(),
         active_protocol: "vless-reality".to_string(),
         vk_turn_stream_count: VK_TURN_STREAM_COUNT_DEFAULT,
@@ -4956,7 +4956,7 @@ fn ensure_reality_relay_owner_egress_fallback(staged_fallbacks: &mut Value) {
             "ownerEgressPort": REALITY_FALLBACK_MIN_PORT,
             "subscriptionUrl": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL,
             "sourceLabel": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL,
-            "description": "Experimental relay-assisted REALITY mode. The client picks a curated external REALITY relay first, then moves egress back to your Odin One server."
+            "description": "Experimental relay-assisted REALITY mode. The client picks a curated external REALITY relay first, then moves egress back to your Odin's Cat server."
         }),
     );
 }
@@ -4977,7 +4977,7 @@ fn ensure_reality_relay_direct_fallback(staged_fallbacks: &mut Value) {
             "status": "ready",
             "subscriptionUrl": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL,
             "sourceLabel": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL,
-            "description": "Experimental direct relay mode. The client picks a curated external REALITY relay from the hourly igareck feed and sends traffic through it without a second hop to your Odin One server."
+            "description": "Experimental direct relay mode. The client picks a curated external REALITY relay from the hourly igareck feed and sends traffic through it without a second hop to your Odin's Cat server."
         }),
     );
 }
@@ -5169,7 +5169,7 @@ fn build_plan_steps(flow: &str) -> Vec<PlanEntry> {
                 label: "Origin validation".to_string(),
                 status: "queued".to_string(),
                 description:
-                    "Load the live Odin One origin profile and confirm the current REALITY port and keys."
+                    "Load the live Odin's Cat origin profile and confirm the current REALITY port and keys."
                         .to_string(),
             },
             PlanEntry {
@@ -5227,7 +5227,7 @@ fn build_plan_steps(flow: &str) -> Vec<PlanEntry> {
             label: "Runtime preparation".to_string(),
             status: "queued".to_string(),
             description:
-                "Create isolated Odin One directories and verify network prerequisites."
+                "Create isolated Odin's Cat directories and verify network prerequisites."
                     .to_string(),
         },
         PlanEntry {
@@ -5243,14 +5243,14 @@ fn build_plan_steps(flow: &str) -> Vec<PlanEntry> {
             label: "Configure services".to_string(),
             status: "queued".to_string(),
             description:
-                "Generate keys, write xray and Odin One configs, and install the required systemd units."
+                "Generate keys, write xray and Odin's Cat configs, and install the required systemd units."
                     .to_string(),
         },
         PlanEntry {
             id: "service-start".to_string(),
             label: "Service startup".to_string(),
             status: "queued".to_string(),
-            description: "Start the selected Odin One services and verify their health."
+            description: "Start the selected Odin's Cat services and verify their health."
                 .to_string(),
         },
         PlanEntry {
@@ -5266,9 +5266,9 @@ fn build_plan_steps(flow: &str) -> Vec<PlanEntry> {
 
 fn build_plan_warnings(server: &ServerDraftPayload, flow: &str) -> Vec<String> {
     let mut warnings = vec![
-        "Odin One uses its own ports and paths so the existing Amnezia stack can remain untouched."
+        "Odin's Cat uses its own ports and paths so the existing Amnezia stack can remain untouched."
             .to_string(),
-        "Odin One keeps the stable direct REALITY path separate from additive access surfaces so stable mode can stay untouched while extra modes are attached later.".to_string(),
+        "Odin's Cat keeps the stable direct REALITY path separate from additive access surfaces so stable mode can stay untouched while extra modes are attached later.".to_string(),
     ];
 
     if flow == PROVISION_FLOW_EDGE_ATTACH {
@@ -5289,7 +5289,7 @@ fn build_plan_warnings(server: &ServerDraftPayload, flow: &str) -> Vec<String> {
         warnings.push("Public VK relay and REALITY ports are auto-selected from currently free server ports unless you pin them manually.".to_string());
     }
 
-    warnings.push("Protocol pack staging is enabled: Odin One keeps the current active data path, while preparing Russia-friendly fallback protocols for later rollout without Apple Network Extension entitlements.".to_string());
+    warnings.push("Protocol pack staging is enabled: Odin's Cat keeps the current active data path, while preparing Russia-friendly fallback protocols for later rollout without Apple Network Extension entitlements.".to_string());
     warnings
 }
 
@@ -6024,7 +6024,7 @@ mod tests {
         let raw = serde_json::json!({
             "id": "guest-009",
             "role": "guest",
-            "name": "Odin One Owner Node",
+            "name": "Odin's Cat Owner Node",
             "protocol": "vless-reality",
             "transport": "xray",
             "serverHost": "95.81.120.226",

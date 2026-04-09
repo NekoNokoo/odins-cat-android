@@ -3,7 +3,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
 GO_BIN="/Users/vladislav/.local/opt/go/bin/go"
-APP_MVPD_BIN="/Applications/Odin One.app/Contents/Resources/bin/mvpd"
+APP_MVPD_BIN_CANDIDATES=(
+  "/Applications/Odin's Cat.app/Contents/Resources/bin/mvpd"
+  "/Applications/Odin One.app/Contents/Resources/bin/mvpd"
+)
+APP_MVPD_BIN=""
 WORKSPACE_MVPD_BIN="${ODIN_ONE_LOCAL_MVPD_BIN:-/tmp/odin-one-mvpd-workspace}"
 CURL_BIN="/usr/bin/curl"
 JQ_BIN="/usr/bin/jq"
@@ -55,6 +59,13 @@ if [[ -z "${ODIN_ONE_SSH_SECRET}" ]]; then
 fi
 
 MVPD_PID=""
+
+for candidate in "${APP_MVPD_BIN_CANDIDATES[@]}"; do
+  if [[ -x "$candidate" ]]; then
+    APP_MVPD_BIN="$candidate"
+    break
+  fi
+done
 
 cleanup() {
   "$CURL_BIN" -s -X POST "${API_BASE}/api/local-tunnel/stop" >/dev/null 2>&1 || true

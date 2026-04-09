@@ -8,8 +8,8 @@ function HeaderWhitelistCat() {
   return (
     <span
       className="topbar-cat"
-      aria-label="Odin One"
-      title="Odin One"
+      aria-label="Odin's Cat"
+      title="Odin's Cat"
     >
       <img src="/whitelist-cat-tight.png" alt="" aria-hidden="true" />
     </span>
@@ -19,7 +19,7 @@ function HeaderWhitelistCat() {
 export default function Page() {
   return (
     <AppShell
-      title="Odin One"
+      title="Odin's Cat"
       titleAccessory={<HeaderWhitelistCat />}
       headerAction={<LanguageToggle />}
       dragRegion

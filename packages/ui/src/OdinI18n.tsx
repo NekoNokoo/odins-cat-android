@@ -196,7 +196,7 @@ const dictionaries = {
     isolatedTunnel: "Локальный изолированный туннель",
     vpnMode: "Режим VPN для macOS",
     vpnModeText:
-      "Одна кнопка поднимает direct-туннель Odin One и включает системный SOCKS proxy macOS для обычных приложений.",
+      "Одна кнопка поднимает direct-туннель Odin's Cat и включает системный SOCKS proxy macOS для обычных приложений.",
     enableVpn: "Включить VPN",
     disableVpn: "Выключить VPN",
     enablingVpn: "Включаем VPN...",
@@ -222,7 +222,7 @@ const dictionaries = {
       "Приложение может безопасно выполнить эту проверку само, но команда остаётся доступной для ручного запуска.",
     systemProxy: "Системный прокси macOS",
     systemProxyText:
-      "Этот режим явно включает системный SOCKS5 proxy для активного сетевого сервиса macOS. Default route не меняется, но обычные приложения начнут ходить через Odin One до выключения.",
+      "Этот режим явно включает системный SOCKS5 proxy для активного сетевого сервиса macOS. Default route не меняется, но обычные приложения начнут ходить через Odin's Cat до выключения.",
     enableSystemProxy: "Включить для всей системы",
     disableSystemProxy: "Выключить системный прокси",
     systemProxyEnabled: "Системный SOCKS proxy включён.",
@@ -252,7 +252,7 @@ const dictionaries = {
     accessShareTab: "Передать",
     accessImportTab: "Импорт",
     ownerProfileIntro:
-      "После успешного развёртывания Odin One сохраняет локальный ключ подключения для владельца сервера. Этот ключ можно экспортировать и передать другому пользователю для ручного импорта.",
+      "После успешного развёртывания Odin's Cat сохраняет локальный ключ подключения для владельца сервера. Этот ключ можно экспортировать и передать другому пользователю для ручного импорта.",
     refreshProfile: "Обновить профиль",
     guestAccess: "Передача доступа",
     guestAccessIntro:
@@ -269,13 +269,13 @@ const dictionaries = {
     copied: "Скопировано",
     exportProfileFile: "Экспортировать файл",
     exportProfileFileStarted: "Сохранение файла запущено",
-    exportProfileFileSavedDownload: "Папка: Download/Odin One",
+    exportProfileFileSavedDownload: "Папка: Download/Odin's Cat",
     exportProfileFileSavedLocal: "Файл сохранён во внутреннюю папку приложения",
     exportProfileFileSharedNoLocal:
       "Файл уже подготовлен для отправки через системное меню, но локальная копия не сохранилась.",
     shareCode: "Share code",
     shareCodeText:
-      "Эту строку можно передать другому пользователю для локального импорта подключения в Odin One.",
+      "Эту строку можно передать другому пользователю для локального импорта подключения в Odin's Cat.",
     fingerprint: "Fingerprint",
     endpoint: "Endpoint",
     importProfile: "Импортировать ключ",
@@ -286,7 +286,7 @@ const dictionaries = {
     importClipboardEmpty:
       "В буфере обмена сейчас нет ключа подключения.",
     importClipboardInvalid:
-      "В буфере обмена не найден корректный ключ Odin One.",
+      "В буфере обмена не найден корректный ключ Odin's Cat.",
     vkCaptchaReady:
       "VK запросил ручную капчу. Откройте страницу подтверждения и завершите not-robot flow.",
     openVkCaptcha: "Открыть капчу VK",
@@ -339,7 +339,7 @@ const dictionaries = {
     controlPlane: "Control plane",
     runtimeOverview: "Runtime overview",
     runtimeOverviewText:
-      "Этот блок собирает в одном месте состояние локального core, кэша профиля и safety-поведения приложения, как в зрелых proxy-клиентах, но не меняет self-hosted deploy flow Odin One.",
+      "Этот блок собирает в одном месте состояние локального core, кэша профиля и safety-поведения приложения, как в зрелых proxy-клиентах, но не меняет self-hosted deploy flow Odin's Cat.",
     coreRuntime: "Локальный core",
     runtimeHealthy: "core отвечает",
     runtimeUnavailable: "core недоступен",
@@ -687,7 +687,7 @@ const dictionaries = {
     isolatedTunnel: "Local isolated tunnel",
     vpnMode: "macOS VPN mode",
     vpnModeText:
-      "One button starts the Odin One direct tunnel and enables the macOS system SOCKS proxy for regular apps.",
+      "One button starts the Odin's Cat direct tunnel and enables the macOS system SOCKS proxy for regular apps.",
     enableVpn: "Enable VPN",
     disableVpn: "Disable VPN",
     enablingVpn: "Enabling VPN...",
@@ -713,7 +713,7 @@ const dictionaries = {
       "The app can now run this safely for you, but the raw command stays visible for manual checks.",
     systemProxy: "macOS system proxy",
     systemProxyText:
-      "This explicitly enables a system SOCKS5 proxy for the active macOS network service. The default route stays unchanged, but regular apps will start using Odin One until you turn it off.",
+      "This explicitly enables a system SOCKS5 proxy for the active macOS network service. The default route stays unchanged, but regular apps will start using Odin's Cat until you turn it off.",
     enableSystemProxy: "Enable for system",
     disableSystemProxy: "Disable system proxy",
     systemProxyEnabled: "The system SOCKS proxy is enabled.",
@@ -743,7 +743,7 @@ const dictionaries = {
     accessShareTab: "Share",
     accessImportTab: "Import",
     ownerProfileIntro:
-      "After a successful deploy, Odin One stores a local connection key for the server owner. You can export this key and pass it to another user for manual import.",
+      "After a successful deploy, Odin's Cat stores a local connection key for the server owner. You can export this key and pass it to another user for manual import.",
     refreshProfile: "Refresh profile",
     guestAccess: "Access sharing",
     guestAccessIntro:
@@ -760,13 +760,13 @@ const dictionaries = {
     copied: "Copied",
     exportProfileFile: "Export file",
     exportProfileFileStarted: "File export started",
-    exportProfileFileSavedDownload: "Folder: Download/Odin One",
+    exportProfileFileSavedDownload: "Folder: Download/Odin's Cat",
     exportProfileFileSavedLocal: "The file was saved into the app-local exports folder",
     exportProfileFileSharedNoLocal:
       "The file is already ready to send through the system share sheet, but the local saved copy was not created.",
     shareCode: "Share code",
     shareCodeText:
-      "You can pass this string to another user so Odin One can import the connection locally.",
+      "You can pass this string to another user so Odin's Cat can import the connection locally.",
     fingerprint: "Fingerprint",
     endpoint: "Endpoint",
     importProfile: "Import key",
@@ -777,7 +777,7 @@ const dictionaries = {
     importClipboardEmpty:
       "There is no connection key in the clipboard right now.",
     importClipboardInvalid:
-      "The clipboard does not contain a valid Odin One key.",
+      "The clipboard does not contain a valid Odin's Cat key.",
     vkCaptchaReady:
       "VK requested manual captcha. Open the confirmation page and finish the not-robot flow.",
     openVkCaptcha: "Open VK captcha",
@@ -830,7 +830,7 @@ const dictionaries = {
     controlPlane: "Control plane",
     runtimeOverview: "Runtime overview",
     runtimeOverviewText:
-      "This panel keeps the local core state, cached profile state, and safety posture in one place like a mature proxy client, while preserving the existing self-hosted Odin One deploy flow.",
+      "This panel keeps the local core state, cached profile state, and safety posture in one place like a mature proxy client, while preserving the existing self-hosted Odin's Cat deploy flow.",
     coreRuntime: "Local core",
     runtimeHealthy: "core is healthy",
     runtimeUnavailable: "core is unavailable",
