@@ -41,7 +41,8 @@ const WHITELIST_BIN_DIR: &str = "/opt/whitelist/bin";
 const WHITELIST_CONFIG_DIR: &str = "/opt/whitelist/config";
 const WHITELIST_PROFILES_DIR: &str = "/opt/whitelist/profiles";
 const WHITELIST_GUEST_PROFILES_DIR: &str = "/opt/whitelist/profiles/guests";
-const WHITELIST_EDGE_MANIFEST_PATH: &str = "/opt/whitelist-edge/config/edge-forward.json";
+const LEGACY_WHITELIST_EDGE_ROOT: &str = "/opt/whitelist-edge";
+const LEGACY_WHITELIST_YANDEX_EDGE_SERVICE_NAME: &str = "whitelist-yandex-edge.service";
 const WHITELIST_XRAY_CONFIG_PATH: &str = "/opt/whitelist/config/xray-server.json";
 const WHITELIST_REALITY_CONFIG_PATH: &str = "/opt/whitelist/config/xray-reality-server.json";
 const WHITELIST_FALLBACKS_PATH: &str = "/opt/whitelist/config/fallbacks-staged.json";
@@ -52,8 +53,6 @@ const WHITELIST_SING_BOX_BINARY_PATH: &str = "/opt/whitelist/bin/sing-box";
 const WHITELIST_PROXY_BINARY_PATH: &str = "/opt/whitelist/bin/vk-turn-proxy-server";
 const WHITELIST_XRAY_SERVICE_PATH: &str = "/etc/systemd/system/whitelist-xray.service";
 const WHITELIST_PROXY_SERVICE_PATH: &str = "/etc/systemd/system/whitelist-vk-turn-proxy.service";
-const WHITELIST_YANDEX_EDGE_SERVICE_PATH: &str =
-    "/etc/systemd/system/whitelist-yandex-edge.service";
 const VK_TURN_STREAM_COUNT_DEFAULT: u16 = 10;
 const VK_TURN_STREAM_COUNT_MIN: u16 = 1;
 const VK_TURN_STREAM_COUNT_MAX: u16 = 16;
@@ -67,12 +66,16 @@ const MOBILE_SSH_KEEPALIVE_MAX: usize = 12;
 const PROVISION_FLOW_ORIGIN: &str = "origin";
 const PROVISION_FLOW_EDGE_ATTACH: &str = "edge-attach";
 const EDGE_PROVIDER_YANDEX: &str = "yandex-edge";
+const EDGE_ROUTING_MODE_TCP_FORWARD: &str = "tcp-forward";
+const EDGE_ROUTING_MODE_SNI_ROUTER: &str = "sni-router";
+const EDGE_ROUTING_MODE_XRAY_PROXY: &str = "xray-proxy";
 const OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_SCAFFOLD: &str = "reality-whitelist-scaffold";
 const OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_LAB: &str = "reality-whitelist-lab";
 const OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD: &str = "reality-vps-scaffold";
 const OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB: &str = "reality-vps-lab";
 const OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB: &str = "reality-vps-relay-lab";
 const OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE: &str = "reality-yandex-edge";
+const OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY: &str = "reality-yandex-edge-proxy";
 const OWNER_RUNTIME_LAB_VPS_TRANSPORT_TCP: &str = "tcp";
 const OWNER_RUNTIME_LAB_VPS_TRANSPORT_GRPC: &str = "grpc";
 const OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL: &str =
@@ -302,6 +305,20 @@ struct EdgeAttachPayload {
     secret: String,
     #[serde(default)]
     public_port: Option<u16>,
+    #[serde(default)]
+    routing_mode: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct YandexEdgeRuntimeLayout {
+    root_dir: String,
+    config_dir: String,
+    manifest_path: String,
+    haproxy_path: String,
+    xray_path: String,
+    xray_config: String,
+    service_name: String,
+    service_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -466,6 +483,8 @@ struct DeploymentStateEntry {
     edge_host: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     edge_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edge_routing_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     health_checks: Vec<CheckEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -700,6 +719,26 @@ async fn ensure_remote_socat_installed(ssh: &mut MobileSshSession) -> Result<(),
     let command = remote_root_shell(
         "if command -v socat >/dev/null 2>&1; then exit 0; fi; if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y socat; else echo 'socat is required and apt-get was not found' >&2; exit 1; fi",
     );
+    ssh.run(&command).await.map(|_| ())
+}
+
+async fn ensure_remote_haproxy_installed(ssh: &mut MobileSshSession) -> Result<(), String> {
+    let command = remote_root_shell(
+        "if command -v haproxy >/dev/null 2>&1; then exit 0; fi; if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy; else echo 'haproxy is required and apt-get was not found' >&2; exit 1; fi",
+    );
+    ssh.run(&command).await.map(|_| ())
+}
+
+async fn ensure_remote_edge_xray_installed(
+    ssh: &mut MobileSshSession,
+    target_path: &str,
+) -> Result<(), String> {
+    let command = remote_root_shell(&format!(
+        "mkdir -p {} && if [ -x {} ]; then exit 0; fi; {}",
+        quote_shell(dir_of(target_path)),
+        quote_shell(target_path),
+        render_remote_xray_install_command(XRAY_RELEASE_URL, target_path),
+    ));
     ssh.run(&command).await.map(|_| ())
 }
 
@@ -971,6 +1010,7 @@ async fn mobile_validate_edge_attach(
                 "edgeEnabled": true,
                 "edgeHost": edge.server.host,
                 "edgePort": normalized_edge_public_port(Some(edge)),
+                "edgeRoutingMode": normalized_edge_routing_mode(Some(edge)),
                 "checks": checks,
                 "warnings": warnings,
                 "protocolPack": protocol_pack,
@@ -988,14 +1028,32 @@ async fn mobile_validate_edge_attach(
             normalized_port(payload.server.port)
         ),
     });
-    match load_remote_access_state(&mut origin).await {
-        Ok(_) => checks.push(CheckEntry {
-            key: "origin-owner-profile".to_string(),
-            label: "Origin owner profile".to_string(),
-            ok: true,
-            detail: "Loaded the live owner profile and REALITY state from the origin host."
-                .to_string(),
-        }),
+    let reality = match load_remote_access_state(&mut origin).await {
+        Ok((owner, _)) => match read_invite_reality_fallback(&owner) {
+            Ok(reality) => {
+                checks.push(CheckEntry {
+                    key: "origin-owner-profile".to_string(),
+                    label: "Origin owner profile".to_string(),
+                    ok: true,
+                    detail: format!(
+                        "Loaded the live owner profile with REALITY fallback {}:{}.",
+                        payload.server.host.trim(),
+                        reality.port
+                    ),
+                });
+                Some(reality)
+            }
+            Err(error) => {
+                checks.push(CheckEntry {
+                    key: "origin-owner-profile".to_string(),
+                    label: "Origin owner profile".to_string(),
+                    ok: false,
+                    detail: error.clone(),
+                });
+                all_ok = false;
+                None
+            }
+        },
         Err(error) => {
             checks.push(CheckEntry {
                 key: "origin-owner-profile".to_string(),
@@ -1004,8 +1062,9 @@ async fn mobile_validate_edge_attach(
                 detail: error.clone(),
             });
             all_ok = false;
+            None
         }
-    }
+    };
     let _ = origin.close().await;
 
     let mut edge_ssh = match MobileSshSession::connect(&edge_server, &edge.secret).await {
@@ -1020,6 +1079,7 @@ async fn mobile_validate_edge_attach(
                 "edgeEnabled": true,
                 "edgeHost": edge.server.host,
                 "edgePort": normalized_edge_public_port(Some(edge)),
+                "edgeRoutingMode": normalized_edge_routing_mode(Some(edge)),
                 "checks": checks,
                 "warnings": warnings,
                 "protocolPack": protocol_pack,
@@ -1079,6 +1139,40 @@ async fn mobile_validate_edge_attach(
         detail: port_check.unwrap_or_else(|error| error),
     });
     all_ok &= port_check_ok;
+
+    if let Some(reality) = reality.as_ref() {
+        let origin_reachability = edge_ssh
+            .run(&remote_root_shell(&format!(
+                "timeout 8 bash -lc 'cat </dev/null >/dev/tcp/{}/{}'",
+                payload.server.host.trim(),
+                reality.port,
+            )))
+            .await;
+        let origin_reachability_ok = origin_reachability.is_ok();
+        checks.push(CheckEntry {
+            key: "edge-origin-reachability".to_string(),
+            label: "Edge to origin reachability".to_string(),
+            ok: origin_reachability_ok,
+            detail: origin_reachability.unwrap_or_else(|error| error),
+        });
+        all_ok &= origin_reachability_ok;
+    }
+
+    if normalized_edge_routing_mode(Some(edge)) == EDGE_ROUTING_MODE_XRAY_PROXY {
+        let prereq = edge_ssh
+            .run(
+                "command -v curl >/dev/null && command -v timeout >/dev/null && command -v systemctl >/dev/null",
+            )
+            .await;
+        let prereq_ok = prereq.is_ok();
+        checks.push(CheckEntry {
+            key: "edge-xray-proxy-prerequisites".to_string(),
+            label: "Edge xray-proxy prerequisites".to_string(),
+            ok: prereq_ok,
+            detail: prereq.unwrap_or_else(|error| error),
+        });
+        all_ok &= prereq_ok;
+    }
     let _ = edge_ssh.close().await;
 
     let mut response = json!({
@@ -1090,6 +1184,7 @@ async fn mobile_validate_edge_attach(
         "edgeEnabled": true,
         "edgeHost": edge.server.host,
         "edgePort": port,
+        "edgeRoutingMode": normalized_edge_routing_mode(Some(edge)),
         "checks": checks,
         "warnings": warnings,
         "protocolPack": protocol_pack,
@@ -1132,6 +1227,11 @@ pub fn mobile_start_deployment(
         .as_ref()
         .filter(|edge| edge.enabled)
         .map(|edge| normalized_edge_public_port(Some(edge)));
+    let edge_routing_mode = payload
+        .edge
+        .as_ref()
+        .filter(|edge| edge.enabled)
+        .map(|edge| normalized_edge_routing_mode(Some(edge)).to_string());
     let mut steps = build_plan_steps(flow);
     if let Some(first) = steps.first_mut() {
         first.status = "current".to_string();
@@ -1152,6 +1252,7 @@ pub fn mobile_start_deployment(
         edge_enabled: edge_enabled.then_some(true),
         edge_host,
         edge_port,
+        edge_routing_mode,
         health_checks: Vec::new(),
         protocol_pack: build_protocol_pack(&payload),
         error: None,
@@ -1593,7 +1694,7 @@ fn bundled_whitelist_source() -> Result<ParsedWhitelistFiles, String> {
 
 async fn fetch_remote_whitelist_files() -> Result<(String, String, String), String> {
     let client = reqwest::Client::builder()
-        .user_agent("odin-one-mobile-bridge/0.6.0")
+        .user_agent("odin-one-mobile-bridge/0.6.1")
         .build()
         .map_err(|err| format!("build whitelist HTTP client: {err}"))?;
 
@@ -1871,6 +1972,23 @@ fn sync_invite_reality_staged_fallbacks(invite: &mut InviteProfileFile) {
         edge.insert("flow".to_string(), json!(flow));
         if !invite.server_host.trim().is_empty() {
             edge.insert("originHost".to_string(), json!(invite.server_host.trim()));
+        }
+    }
+
+    if let Some(edge_proxy) = staged
+        .get_mut("realityYandexEdgeProxy")
+        .and_then(Value::as_object_mut)
+    {
+        edge_proxy.insert("originPort".to_string(), json!(port));
+        edge_proxy.insert("serverName".to_string(), json!(server_name));
+        edge_proxy.insert("publicKey".to_string(), json!(public_key));
+        edge_proxy.insert("shortId".to_string(), json!(short_id));
+        edge_proxy.insert("uuid".to_string(), json!(uuid));
+        edge_proxy.insert("flow".to_string(), json!(flow));
+        edge_proxy.insert("ownerRealityEgress".to_string(), Value::Bool(false));
+        edge_proxy.insert("transport".to_string(), json!("tcp"));
+        if !invite.server_host.trim().is_empty() {
+            edge_proxy.insert("originHost".to_string(), json!(invite.server_host.trim()));
         }
     }
 }
@@ -3076,7 +3194,7 @@ async fn mobile_run_deployment(
     Ok(())
 }
 
-fn render_yandex_edge_systemd_unit(
+fn render_yandex_edge_tcp_forward_systemd_unit(
     origin_host: &str,
     origin_port: u16,
     public_port: u16,
@@ -3086,16 +3204,204 @@ fn render_yandex_edge_systemd_unit(
     )
 }
 
+fn render_yandex_edge_haproxy_config(
+    bind_host: &str,
+    public_port: u16,
+    server_name: &str,
+    origin_host: &str,
+    origin_port: u16,
+) -> String {
+    format!(
+        "global\n  log /dev/log local0\n\ndefaults\n  log global\n  mode tcp\n  timeout connect 10s\n  timeout client 60s\n  timeout server 60s\n\nfrontend reality_edge_in\n  bind {bind_host}:{public_port}\n  mode tcp\n  tcp-request inspect-delay 5s\n  tcp-request content accept if {{ req.ssl_hello_type 1 }}\n  acl sni_route req.ssl_sni -i {server_name}\n  use_backend be_route if sni_route\n  default_backend reality_drop\n\nbackend be_route\n  mode tcp\n  server route {origin_host}:{origin_port} check\n\nbackend reality_drop\n  mode tcp\n  server drop 127.0.0.1:9\n"
+    )
+}
+
+fn render_yandex_edge_sni_router_systemd_unit(config_path: &str) -> String {
+    format!(
+        "[Unit]\nDescription=Odin's Cat Yandex edge SNI router\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/usr/sbin/haproxy -W -db -f {config_path}\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=multi-user.target\n"
+    )
+}
+
+fn render_yandex_edge_xray_proxy_config(
+    public_port: u16,
+    edge_uuid: &str,
+    edge_private_key: &str,
+    edge_short_id: &str,
+    edge_server_name: &str,
+    origin_host: &str,
+    origin_port: u16,
+    origin_server_name: &str,
+    origin_public_key: &str,
+    origin_short_id: &str,
+    origin_uuid: &str,
+    origin_flow: &str,
+) -> Result<String, String> {
+    let flow = if origin_flow.trim().is_empty() {
+        YANDEX_EDGE_FLOW.to_string()
+    } else {
+        origin_flow.trim().to_string()
+    };
+    serde_json::to_string_pretty(&json!({
+        "log": { "loglevel": "warning" },
+        "inbounds": [{
+            "tag": "edge-reality-in",
+            "listen": "0.0.0.0",
+            "port": public_port,
+            "protocol": "vless",
+            "settings": {
+                "clients": [{
+                    "id": edge_uuid,
+                    "flow": YANDEX_EDGE_FLOW
+                }],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    "show": false,
+                    "dest": reality_destination(),
+                    "xver": 0,
+                    "serverNames": [edge_server_name],
+                    "privateKey": edge_private_key,
+                    "shortIds": [edge_short_id]
+                }
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls", "quic"]
+            }
+        }],
+        "outbounds": [{
+            "tag": "origin-reality-out",
+            "protocol": "vless",
+            "settings": {
+                "vnext": [{
+                    "address": origin_host,
+                    "port": origin_port,
+                    "users": [{
+                        "id": origin_uuid,
+                        "encryption": "none",
+                        "flow": flow
+                    }]
+                }]
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    "serverName": origin_server_name,
+                    "publicKey": origin_public_key,
+                    "shortId": origin_short_id,
+                    "fingerprint": YANDEX_EDGE_FINGERPRINT
+                }
+            }
+        }, {
+            "tag": "direct",
+            "protocol": "freedom",
+            "settings": {
+                "domainStrategy": "UseIPv4"
+            }
+        }],
+        "routing": {
+            "rules": [{
+                "type": "field",
+                "inboundTag": ["edge-reality-in"],
+                "outboundTag": "origin-reality-out"
+            }]
+        }
+    }))
+    .map_err(|err| format!("marshal yandex edge xray proxy config: {err}"))
+}
+
+fn render_yandex_edge_xray_proxy_systemd_unit(binary_path: &str, config_path: &str) -> String {
+    format!(
+        "[Unit]\nDescription=Odin's Cat Yandex edge xray proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={binary_path} run -config {config_path}\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=multi-user.target\n"
+    )
+}
+
+fn build_yandex_edge_runtime_layout(
+    public_port: u16,
+    routing_mode: &str,
+) -> YandexEdgeRuntimeLayout {
+    let effective_port = if public_port == 0 {
+        YANDEX_EDGE_CONNECT_PORT
+    } else {
+        public_port
+    };
+    let effective_mode = if routing_mode.trim().is_empty() {
+        EDGE_ROUTING_MODE_TCP_FORWARD
+    } else {
+        routing_mode.trim()
+    };
+    if effective_port == YANDEX_EDGE_CONNECT_PORT && effective_mode == EDGE_ROUTING_MODE_TCP_FORWARD
+    {
+        return YandexEdgeRuntimeLayout {
+            root_dir: LEGACY_WHITELIST_EDGE_ROOT.to_string(),
+            config_dir: format!("{LEGACY_WHITELIST_EDGE_ROOT}/config"),
+            manifest_path: format!("{LEGACY_WHITELIST_EDGE_ROOT}/config/edge-forward.json"),
+            haproxy_path: format!("{LEGACY_WHITELIST_EDGE_ROOT}/config/haproxy.cfg"),
+            xray_path: format!("{LEGACY_WHITELIST_EDGE_ROOT}/bin/xray"),
+            xray_config: format!("{LEGACY_WHITELIST_EDGE_ROOT}/config/xray-edge-proxy.json"),
+            service_name: LEGACY_WHITELIST_YANDEX_EDGE_SERVICE_NAME.to_string(),
+            service_path: format!(
+                "/etc/systemd/system/{LEGACY_WHITELIST_YANDEX_EDGE_SERVICE_NAME}"
+            ),
+        };
+    }
+    let root_dir = format!("/opt/whitelist-edge-{effective_mode}-{effective_port}");
+    let service_name = format!("whitelist-yandex-edge-{effective_mode}-{effective_port}.service");
+    YandexEdgeRuntimeLayout {
+        config_dir: format!("{root_dir}/config"),
+        manifest_path: format!("{root_dir}/config/edge-forward.json"),
+        haproxy_path: format!("{root_dir}/config/haproxy.cfg"),
+        xray_path: format!("{root_dir}/bin/xray"),
+        xray_config: format!("{root_dir}/config/xray-edge-proxy.json"),
+        service_path: format!("/etc/systemd/system/{service_name}"),
+        service_name,
+        root_dir,
+    }
+}
+
+fn build_yandex_edge_fallback_source(public_port: u16, routing_mode: &str) -> String {
+    if public_port == YANDEX_EDGE_CONNECT_PORT && routing_mode == EDGE_ROUTING_MODE_TCP_FORWARD {
+        "owner-attached:yandex-edge".to_string()
+    } else {
+        format!("owner-attached:yandex-edge:{routing_mode}:{public_port}")
+    }
+}
+
+fn build_yandex_edge_fallback_tag(edge_host: &str, public_port: u16, routing_mode: &str) -> String {
+    let mut tag = format!("yandex-edge-{}", edge_host.trim().replace('.', "-"));
+    if public_port != YANDEX_EDGE_CONNECT_PORT {
+        tag.push_str(&format!("-{public_port}"));
+    }
+    if routing_mode != EDGE_ROUTING_MODE_TCP_FORWARD {
+        tag.push_str(&format!("-{routing_mode}"));
+    }
+    tag
+}
+
 fn render_yandex_edge_manifest(
     edge_host: &str,
     public_port: u16,
     origin_host: &str,
     reality: &RealityFallback,
+    routing_mode: &str,
+    layout: &YandexEdgeRuntimeLayout,
 ) -> Result<String, String> {
     serde_json::to_string_pretty(&json!({
         "provider": EDGE_PROVIDER_YANDEX,
+        "routingMode": routing_mode,
         "edgeHost": edge_host,
         "publicPort": public_port,
+        "serviceName": layout.service_name,
+        "servicePath": layout.service_path,
+        "installRoot": layout.root_dir,
+        "configDir": layout.config_dir,
+        "configPath": layout.manifest_path,
+        "xrayPath": layout.xray_path,
+        "xrayConfig": layout.xray_config,
         "originHost": origin_host,
         "originPort": reality.port,
         "serverName": reality.server_name,
@@ -3103,6 +3409,11 @@ fn render_yandex_edge_manifest(
         "shortId": reality.short_id,
         "uuid": reality.uuid,
         "flow": reality.flow,
+        "routes": [{
+            "serverName": reality.server_name,
+            "originHost": origin_host,
+            "originPort": reality.port,
+        }],
         "generatedAt": now_rfc3339(),
     }))
     .map_err(|err| format!("marshal yandex edge manifest: {err}"))
@@ -3114,6 +3425,8 @@ fn patch_owner_profile_with_yandex_edge(
     public_port: u16,
     origin_host: &str,
     reality: &RealityFallback,
+    routing_mode: &str,
+    edge_client_reality: Option<&RealityFallback>,
 ) -> Result<(String, Value, Vec<ProtocolPackEntry>), String> {
     let mut profile: OwnerProfileFile =
         serde_json::from_str(raw_json).map_err(|err| format!("parse owner profile: {err}"))?;
@@ -3132,10 +3445,63 @@ fn patch_owner_profile_with_yandex_edge(
             &reality.uuid,
             &reality.flow,
             YANDEX_EDGE_FINGERPRINT,
-            "owner-attached:yandex-edge",
-            &format!("yandex-edge-{}", edge_host.replace('.', "-")),
+            &build_yandex_edge_fallback_source(public_port, routing_mode),
+            &build_yandex_edge_fallback_tag(edge_host, public_port, routing_mode),
+            routing_mode,
         ),
     );
+    if let Some(fallback) = profile
+        .staged_fallbacks
+        .get_mut("realityYandexEdgeProxy")
+        .and_then(Value::as_object_mut)
+    {
+        fallback.insert(
+            "routingMode".to_string(),
+            Value::String(routing_mode.to_string()),
+        );
+        fallback.insert(
+            "source".to_string(),
+            Value::String(format!(
+                "{}:proxy",
+                build_yandex_edge_fallback_source(public_port, routing_mode)
+            )),
+        );
+        fallback.insert(
+            "tag".to_string(),
+            Value::String(format!(
+                "{}-proxy",
+                build_yandex_edge_fallback_tag(edge_host, public_port, routing_mode)
+            )),
+        );
+        fallback.insert("ownerRealityEgress".to_string(), Value::Bool(false));
+        if let Some(edge_reality) = edge_client_reality {
+            fallback.insert("connectPort".to_string(), json!(edge_reality.port));
+            fallback.insert(
+                "serverName".to_string(),
+                Value::String(edge_reality.server_name.clone()),
+            );
+            fallback.insert(
+                "publicKey".to_string(),
+                Value::String(edge_reality.public_key.clone()),
+            );
+            fallback.insert(
+                "shortId".to_string(),
+                Value::String(edge_reality.short_id.clone()),
+            );
+            fallback.insert("uuid".to_string(), Value::String(edge_reality.uuid.clone()));
+            fallback.insert("flow".to_string(), Value::String(edge_reality.flow.clone()));
+            fallback.insert(
+                "description".to_string(),
+                Value::String(format!(
+                    "Edge-terminated Yandex edge proxy mode. The client first connects to the dedicated edge REALITY inbound on {}:{}, then the Yandex VM forwards traffic to the stable REALITY origin {}:{}.",
+                    edge_host.trim(),
+                    public_port,
+                    origin_host.trim(),
+                    reality.port,
+                )),
+            );
+        }
+    }
     profile.protocol_pack = build_protocol_pack_for_transport_with_fallbacks(
         &profile.transport,
         nonzero_u16(profile.endpoint_port),
@@ -3162,6 +3528,9 @@ async fn mobile_run_edge_attach(
         .ok_or_else(|| "edge configuration is required".to_string())?;
     let edge_server = edge_server_payload(edge);
     let public_port = normalized_edge_public_port(Some(edge));
+    let routing_mode = normalized_edge_routing_mode(Some(edge));
+    let layout = build_yandex_edge_runtime_layout(public_port, routing_mode);
+    let mut edge_client_reality: Option<RealityFallback> = None;
 
     let mut origin = MobileSshSession::connect(&payload.server, &payload.secret).await?;
     origin.run("whoami && uname -a").await?;
@@ -3178,27 +3547,95 @@ async fn mobile_run_edge_attach(
     edge_ssh.run("whoami && uname -a").await?;
     complete_step(&app, deployment_id, 1);
 
-    ensure_remote_socat_installed(&mut edge_ssh).await?;
+    match routing_mode {
+        EDGE_ROUTING_MODE_SNI_ROUTER => ensure_remote_haproxy_installed(&mut edge_ssh).await?,
+        EDGE_ROUTING_MODE_XRAY_PROXY => {
+            ensure_remote_edge_xray_installed(&mut edge_ssh, &layout.xray_path).await?
+        }
+        _ => ensure_remote_socat_installed(&mut edge_ssh).await?,
+    }
+    if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
+        let edge_pair = generate_reality_key_pair()?;
+        let edge_short_id = generate_reality_short_id()?;
+        let edge_uuid = generate_protocol_uuid()?;
+        let edge_flow = YANDEX_EDGE_FLOW.to_string();
+        let edge_config = render_yandex_edge_xray_proxy_config(
+            public_port,
+            &edge_uuid,
+            &edge_pair.private_key,
+            &edge_short_id,
+            &reality.server_name,
+            payload.server.host.trim(),
+            reality.port,
+            &reality.server_name,
+            &reality.public_key,
+            &reality.short_id,
+            &reality.uuid,
+            &reality.flow,
+        )?;
+        upload_with_sudo(
+            &mut edge_ssh,
+            &layout.xray_config,
+            edge_config.as_bytes(),
+            "0644",
+        )
+        .await?;
+        edge_client_reality = Some(RealityFallback {
+            port: public_port,
+            server_name: reality.server_name.clone(),
+            public_key: edge_pair.public_key,
+            short_id: edge_short_id,
+            uuid: edge_uuid,
+            flow: edge_flow,
+        });
+    }
     let edge_manifest = render_yandex_edge_manifest(
         edge.server.host.trim(),
         public_port,
         payload.server.host.trim(),
         &reality,
+        routing_mode,
+        &layout,
     )?;
     upload_with_sudo(
         &mut edge_ssh,
-        WHITELIST_EDGE_MANIFEST_PATH,
+        &layout.manifest_path,
         edge_manifest.as_bytes(),
         "0644",
     )
     .await?;
+    if routing_mode == EDGE_ROUTING_MODE_SNI_ROUTER {
+        let haproxy_config = render_yandex_edge_haproxy_config(
+            "0.0.0.0",
+            public_port,
+            &reality.server_name,
+            payload.server.host.trim(),
+            reality.port,
+        );
+        upload_with_sudo(
+            &mut edge_ssh,
+            &layout.haproxy_path,
+            haproxy_config.as_bytes(),
+            "0644",
+        )
+        .await?;
+    }
     complete_step(&app, deployment_id, 2);
 
-    let edge_unit =
-        render_yandex_edge_systemd_unit(payload.server.host.trim(), reality.port, public_port);
+    let edge_unit = if routing_mode == EDGE_ROUTING_MODE_SNI_ROUTER {
+        render_yandex_edge_sni_router_systemd_unit(&layout.haproxy_path)
+    } else if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
+        render_yandex_edge_xray_proxy_systemd_unit(&layout.xray_path, &layout.xray_config)
+    } else {
+        render_yandex_edge_tcp_forward_systemd_unit(
+            payload.server.host.trim(),
+            reality.port,
+            public_port,
+        )
+    };
     upload_with_sudo(
         &mut edge_ssh,
-        WHITELIST_YANDEX_EDGE_SERVICE_PATH,
+        &layout.service_path,
         edge_unit.as_bytes(),
         "0644",
     )
@@ -3208,15 +3645,33 @@ async fn mobile_run_edge_attach(
         .await?;
     complete_step(&app, deployment_id, 3);
 
+    if routing_mode == EDGE_ROUTING_MODE_SNI_ROUTER {
+        edge_ssh
+            .run(&remote_root_shell(&format!(
+                "haproxy -c -f {}",
+                quote_shell(&layout.haproxy_path)
+            )))
+            .await?;
+    } else if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
+        edge_ssh
+            .run(&remote_root_shell(&format!(
+                "{} version >/dev/null",
+                quote_shell(&layout.xray_path)
+            )))
+            .await?;
+    }
     edge_ssh
-        .run(&remote_root_shell(
-            "systemctl enable whitelist-yandex-edge.service && systemctl restart whitelist-yandex-edge.service && sleep 2",
-        ))
+        .run(&remote_root_shell(&format!(
+            "systemctl enable {} && systemctl restart {} && sleep 2",
+            quote_shell(&layout.service_name),
+            quote_shell(&layout.service_name),
+        )))
         .await?;
     edge_ssh
-        .run(&remote_root_shell(
-            "systemctl is-active whitelist-yandex-edge.service",
-        ))
+        .run(&remote_root_shell(&format!(
+            "systemctl is-active {}",
+            quote_shell(&layout.service_name),
+        )))
         .await?;
     edge_ssh
         .run(&format!(
@@ -3242,6 +3697,8 @@ async fn mobile_run_edge_attach(
             public_port,
             payload.server.host.trim(),
             &reality,
+            routing_mode,
+            edge_client_reality.as_ref(),
         )?;
     origin
         .upload(
@@ -3276,11 +3733,25 @@ async fn mobile_run_edge_attach(
         )
         .await?;
     set_deployment_protocol_pack(&app, deployment_id, protocol_pack);
+    let (health_checks, health_ok) = run_edge_attach_health_checks(
+        &mut edge_ssh,
+        &layout,
+        routing_mode,
+        public_port,
+        payload.server.host.trim(),
+        reality.port,
+    )
+    .await;
+    set_deployment_health_checks(&app, deployment_id, health_checks);
+    if !health_ok {
+        return Err("edge attach health checks failed".to_string());
+    }
     let store = app.state::<MobileDeploymentStore>();
     store.update(deployment_id, |deployment| {
         deployment.edge_enabled = Some(true);
         deployment.edge_host = Some(edge.server.host.trim().to_string());
         deployment.edge_port = Some(public_port);
+        deployment.edge_routing_mode = Some(routing_mode.to_string());
     });
     complete_step(&app, deployment_id, 5);
 
@@ -3345,6 +3816,104 @@ fn set_deployment_health_checks(
     store.update(deployment_id, |deployment| {
         deployment.health_checks = health_checks;
     });
+}
+
+async fn run_edge_attach_health_checks(
+    ssh: &mut MobileSshSession,
+    layout: &YandexEdgeRuntimeLayout,
+    routing_mode: &str,
+    public_port: u16,
+    origin_host: &str,
+    origin_port: u16,
+) -> (Vec<CheckEntry>, bool) {
+    let mut checks = vec![
+        (
+            "edge-service-active",
+            "Edge service active",
+            remote_root_shell(&format!(
+                "systemctl is-active {}",
+                quote_shell(&layout.service_name)
+            )),
+            format!("{} is active.", layout.service_name),
+        ),
+        (
+            "edge-public-listener",
+            "Edge public listener",
+            remote_root_shell(&format!(
+                "ss -H -ltn | awk '{{print $4}}' | grep -Eq '(^|\\\\]|:){}$'",
+                public_port
+            )),
+            format!("{public_port}/tcp is listening on the edge host."),
+        ),
+        (
+            "edge-origin-reachability",
+            "Edge to origin reachability",
+            remote_root_shell(&format!(
+                "timeout 8 bash -lc 'cat </dev/null >/dev/tcp/{origin_host}/{origin_port}'"
+            )),
+            format!("Edge can reach the REALITY origin on {origin_host}:{origin_port}."),
+        ),
+        (
+            "edge-manifest",
+            "Edge manifest",
+            remote_root_shell(&format!("test -s {}", quote_shell(&layout.manifest_path))),
+            format!("Edge manifest is present at {}.", layout.manifest_path),
+        ),
+    ];
+
+    match routing_mode {
+        EDGE_ROUTING_MODE_SNI_ROUTER => checks.push((
+            "edge-haproxy-config",
+            "Edge HAProxy config",
+            remote_root_shell(&format!(
+                "haproxy -c -f {}",
+                quote_shell(&layout.haproxy_path)
+            )),
+            format!(
+                "HAProxy config passes syntax validation at {}.",
+                layout.haproxy_path
+            ),
+        )),
+        EDGE_ROUTING_MODE_XRAY_PROXY => checks.push((
+            "edge-xray-config",
+            "Edge xray config",
+            remote_root_shell(&format!(
+                "{} run -test -config {}",
+                quote_shell(&layout.xray_path),
+                quote_shell(&layout.xray_config)
+            )),
+            format!(
+                "Xray config passes syntax validation at {}.",
+                layout.xray_config
+            ),
+        )),
+        _ => checks.push((
+            "edge-socat-runtime",
+            "Edge socat runtime",
+            remote_root_shell("command -v socat >/dev/null"),
+            "socat is installed for tcp-forward mode.".to_string(),
+        )),
+    }
+
+    let mut results = Vec::with_capacity(checks.len());
+    let mut all_ok = true;
+    for (key, label, command, success_detail) in checks {
+        let outcome = ssh.run(&command).await;
+        let ok = outcome.is_ok();
+        let detail = match outcome {
+            Ok(output) if output.trim().is_empty() => success_detail,
+            Ok(output) => output,
+            Err(error) => error,
+        };
+        results.push(CheckEntry {
+            key: key.to_string(),
+            label: label.to_string(),
+            ok,
+            detail,
+        });
+        all_ok &= ok;
+    }
+    (results, all_ok)
 }
 
 fn fail_deployment(store: &MobileDeploymentStore, deployment_id: &str, error: &str) {
@@ -3842,6 +4411,7 @@ fn preview_staged_fallbacks(edge: Option<&EdgeAttachPayload>) -> Value {
                 "",
                 "",
                 "",
+                EDGE_ROUTING_MODE_TCP_FORWARD,
             ),
         );
     }
@@ -4062,6 +4632,23 @@ fn build_protocol_pack_for_transport_with_fallbacks(
         });
     }
 
+    if staged_fallback_present(staged_fallbacks, "realityYandexEdgeProxy") {
+        entries.push(ProtocolPackEntry {
+            id: "vless-reality-yandex-edge-proxy".to_string(),
+            label: "Yandex edge proxy".to_string(),
+            status: "staged".to_string(),
+            engine: "sing-box".to_string(),
+            scheme: "vless+reality-edge-proxy".to_string(),
+            network: "tcp".to_string(),
+            port: fallback_port_from_value(
+                staged_fallbacks.and_then(|value| value.get("realityYandexEdgeProxy")),
+                "connectPort",
+                YANDEX_EDGE_CONNECT_PORT,
+            ),
+            notes: "Two-hop Yandex edge proxy path for restrictive networks. The client enters through the Yandex edge and keeps egress on the stable REALITY origin.".to_string(),
+        });
+    }
+
     entries.extend([
         ProtocolPackEntry {
             id: "direct-wireguard".to_string(),
@@ -4248,6 +4835,7 @@ fn requested_owner_runtime_lab(
                 | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB
                 | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB
                 | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
+                | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
         )
     })
 }
@@ -4256,6 +4844,7 @@ fn apply_yandex_edge_reality_preset(
     profile_object: &mut serde_json::Map<String, Value>,
 ) -> Result<(), String> {
     let fallback = resolve_yandex_edge_fallback(profile_object);
+    let proxy_fallback = resolve_yandex_edge_proxy_fallback(profile_object);
     let staged_fallbacks = ensure_object_value(
         profile_object
             .entry("stagedFallbacks")
@@ -4263,6 +4852,7 @@ fn apply_yandex_edge_reality_preset(
         "stagedFallbacks",
     )?;
     staged_fallbacks.insert("realityYandexEdge".to_string(), fallback);
+    staged_fallbacks.insert("realityYandexEdgeProxy".to_string(), proxy_fallback);
     Ok(())
 }
 
@@ -4400,6 +4990,8 @@ fn resolve_yandex_edge_fallback(profile_object: &serde_json::Map<String, Value>)
         yandex_edge_string_field(existing_edge, "fingerprint", YANDEX_EDGE_FINGERPRINT);
     let source = yandex_edge_string_field(existing_edge, "source", YANDEX_EDGE_SOURCE);
     let tag = yandex_edge_string_field(existing_edge, "tag", YANDEX_EDGE_TAG);
+    let routing_mode =
+        yandex_edge_string_field(existing_edge, "routingMode", EDGE_ROUTING_MODE_TCP_FORWARD);
     let connect_host =
         yandex_edge_string_field(existing_edge, "connectHost", YANDEX_EDGE_CONNECT_HOST);
     let connect_port =
@@ -4418,7 +5010,22 @@ fn resolve_yandex_edge_fallback(profile_object: &serde_json::Map<String, Value>)
         &fingerprint,
         &source,
         &tag,
+        &routing_mode,
     )
+}
+
+fn resolve_yandex_edge_proxy_fallback(profile_object: &serde_json::Map<String, Value>) -> Value {
+    let staged_fallbacks = profile_object
+        .get("stagedFallbacks")
+        .and_then(Value::as_object);
+    if let Some(existing_proxy) = staged_fallbacks
+        .and_then(|value| value.get("realityYandexEdgeProxy"))
+        .and_then(Value::as_object)
+    {
+        return Value::Object(existing_proxy.clone());
+    }
+    let edge = resolve_yandex_edge_fallback(profile_object);
+    yandex_edge_proxy_fallback_value_from_edge(&edge)
 }
 
 fn apply_owner_runtime_lab_overrides(
@@ -4447,13 +5054,23 @@ fn apply_owner_runtime_lab_overrides(
                 .and_then(Value::as_object)
                 .cloned()
         });
-    if owner_runtime_lab.mode.trim() == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE {
+    if matches!(
+        owner_runtime_lab.mode.trim(),
+        OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
+            | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
+    ) {
         apply_yandex_edge_reality_preset(profile_object)?;
     }
     let yandex_edge_reality = profile_object
         .get("stagedFallbacks")
         .and_then(Value::as_object)
         .and_then(|value| value.get("realityYandexEdge"))
+        .and_then(Value::as_object)
+        .cloned();
+    let yandex_edge_proxy_reality = profile_object
+        .get("stagedFallbacks")
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("realityYandexEdgeProxy"))
         .and_then(Value::as_object)
         .cloned();
     let android_runtime = ensure_object_value(
@@ -4544,23 +5161,35 @@ fn apply_owner_runtime_lab_overrides(
         OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD
         | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB
         | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB
-        | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE => {
+        | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
+        | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY => {
             let server_name = owner_runtime_lab
                 .vps_server_name
                 .trim()
                 .to_ascii_lowercase();
             if server_name.is_empty()
-                && owner_runtime_lab.mode.trim() != OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
+                && !matches!(
+                    owner_runtime_lab.mode.trim(),
+                    OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
+                        | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
+                )
             {
                 return Err("owner runtime lab requires vpsServerName".to_string());
             }
             if owner_runtime_lab.vps_port == 0
-                && owner_runtime_lab.mode.trim() != OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
+                && !matches!(
+                    owner_runtime_lab.mode.trim(),
+                    OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
+                        | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
+                )
             {
                 return Err("owner runtime lab requires a positive vpsPort".to_string());
             }
             let transport = match owner_runtime_lab.mode.trim() {
-                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE => OWNER_RUNTIME_LAB_VPS_TRANSPORT_TCP,
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
+                | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY => {
+                    OWNER_RUNTIME_LAB_VPS_TRANSPORT_TCP
+                }
                 _ => match owner_runtime_lab.vps_transport.trim() {
                     OWNER_RUNTIME_LAB_VPS_TRANSPORT_TCP => OWNER_RUNTIME_LAB_VPS_TRANSPORT_TCP,
                     OWNER_RUNTIME_LAB_VPS_TRANSPORT_GRPC => OWNER_RUNTIME_LAB_VPS_TRANSPORT_GRPC,
@@ -4575,6 +5204,7 @@ fn apply_owner_runtime_lab_overrides(
                 OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB => "lab",
                 OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB => "lab",
                 OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE => "lab",
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY => "lab",
                 _ => "scaffold",
             };
             let source = match owner_runtime_lab.mode.trim() {
@@ -4582,6 +5212,11 @@ fn apply_owner_runtime_lab_overrides(
                     yandex_edge_reality.as_ref(),
                     "source",
                     YANDEX_EDGE_SOURCE,
+                ),
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY => yandex_edge_string_field(
+                    yandex_edge_proxy_reality.as_ref(),
+                    "source",
+                    "owner-attached:yandex-edge-proxy",
                 ),
                 _ if owner_runtime_lab.vps_source.trim().is_empty() => {
                     "operator-curated:vps-lab".to_string()
@@ -4592,6 +5227,11 @@ fn apply_owner_runtime_lab_overrides(
                 OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE => {
                     yandex_edge_string_field(yandex_edge_reality.as_ref(), "tag", YANDEX_EDGE_TAG)
                 }
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY => yandex_edge_string_field(
+                    yandex_edge_proxy_reality.as_ref(),
+                    "tag",
+                    "yandex-edge-proxy",
+                ),
                 _ if owner_runtime_lab.vps_tag.trim().is_empty() => {
                     format!(
                         "owner-vps-lab-{server_name}-{transport}-{}",
@@ -4606,6 +5246,11 @@ fn apply_owner_runtime_lab_overrides(
                     "fingerprint",
                     YANDEX_EDGE_FINGERPRINT,
                 ),
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY => yandex_edge_string_field(
+                    yandex_edge_proxy_reality.as_ref(),
+                    "fingerprint",
+                    YANDEX_EDGE_FINGERPRINT,
+                ),
                 _ if owner_runtime_lab.vps_fingerprint.trim().is_empty() => {
                     if transport == OWNER_RUNTIME_LAB_VPS_TRANSPORT_GRPC {
                         "firefox".to_string()
@@ -4615,11 +5260,18 @@ fn apply_owner_runtime_lab_overrides(
                 }
                 _ => owner_runtime_lab.vps_fingerprint.trim().to_string(),
             };
-            let force_relay_owner_mode =
-                owner_runtime_lab.mode.trim() == OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB;
+            let force_relay_owner_mode = matches!(
+                owner_runtime_lab.mode.trim(),
+                OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB
+            );
             let connect_host = match owner_runtime_lab.mode.trim() {
                 OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE => Some(yandex_edge_string_field(
                     yandex_edge_reality.as_ref(),
+                    "connectHost",
+                    YANDEX_EDGE_CONNECT_HOST,
+                )),
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY => Some(yandex_edge_string_field(
+                    yandex_edge_proxy_reality.as_ref(),
                     "connectHost",
                     YANDEX_EDGE_CONNECT_HOST,
                 )),
@@ -4638,37 +5290,60 @@ fn apply_owner_runtime_lab_overrides(
                     "connectPort",
                     YANDEX_EDGE_CONNECT_PORT,
                 )),
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY => Some(yandex_edge_u16_field(
+                    yandex_edge_proxy_reality.as_ref(),
+                    "connectPort",
+                    YANDEX_EDGE_CONNECT_PORT,
+                )),
                 _ if owner_runtime_lab.vps_connect_port > 0 => {
                     Some(owner_runtime_lab.vps_connect_port)
                 }
                 _ => None,
             };
-            let server_name =
-                if owner_runtime_lab.mode.trim() == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE {
-                    yandex_edge_string_field(
-                        yandex_edge_reality.as_ref(),
-                        "serverName",
-                        YANDEX_EDGE_SERVER_NAME,
-                    )
-                } else {
-                    server_name
-                };
-            let vps_port =
-                if owner_runtime_lab.mode.trim() == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE {
-                    yandex_edge_u16_field(
-                        yandex_edge_reality.as_ref(),
-                        "originPort",
-                        bootstrap_reality
-                            .as_ref()
-                            .and_then(|value| value.get("port"))
-                            .and_then(Value::as_u64)
-                            .and_then(|value| u16::try_from(value).ok())
-                            .filter(|value| *value > 0)
-                            .unwrap_or(YANDEX_EDGE_ORIGIN_PORT),
-                    )
-                } else {
-                    owner_runtime_lab.vps_port
-                };
+            let server_name = if matches!(
+                owner_runtime_lab.mode.trim(),
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
+                    | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
+            ) {
+                yandex_edge_string_field(
+                    if owner_runtime_lab.mode.trim()
+                        == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
+                    {
+                        yandex_edge_proxy_reality.as_ref()
+                    } else {
+                        yandex_edge_reality.as_ref()
+                    },
+                    "serverName",
+                    YANDEX_EDGE_SERVER_NAME,
+                )
+            } else {
+                server_name
+            };
+            let vps_port = if matches!(
+                owner_runtime_lab.mode.trim(),
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
+                    | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
+            ) {
+                yandex_edge_u16_field(
+                    if owner_runtime_lab.mode.trim()
+                        == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
+                    {
+                        yandex_edge_proxy_reality.as_ref()
+                    } else {
+                        yandex_edge_reality.as_ref()
+                    },
+                    "originPort",
+                    bootstrap_reality
+                        .as_ref()
+                        .and_then(|value| value.get("port"))
+                        .and_then(Value::as_u64)
+                        .and_then(|value| u16::try_from(value).ok())
+                        .filter(|value| *value > 0)
+                        .unwrap_or(YANDEX_EDGE_ORIGIN_PORT),
+                )
+            } else {
+                owner_runtime_lab.vps_port
+            };
             let vps_lab = ensure_object_value(
                 android_runtime
                     .entry("realityVpsLab")
@@ -4679,7 +5354,11 @@ fn apply_owner_runtime_lab_overrides(
                 "ownerRealityEgress".to_string(),
                 Value::Bool(force_relay_owner_mode || owner_runtime_lab.vps_owner_reality_egress),
             );
-            if owner_runtime_lab.mode.trim() == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE {
+            if matches!(
+                owner_runtime_lab.mode.trim(),
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
+                    | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
+            ) {
                 let bootstrap = ensure_object_value(
                     vps_lab
                         .entry("ownerRealityBootstrap")
@@ -4689,7 +5368,13 @@ fn apply_owner_runtime_lab_overrides(
                 bootstrap.insert(
                     "serverHost".to_string(),
                     Value::String(yandex_edge_string_field(
-                        yandex_edge_reality.as_ref(),
+                        if owner_runtime_lab.mode.trim()
+                            == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
+                        {
+                            yandex_edge_proxy_reality.as_ref()
+                        } else {
+                            yandex_edge_reality.as_ref()
+                        },
                         "originHost",
                         if bootstrap_server_host.is_empty() {
                             YANDEX_EDGE_ORIGIN_HOST
@@ -4705,7 +5390,13 @@ fn apply_owner_runtime_lab_overrides(
                 bootstrap.insert(
                     "uuid".to_string(),
                     Value::String(yandex_edge_string_field(
-                        yandex_edge_reality.as_ref(),
+                        if owner_runtime_lab.mode.trim()
+                            == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
+                        {
+                            yandex_edge_proxy_reality.as_ref()
+                        } else {
+                            yandex_edge_reality.as_ref()
+                        },
                         "uuid",
                         YANDEX_EDGE_UUID,
                     )),
@@ -4713,7 +5404,13 @@ fn apply_owner_runtime_lab_overrides(
                 bootstrap.insert(
                     "flow".to_string(),
                     Value::String(yandex_edge_string_field(
-                        yandex_edge_reality.as_ref(),
+                        if owner_runtime_lab.mode.trim()
+                            == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
+                        {
+                            yandex_edge_proxy_reality.as_ref()
+                        } else {
+                            yandex_edge_reality.as_ref()
+                        },
                         "flow",
                         YANDEX_EDGE_FLOW,
                     )),
@@ -4722,7 +5419,13 @@ fn apply_owner_runtime_lab_overrides(
                 bootstrap.insert(
                     "publicKey".to_string(),
                     Value::String(yandex_edge_string_field(
-                        yandex_edge_reality.as_ref(),
+                        if owner_runtime_lab.mode.trim()
+                            == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
+                        {
+                            yandex_edge_proxy_reality.as_ref()
+                        } else {
+                            yandex_edge_reality.as_ref()
+                        },
                         "publicKey",
                         YANDEX_EDGE_PUBLIC_KEY,
                     )),
@@ -4730,7 +5433,13 @@ fn apply_owner_runtime_lab_overrides(
                 bootstrap.insert(
                     "shortId".to_string(),
                     Value::String(yandex_edge_string_field(
-                        yandex_edge_reality.as_ref(),
+                        if owner_runtime_lab.mode.trim()
+                            == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
+                        {
+                            yandex_edge_proxy_reality.as_ref()
+                        } else {
+                            yandex_edge_reality.as_ref()
+                        },
                         "shortId",
                         YANDEX_EDGE_SHORT_ID,
                     )),
@@ -4788,7 +5497,11 @@ fn apply_owner_runtime_lab_overrides(
             vps_lab.insert("source".to_string(), Value::String(source));
             vps_lab.insert("tag".to_string(), Value::String(tag));
             vps_lab.insert("fingerprint".to_string(), Value::String(fingerprint));
-            if owner_runtime_lab.mode.trim() == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE {
+            if matches!(
+                owner_runtime_lab.mode.trim(),
+                OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
+                    | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
+            ) {
                 vps_lab.insert(
                     "flow".to_string(),
                     Value::String(YANDEX_EDGE_FLOW.to_string()),
@@ -4995,6 +5708,7 @@ fn yandex_edge_fallback_value_for(
     fingerprint: &str,
     source: &str,
     tag: &str,
+    routing_mode: &str,
 ) -> Value {
     json!({
         "status": "ready",
@@ -5010,7 +5724,43 @@ fn yandex_edge_fallback_value_for(
         "fingerprint": fingerprint,
         "source": source,
         "tag": tag,
+        "routingMode": routing_mode,
         "description": "Visible Yandex edge mode for Android. The client reaches the current REALITY origin through a dedicated Yandex edge surface."
+    })
+}
+
+fn yandex_edge_proxy_fallback_value_from_edge(edge: &Value) -> Value {
+    let edge_object = edge.as_object();
+    let source = yandex_edge_string_field(edge_object, "source", YANDEX_EDGE_SOURCE);
+    let source = if source.ends_with(":proxy") {
+        source
+    } else {
+        format!("{source}:proxy")
+    };
+    let tag = yandex_edge_string_field(edge_object, "tag", YANDEX_EDGE_TAG);
+    let tag = if tag.ends_with("-proxy") {
+        tag
+    } else {
+        format!("{tag}-proxy")
+    };
+    json!({
+        "status": "ready",
+        "connectHost": yandex_edge_string_field(edge_object, "connectHost", YANDEX_EDGE_CONNECT_HOST),
+        "connectPort": yandex_edge_u16_field(edge_object, "connectPort", YANDEX_EDGE_CONNECT_PORT),
+        "originHost": yandex_edge_string_field(edge_object, "originHost", YANDEX_EDGE_ORIGIN_HOST),
+        "originPort": yandex_edge_u16_field(edge_object, "originPort", YANDEX_EDGE_ORIGIN_PORT),
+        "serverName": yandex_edge_string_field(edge_object, "serverName", YANDEX_EDGE_SERVER_NAME),
+        "publicKey": yandex_edge_string_field(edge_object, "publicKey", YANDEX_EDGE_PUBLIC_KEY),
+        "shortId": yandex_edge_string_field(edge_object, "shortId", YANDEX_EDGE_SHORT_ID),
+        "uuid": yandex_edge_string_field(edge_object, "uuid", YANDEX_EDGE_UUID),
+        "flow": yandex_edge_string_field(edge_object, "flow", YANDEX_EDGE_FLOW),
+        "fingerprint": yandex_edge_string_field(edge_object, "fingerprint", YANDEX_EDGE_FINGERPRINT),
+        "source": source,
+        "tag": tag,
+        "routingMode": yandex_edge_string_field(edge_object, "routingMode", EDGE_ROUTING_MODE_TCP_FORWARD),
+        "transport": "tcp",
+        "ownerRealityEgress": false,
+        "description": "Yandex edge proxy mode for Android. The client enters through the dedicated Yandex edge surface and reaches the stable REALITY origin through it."
     })
 }
 
@@ -5029,6 +5779,7 @@ fn curated_yandex_edge_fallback_value() -> Value {
         YANDEX_EDGE_FINGERPRINT,
         YANDEX_EDGE_SOURCE,
         YANDEX_EDGE_TAG,
+        EDGE_ROUTING_MODE_TCP_FORWARD,
     )
 }
 
@@ -5039,7 +5790,9 @@ fn upsert_yandex_edge_fallback(staged_fallbacks: &mut Value, fallback: Value) {
     let Some(staged_object) = staged_fallbacks.as_object_mut() else {
         return;
     };
+    let proxy_fallback = yandex_edge_proxy_fallback_value_from_edge(&fallback);
     staged_object.insert("realityYandexEdge".to_string(), fallback);
+    staged_object.insert("realityYandexEdgeProxy".to_string(), proxy_fallback);
 }
 
 fn requested_transport(server: &ServerDraftPayload) -> &str {
@@ -5184,7 +5937,7 @@ fn build_plan_steps(flow: &str) -> Vec<PlanEntry> {
                 id: "edge-runtime-prep".to_string(),
                 label: "Edge preparation".to_string(),
                 status: "queued".to_string(),
-                description: "Install socat on the edge host and write the passthrough manifest."
+                description: "Prepare the selected edge runtime and write the manifest for the new Yandex edge surface."
                     .to_string(),
             },
             PlanEntry {
@@ -5192,7 +5945,7 @@ fn build_plan_steps(flow: &str) -> Vec<PlanEntry> {
                 label: "Edge wiring".to_string(),
                 status: "queued".to_string(),
                 description:
-                    "Install the systemd forwarder that exposes the origin REALITY port through the Yandex edge."
+                    "Install the edge systemd service that exposes the current REALITY origin through the Yandex edge."
                         .to_string(),
             },
             PlanEntry {
@@ -5200,7 +5953,7 @@ fn build_plan_steps(flow: &str) -> Vec<PlanEntry> {
                 label: "Edge startup".to_string(),
                 status: "queued".to_string(),
                 description:
-                    "Start the edge passthrough service and verify that it can reach the current origin REALITY port."
+                    "Start the selected edge service and verify that it can reach the current origin REALITY port."
                         .to_string(),
             },
             PlanEntry {
@@ -5348,6 +6101,18 @@ fn normalized_edge_public_port(edge: Option<&EdgeAttachPayload>) -> u16 {
         .unwrap_or(YANDEX_EDGE_CONNECT_PORT)
 }
 
+fn normalized_edge_routing_mode(edge: Option<&EdgeAttachPayload>) -> &str {
+    let mode = edge
+        .and_then(|entry| entry.routing_mode.as_deref())
+        .unwrap_or(EDGE_ROUTING_MODE_TCP_FORWARD)
+        .trim();
+    if mode.is_empty() {
+        EDGE_ROUTING_MODE_TCP_FORWARD
+    } else {
+        mode
+    }
+}
+
 fn edge_server_payload(edge: &EdgeAttachPayload) -> ServerDraftPayload {
     ServerDraftPayload {
         host: edge.server.host.trim().to_string(),
@@ -5391,6 +6156,12 @@ fn validate_edge_attach_payload(payload: &ProvisionPayload) -> Result<(), String
     if normalized_edge_public_port(Some(edge)) == 0 {
         return Err("edge public port must be positive".to_string());
     }
+    match normalized_edge_routing_mode(Some(edge)) {
+        EDGE_ROUTING_MODE_TCP_FORWARD
+        | EDGE_ROUTING_MODE_SNI_ROUTER
+        | EDGE_ROUTING_MODE_XRAY_PROXY => {}
+        _ => return Err("unsupported edge routing mode".to_string()),
+    }
     Ok(())
 }
 
@@ -5408,10 +6179,12 @@ mod tests {
         curated_yandex_edge_fallback_value, ensure_reality_relay_direct_fallback, ipv4_in_cidr,
         parse_ipv4_cidr, parse_whitelist_files, port_candidates_with_seed,
         upsert_yandex_edge_fallback, OwnerRuntimeLabPayload, OwnerRuntimeLabRelayAutoselectPayload,
-        OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB, OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB,
-        OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD, OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_LAB,
+        EDGE_ROUTING_MODE_TCP_FORWARD, OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB,
+        OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB, OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD,
+        OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_LAB,
         OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_SCAFFOLD,
         OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE,
+        OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY,
         OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_INTERVAL_HOURS,
         OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL,
         OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL, REALITY_DEPLOY_DEFAULT_PORT,
@@ -5714,7 +6487,7 @@ mod tests {
                 vps_grpc_authority: String::new(),
                 vps_source: String::new(),
                 vps_tag: String::new(),
-                vps_owner_reality_egress: true,
+                vps_owner_reality_egress: false,
                 vps_relay_autoselect: None,
             },
         )
@@ -5724,7 +6497,7 @@ mod tests {
             serde_json::from_str(&patched).expect("patched profile should stay valid json");
         assert_eq!(
             payload["androidRuntime"]["realityVpsLab"]["ownerRealityEgress"].as_bool(),
-            Some(true)
+            Some(false)
         );
         assert_eq!(
             payload["androidRuntime"]["realityVpsLab"]["ownerRealityBootstrap"]["serverHost"]
@@ -5939,8 +6712,103 @@ mod tests {
             Some("EwRrvp8PKSyz5Fb2tgXG-4uv1UJfQw65yRTvoH36aw4")
         );
         assert_eq!(
+            payload["stagedFallbacks"]["realityYandexEdge"]["routingMode"].as_str(),
+            Some(EDGE_ROUTING_MODE_TCP_FORWARD)
+        );
+        assert_eq!(
             payload["stagedFallbacks"]["vlessReality"]["publicKey"].as_str(),
             Some("EwRrvp8PKSyz5Fb2tgXG-4uv1UJfQw65yRTvoH36aw4")
+        );
+    }
+
+    #[test]
+    fn owner_runtime_lab_patch_supports_yandex_edge_proxy_without_relay_autoselect() {
+        let patched = apply_owner_runtime_lab_overrides(
+            r#"{"name":"Owner","serverHost":"95.81.120.226","androidRuntime":{"realityVpsLab":{"relayAutoselect":{"enabled":true,"sourceLabel":"stale"}}},"stagedFallbacks":{"vlessReality":{"port":55555,"uuid":"fe05feb2-c88c-46bc-b809-ba9eefc5e6ee","flow":"xtls-rprx-vision","serverName":"www.cloudflare.com","publicKey":"EwRrvp8PKSyz5Fb2tgXG-4uv1UJfQw65yRTvoH36aw4","shortId":"2d2812af9d8e4cf4"},"realityYandexEdgeProxy":{"connectHost":"62.84.123.148","connectPort":10443,"originHost":"95.81.120.226","originPort":55555,"serverName":"www.cloudflare.com","publicKey":"EwRrvp8PKSyz5Fb2tgXG-4uv1UJfQw65yRTvoH36aw4","shortId":"2d2812af9d8e4cf4","uuid":"fe05feb2-c88c-46bc-b809-ba9eefc5e6ee","flow":"xtls-rprx-vision","source":"owner-attached:yandex-edge:sni-router:10443:proxy","tag":"yandex-edge-62-84-123-148-10443-sni-router-proxy","routingMode":"sni-router","ownerRealityEgress":true}}}"#,
+            &OwnerRuntimeLabPayload {
+                mode: OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY.to_string(),
+                hint_server_name: String::new(),
+                hint_cidr_bucket: String::new(),
+                hint_source: String::new(),
+                hint_tag: String::new(),
+                vps_server_name: String::new(),
+                vps_port: 0,
+                vps_connect_host: String::new(),
+                vps_connect_port: 0,
+                vps_transport: String::new(),
+                vps_flow: String::new(),
+                vps_fingerprint: String::new(),
+                vps_grpc_service_name: String::new(),
+                vps_grpc_authority: String::new(),
+                vps_source: String::new(),
+                vps_tag: String::new(),
+                vps_owner_reality_egress: true,
+                vps_relay_autoselect: None,
+            },
+        )
+        .expect("owner runtime lab patch should support the Yandex edge proxy preset");
+
+        let payload: Value =
+            serde_json::from_str(&patched).expect("patched profile should stay valid json");
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["connectHost"].as_str(),
+            Some("62.84.123.148")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["connectPort"].as_u64(),
+            Some(10443)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["ownerRealityEgress"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["relayAutoselect"]["enabled"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["source"].as_str(),
+            Some("owner-attached:yandex-edge:sni-router:10443:proxy")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["tag"].as_str(),
+            Some("yandex-edge-62-84-123-148-10443-sni-router-proxy")
+        );
+    }
+
+    #[test]
+    fn yandex_edge_runtime_layout_keeps_legacy_default_path() {
+        let layout = super::build_yandex_edge_runtime_layout(
+            YANDEX_EDGE_CONNECT_PORT,
+            EDGE_ROUTING_MODE_TCP_FORWARD,
+        );
+        assert_eq!(layout.root_dir, super::LEGACY_WHITELIST_EDGE_ROOT);
+        assert_eq!(
+            layout.service_name,
+            super::LEGACY_WHITELIST_YANDEX_EDGE_SERVICE_NAME
+        );
+    }
+
+    #[test]
+    fn yandex_edge_runtime_layout_scopes_non_default_path() {
+        let layout =
+            super::build_yandex_edge_runtime_layout(10443, super::EDGE_ROUTING_MODE_SNI_ROUTER);
+        assert_eq!(layout.root_dir, "/opt/whitelist-edge-sni-router-10443");
+        assert_eq!(
+            layout.service_name,
+            "whitelist-yandex-edge-sni-router-10443.service"
+        );
+        assert_eq!(
+            super::build_yandex_edge_fallback_source(10443, super::EDGE_ROUTING_MODE_SNI_ROUTER,),
+            "owner-attached:yandex-edge:sni-router:10443"
+        );
+        assert_eq!(
+            super::build_yandex_edge_fallback_tag(
+                "62.84.123.148",
+                10443,
+                super::EDGE_ROUTING_MODE_SNI_ROUTER,
+            ),
+            "yandex-edge-62-84-123-148-10443-sni-router"
         );
     }
 

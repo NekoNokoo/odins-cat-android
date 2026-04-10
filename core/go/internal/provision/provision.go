@@ -7,6 +7,7 @@ type TunnelProtocol string
 type StepStatus string
 type ProvisionFlow string
 type EdgeProvider string
+type EdgeRoutingMode string
 
 const (
 	AuthPassword   AuthMethod = "password"
@@ -27,6 +28,10 @@ const (
 	ProvisionFlowEdgeAttach ProvisionFlow = "edge-attach"
 
 	EdgeProviderYandex EdgeProvider = "yandex-edge"
+
+	EdgeRoutingModeTCPForward EdgeRoutingMode = "tcp-forward"
+	EdgeRoutingModeSNIRouter  EdgeRoutingMode = "sni-router"
+	EdgeRoutingModeXrayProxy  EdgeRoutingMode = "xray-proxy"
 )
 
 type Server struct {
@@ -49,11 +54,12 @@ type EdgeServer struct {
 }
 
 type EdgeAttach struct {
-	Enabled    bool         `json:"enabled"`
-	Provider   EdgeProvider `json:"provider,omitempty"`
-	Server     EdgeServer   `json:"server"`
-	Secret     string       `json:"secret"`
-	PublicPort int          `json:"publicPort,omitempty"`
+	Enabled     bool            `json:"enabled"`
+	Provider    EdgeProvider    `json:"provider,omitempty"`
+	Server      EdgeServer      `json:"server"`
+	Secret      string          `json:"secret"`
+	PublicPort  int             `json:"publicPort,omitempty"`
+	RoutingMode EdgeRoutingMode `json:"routingMode,omitempty"`
 }
 
 type Request struct {

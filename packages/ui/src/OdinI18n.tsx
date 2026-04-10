@@ -112,6 +112,7 @@ const dictionaries = {
     runtimeMode: "Режим доступа",
     runtimeModeReality: "VLESS + REALITY",
     runtimeModeYandexEdge: "YANDEX EDGE",
+    runtimeModeYandexEdgeProxy: "YANDEX EDGE",
     runtimeModeVk: "VK RELAY",
     runtimeModeRelayOwner: "WHITE TUNEL",
     runtimeModeRelayDirect: "WHITE RELAY",
@@ -127,7 +128,9 @@ const dictionaries = {
     runtimeModeRealityHint:
       "Основной режим. Клиент поднимает прямой VLESS + REALITY path без нового server-side deploy.",
     runtimeModeYandexEdgeHint:
-      "Новый visible mode. Клиент идёт в стабильный REALITY path через российский edge, не меняя основной прямой маршрут.",
+      "Двуххоповый режим. Клиент сначала входит через российский Yandex edge, а потом продолжает путь через основной REALITY origin.",
+    runtimeModeYandexEdgeProxyHint:
+      "Двуххоповый режим. Клиент сначала входит через российский Yandex edge, а потом продолжает путь через основной REALITY origin.",
     runtimeModeVkHint:
       "Использует уже развернутый VK relay на том же сервере. Нужна только свежая ссылка звонка VK.",
     runtimeModeRelayOwnerHint:
@@ -177,9 +180,31 @@ const dictionaries = {
     deployStepEdge: "Шаг 2",
     deployStepEdgeTitle: "Yandex edge attach",
     deployStepEdgeText:
-      "Опциональный additive шаг. Поднимает whitelist-facing вход через Yandex edge и добавляет пятый visible режим без ротации stable REALITY path.",
+      "Опциональный additive шаг. Поднимает двуххоповый whitelist-facing вход через Yandex edge для текущего режима YANDEX EDGE без ротации stable REALITY path.",
     edgeHost: "Edge host",
     edgePublicPort: "Публичный edge port",
+    edgeRoutingMode: "Режим edge",
+    edgeRoutingModeHelp:
+      "Для текущего YANDEX EDGE рекомендуем SNI router. Он поднимает новый двуххоповый edge path без ломания stable direct route.",
+    edgeRoutingTcpForward: "TCP forward",
+    edgeRoutingSniRouter: "SNI router",
+    edgeRoutingXrayProxy: "Xray proxy",
+    edgeDiagTitle: "Edge diagnostics",
+    edgeDiagText:
+      "Короткая сводка по новому edge path: доступность edge, связь с origin и свежесть invite key.",
+    edgeDiagEdgePath: "Edge path",
+    edgeDiagOriginPath: "Origin path",
+    edgeDiagInvite: "Invite key",
+    edgeDiagReady: "ready",
+    edgeDiagRunValidate: "Сначала нажмите «Проверить edge», чтобы увидеть актуальное состояние.",
+    edgeDiagInviteFresh: "fresh",
+    edgeDiagInviteStale: "stale",
+    edgeDiagInviteStaleDetail:
+      "На owner уже есть новый YANDEX EDGE path, а импортированный invite key ещё старый. Перевыпустите и импортируйте ключ заново.",
+    edgeDiagOwnerDevice: "owner device",
+    edgeDiagOwnerDeviceDetail:
+      "Это owner-устройство. После edge attach перевыпусти invite key для гостевых устройств.",
+    edgeDiagNoInvite: "Импортированного invite key для этого host пока нет.",
     deploymentPrefix: "Развёртывание",
     deploymentDetails: "Ход развёртывания",
     validationDetails: "Результат проверки",
@@ -603,6 +628,7 @@ const dictionaries = {
     runtimeMode: "Access mode",
     runtimeModeReality: "VLESS + REALITY",
     runtimeModeYandexEdge: "YANDEX EDGE",
+    runtimeModeYandexEdgeProxy: "YANDEX EDGE",
     runtimeModeVk: "VK RELAY",
     runtimeModeRelayOwner: "WHITE TUNEL",
     runtimeModeRelayDirect: "WHITE RELAY",
@@ -618,7 +644,9 @@ const dictionaries = {
     runtimeModeRealityHint:
       "Recommended default. The client starts the direct VLESS + REALITY path without another server rollout.",
     runtimeModeYandexEdgeHint:
-      "New visible mode. The client reaches the stable REALITY path through a Russian edge without changing the main direct route.",
+      "Two-hop mode. The client enters through the Russian Yandex edge first, then continues through the main REALITY origin.",
+    runtimeModeYandexEdgeProxyHint:
+      "Two-hop mode. The client enters through the Russian Yandex edge first, then continues through the main REALITY origin.",
     runtimeModeVkHint:
       "Uses the already deployed VK relay on the same server. You only need a fresh VK call link.",
     runtimeModeRelayOwnerHint:
@@ -668,9 +696,32 @@ const dictionaries = {
     deployStepEdge: "Step 2",
     deployStepEdgeTitle: "Yandex edge attach",
     deployStepEdgeText:
-      "Optional additive step. It raises a whitelist-facing Yandex edge entry and adds the fifth visible mode without rotating the stable REALITY path.",
+      "Optional additive step. It raises the newer two-hop whitelist-facing Yandex edge entry for the current YANDEX EDGE mode without rotating the stable REALITY path.",
     edgeHost: "Edge host",
     edgePublicPort: "Public edge port",
+    edgeRoutingMode: "Edge mode",
+    edgeRoutingModeHelp:
+      "Use SNI router for the current YANDEX EDGE mode. It brings up the newer two-hop edge path without breaking the stable direct route.",
+    edgeRoutingTcpForward: "TCP forward",
+    edgeRoutingSniRouter: "SNI router",
+    edgeRoutingXrayProxy: "Xray proxy",
+    edgeDiagTitle: "Edge diagnostics",
+    edgeDiagText:
+      "A short summary for the newer edge path: edge reachability, origin link, and whether the invite key is fresh.",
+    edgeDiagEdgePath: "Edge path",
+    edgeDiagOriginPath: "Origin path",
+    edgeDiagInvite: "Invite key",
+    edgeDiagReady: "ready",
+    edgeDiagRunValidate:
+      "Run Validate edge first to see the current state here.",
+    edgeDiagInviteFresh: "fresh",
+    edgeDiagInviteStale: "stale",
+    edgeDiagInviteStaleDetail:
+      "The owner profile already has the new YANDEX EDGE path, but the imported invite key is still old. Re-issue and import the key again.",
+    edgeDiagOwnerDevice: "owner device",
+    edgeDiagOwnerDeviceDetail:
+      "This is the owner device. Re-issue invite keys for guest devices after edge attach.",
+    edgeDiagNoInvite: "There is no imported invite key for this host yet.",
     deploymentPrefix: "Deployment",
     deploymentDetails: "Deployment progress",
     validationDetails: "Validation result",

@@ -319,6 +319,7 @@ func buildYandexEdgeFallback(connectHost string, connectPort int, originHost str
 		"status":      "ready",
 		"connectHost": strings.TrimSpace(connectHost),
 		"connectPort": connectPort,
+		"routingMode": EdgeRoutingModeTCPForward,
 		"originHost":  strings.TrimSpace(originHost),
 		"originPort":  originPort,
 		"serverName":  strings.TrimSpace(serverName),
@@ -333,11 +334,42 @@ func buildYandexEdgeFallback(connectHost string, connectPort int, originHost str
 	}
 }
 
+func buildYandexEdgeProxyFallback(connectHost string, connectPort int, originHost string, originPort int, serverName, publicKey, shortID, uuid, flow string) map[string]any {
+	fallback := buildYandexEdgeFallback(
+		connectHost,
+		connectPort,
+		originHost,
+		originPort,
+		serverName,
+		publicKey,
+		shortID,
+		uuid,
+		flow,
+	)
+	fallback["source"] = "owner-attached:yandex-edge-proxy"
+	fallback["tag"] = strings.ReplaceAll(strings.TrimSpace(connectHost), ".", "-") + "-proxy"
+	fallback["transport"] = "tcp"
+	fallback["ownerRealityEgress"] = false
+	fallback["description"] = fmt.Sprintf("Two-hop Yandex edge proxy mode. The client first reaches %s:%d and then continues through the stable REALITY origin %s:%d.", strings.TrimSpace(connectHost), connectPort, strings.TrimSpace(originHost), originPort)
+	return fallback
+}
+
 func upsertYandexEdgeFallback(stagedFallbacks map[string]any, connectHost string, connectPort int, originHost string, originPort int, serverName, publicKey, shortID, uuid, flow string) {
 	if stagedFallbacks == nil {
 		return
 	}
 	stagedFallbacks["realityYandexEdge"] = buildYandexEdgeFallback(
+		connectHost,
+		connectPort,
+		originHost,
+		originPort,
+		serverName,
+		publicKey,
+		shortID,
+		uuid,
+		flow,
+	)
+	stagedFallbacks["realityYandexEdgeProxy"] = buildYandexEdgeProxyFallback(
 		connectHost,
 		connectPort,
 		originHost,

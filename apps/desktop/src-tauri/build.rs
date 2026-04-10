@@ -215,7 +215,10 @@ fn android_vk_turn_proxy_client_is_current(output_path: &Path) -> Result<bool, S
 }
 
 fn binary_contains(haystack: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty() && haystack.windows(needle.len()).any(|window| window == needle)
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
 }
 
 fn resolve_go_binary() -> String {
@@ -226,7 +229,9 @@ fn resolve_go_binary() -> String {
     env::var("GO_BINARY").unwrap_or_else(|_| "go".to_string())
 }
 
-fn try_reuse_prebuilt_vk_turn_proxy_android_client_bundle(output_path: &Path) -> Result<bool, String> {
+fn try_reuse_prebuilt_vk_turn_proxy_android_client_bundle(
+    output_path: &Path,
+) -> Result<bool, String> {
     if let Ok(explicit_path) = env::var("ODIN_ONE_VK_TURN_PROXY_ANDROID_CLIENT_BINARY") {
         let explicit_path = PathBuf::from(explicit_path);
         if explicit_path.exists() {
@@ -319,7 +324,10 @@ fn collect_vk_turn_proxy_bundle_candidates_from_build_root(
     }
     for entry in fs::read_dir(build_root).map_err(|err| err.to_string())? {
         let entry = entry.map_err(|err| err.to_string())?;
-        let candidate = entry.path().join("out").join("vk-turn-proxy-server-linux-amd64");
+        let candidate = entry
+            .path()
+            .join("out")
+            .join("vk-turn-proxy-server-linux-amd64");
         if candidate.exists() {
             candidates.push(candidate);
         }

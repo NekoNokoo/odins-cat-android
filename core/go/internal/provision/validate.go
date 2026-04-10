@@ -15,18 +15,19 @@ type Check struct {
 }
 
 type ValidationResponse struct {
-	OK           bool                `json:"ok"`
-	Host         string              `json:"host"`
-	DeployFlow   string              `json:"deployFlow,omitempty"`
-	User         string              `json:"user"`
-	AuthMethod   string              `json:"authMethod"`
-	EdgeEnabled  bool                `json:"edgeEnabled,omitempty"`
-	EdgeHost     string              `json:"edgeHost,omitempty"`
-	EdgePort     int                 `json:"edgePort,omitempty"`
-	Checks       []Check             `json:"checks"`
-	Warnings     []string            `json:"warnings"`
-	ProtocolPack []ProtocolPackEntry `json:"protocolPack,omitempty"`
-	Error        string              `json:"error,omitempty"`
+	OK              bool                `json:"ok"`
+	Host            string              `json:"host"`
+	DeployFlow      string              `json:"deployFlow,omitempty"`
+	User            string              `json:"user"`
+	AuthMethod      string              `json:"authMethod"`
+	EdgeEnabled     bool                `json:"edgeEnabled,omitempty"`
+	EdgeHost        string              `json:"edgeHost,omitempty"`
+	EdgePort        int                 `json:"edgePort,omitempty"`
+	EdgeRoutingMode string              `json:"edgeRoutingMode,omitempty"`
+	Checks          []Check             `json:"checks"`
+	Warnings        []string            `json:"warnings"`
+	ProtocolPack    []ProtocolPackEntry `json:"protocolPack,omitempty"`
+	Error           string              `json:"error,omitempty"`
 }
 
 func Validate(req Request) ValidationResponse {
@@ -36,11 +37,11 @@ func Validate(req Request) ValidationResponse {
 		protocolPackFallbacks = previewProtocolPackFallbacks(req.Edge.Server.Host, normalizedEdgePublicPort(req.Edge))
 	}
 	resp := ValidationResponse{
-		Host:         req.Server.Host,
-		DeployFlow:   string(flow),
-		User:         req.Server.Username,
-		AuthMethod:   string(req.Server.AuthMethod),
-		Warnings:     buildPlanWarnings(req, flow),
+		Host:       req.Server.Host,
+		DeployFlow: string(flow),
+		User:       req.Server.Username,
+		AuthMethod: string(req.Server.AuthMethod),
+		Warnings:   buildPlanWarnings(req, flow),
 		ProtocolPack: buildProtocolPackWithFallbacks(
 			TransportXray,
 			0,
@@ -53,6 +54,7 @@ func Validate(req Request) ValidationResponse {
 		resp.EdgeEnabled = true
 		resp.EdgeHost = req.Edge.Server.Host
 		resp.EdgePort = normalizedEdgePublicPort(req.Edge)
+		resp.EdgeRoutingMode = string(normalizedEdgeRoutingMode(req.Edge))
 	}
 
 	if req.Server.Host == "" || req.Server.Username == "" || req.Secret == "" {
@@ -156,7 +158,19 @@ func validateEdgeAttach(req Request, resp ValidationResponse) ValidationResponse
 			Detail: fmt.Sprintf("Connected to %s:%d", req.Server.Host, normalizedPort(req.Server.Port)),
 		},
 	)
-	if _, _, _, err := loadRemoteAccessState(originClient); err != nil {
+	owner, _, _, err := loadRemoteAccessState(originClient)
+	if err != nil {
+		resp.Checks = append(resp.Checks, Check{
+			Key:    "origin-owner-profile",
+			Label:  "Origin owner profile",
+			OK:     false,
+			Detail: err.Error(),
+		})
+		resp.Error = "origin owner profile is not ready for edge attach"
+		return resp
+	}
+	reality, err := readInviteRealityFallback(owner)
+	if err != nil {
 		resp.Checks = append(resp.Checks, Check{
 			Key:    "origin-owner-profile",
 			Label:  "Origin owner profile",
@@ -170,7 +184,7 @@ func validateEdgeAttach(req Request, resp ValidationResponse) ValidationResponse
 		Key:    "origin-owner-profile",
 		Label:  "Origin owner profile",
 		OK:     true,
-		Detail: "Loaded the live owner profile and REALITY state from the origin host.",
+		Detail: fmt.Sprintf("Loaded the live owner profile with REALITY fallback %s:%d.", req.Server.Host, reality.Port),
 	})
 
 	edgeClient, err := connectSSH(edgeRequest(req))
@@ -219,6 +233,7 @@ func validateEdgeAttach(req Request, resp ValidationResponse) ValidationResponse
 	}
 
 	publicPort := normalizedEdgePublicPort(req.Edge)
+	routingMode := normalizedEdgeRoutingMode(req.Edge)
 	_, portErr := runRemote(edgeClient, remoteRootShell(fmt.Sprintf("if ss -H -ltn | awk '{print $4}' | grep -Eq '(^|\\]|:)%d$'; then exit 1; fi", publicPort)))
 	portDetail := fmt.Sprintf("%d/tcp is currently free on the edge host", publicPort)
 	if portErr != nil {
@@ -231,6 +246,39 @@ func validateEdgeAttach(req Request, resp ValidationResponse) ValidationResponse
 		Detail: portDetail,
 	})
 	allOK = allOK && portErr == nil
+
+	originReachabilityCmd := remoteRootShell(fmt.Sprintf(
+		"timeout 8 bash -lc 'cat </dev/null >/dev/tcp/%s/%d'",
+		req.Server.Host,
+		reality.Port,
+	))
+	_, originReachabilityErr := runRemote(edgeClient, originReachabilityCmd)
+	originReachabilityDetail := fmt.Sprintf("Edge can already reach the REALITY origin on %s:%d", req.Server.Host, reality.Port)
+	if originReachabilityErr != nil {
+		originReachabilityDetail = originReachabilityErr.Error()
+	}
+	resp.Checks = append(resp.Checks, Check{
+		Key:    "edge-origin-reachability",
+		Label:  "Edge to origin reachability",
+		OK:     originReachabilityErr == nil,
+		Detail: originReachabilityDetail,
+	})
+	allOK = allOK && originReachabilityErr == nil
+
+	if routingMode == EdgeRoutingModeXrayProxy {
+		_, prereqErr := runRemote(edgeClient, "command -v curl >/dev/null && command -v timeout >/dev/null && command -v systemctl >/dev/null")
+		prereqDetail := "curl, timeout, and systemctl are available for xray-proxy edge deploy."
+		if prereqErr != nil {
+			prereqDetail = prereqErr.Error()
+		}
+		resp.Checks = append(resp.Checks, Check{
+			Key:    "edge-xray-proxy-prerequisites",
+			Label:  "Edge xray-proxy prerequisites",
+			OK:     prereqErr == nil,
+			Detail: prereqDetail,
+		})
+		allOK = allOK && prereqErr == nil
+	}
 
 	resp.OK = allOK
 	if !allOK {

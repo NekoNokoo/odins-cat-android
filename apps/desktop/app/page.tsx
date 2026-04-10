@@ -3,6 +3,7 @@
 import { AppShell } from "@whitelist/ui/AppShell";
 import { LanguageToggle } from "./_components/i18n";
 import { ControlCenter } from "./_components/control-center";
+import { LaunchIntro } from "./_components/launch-intro";
 
 function HeaderWhitelistCat() {
   return (
@@ -18,14 +19,17 @@ function HeaderWhitelistCat() {
 
 export default function Page() {
   return (
-    <AppShell
-      title="Odin's Cat"
-      titleAccessory={<HeaderWhitelistCat />}
-      headerAction={<LanguageToggle />}
-      dragRegion
-      compactHeader
-    >
-      <ControlCenter />
-    </AppShell>
+    <>
+      <LaunchIntro />
+      <AppShell
+        title="Odin's Cat"
+        titleAccessory={<HeaderWhitelistCat />}
+        headerAction={<LanguageToggle />}
+        dragRegion
+        compactHeader
+      >
+        <ControlCenter />
+      </AppShell>
+    </>
   );
 }

@@ -13,6 +13,7 @@ import type {
   DeploymentState,
   DeployStage,
   EdgeAttachDraft,
+  EdgeRoutingMode,
   InstalledAppInfo,
   InviteProfile,
   LocalTunnelState,
@@ -55,6 +56,7 @@ type MobileSheet =
 type AccessMode =
   | "vless-reality"
   | "yandex-edge"
+  | "yandex-edge-proxy"
   | "vk-relay"
   | "relay-via-server"
   | "relay-direct";
@@ -87,7 +89,8 @@ type OwnerRuntimeLabMode =
   | "reality-vps-scaffold"
   | "reality-vps-lab"
   | "reality-vps-relay-lab"
-  | "reality-yandex-edge";
+  | "reality-yandex-edge"
+  | "reality-yandex-edge-proxy";
 
 type OwnerRuntimeLabTransport = "tcp" | "grpc";
 type EdgeDraft = {
@@ -97,6 +100,7 @@ type EdgeDraft = {
   authMethod: AuthMethod;
   secret: string;
   publicPort: number;
+  routingMode: EdgeRoutingMode;
 };
 
 type OwnerRuntimeLabState = {
@@ -144,6 +148,7 @@ const initialEdgeDraft: EdgeDraft = {
   authMethod: "password",
   secret: "",
   publicPort: 443,
+  routingMode: "tcp-forward",
 };
 const diagnosticsPreviewMaxLines = 8;
 const diagnosticsPreviewMaxChars = 720;
@@ -278,23 +283,122 @@ const profileProtocolPackHasEntry = (
   id: string,
 ) => Boolean(profile?.protocolPack?.some((entry) => entry.id === id));
 
+type EdgeFallbackRuntimeConfig = {
+  connectHost: string;
+  connectPort: number;
+  source: string;
+  tag: string;
+  ownerRealityEgress: boolean;
+};
+
+const asEdgeFallbackRuntimeConfig = (
+  value: unknown,
+): EdgeFallbackRuntimeConfig | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const candidate = value as Record<string, unknown>;
+  const connectHost =
+    typeof candidate.connectHost === "string"
+      ? candidate.connectHost.trim()
+      : "";
+  const connectPort =
+    typeof candidate.connectPort === "number"
+      ? candidate.connectPort
+      : typeof candidate.connectPort === "string"
+        ? Number.parseInt(candidate.connectPort, 10)
+        : Number.NaN;
+  const source =
+    typeof candidate.source === "string" ? candidate.source.trim() : "";
+  const tag = typeof candidate.tag === "string" ? candidate.tag.trim() : "";
+  const ownerRealityEgress = candidate.ownerRealityEgress === true;
+  if (
+    !connectHost ||
+    !Number.isInteger(connectPort) ||
+    connectPort <= 0 ||
+    connectPort > 65535
+  ) {
+    return null;
+  }
+  return {
+    connectHost,
+    connectPort,
+    source,
+    tag,
+    ownerRealityEgress,
+  };
+};
+
+const resolveProfileEdgeFallback = (
+  profile:
+    | Pick<OwnerAccessProfile, "stagedFallbacks">
+    | Pick<InviteProfile, "stagedFallbacks">
+    | null
+    | undefined,
+  key: "realityYandexEdge" | "realityYandexEdgeProxy",
+) => asEdgeFallbackRuntimeConfig(profile?.stagedFallbacks?.[key]);
+
+const mergeProtocolPackEntries = (
+  ...packs: Array<ProtocolPackEntry[] | null | undefined>
+) => {
+  const merged = new Map<string, ProtocolPackEntry>();
+  for (const pack of packs) {
+    for (const entry of pack ?? []) {
+      if (!merged.has(entry.id)) {
+        merged.set(entry.id, entry);
+      }
+    }
+  }
+  return Array.from(merged.values());
+};
+
 const ownerProfileHasYandexEdge = (profile: OwnerAccessProfile | null) =>
+  Boolean(
+    profile?.stagedFallbacks &&
+      (Object.prototype.hasOwnProperty.call(
+        profile.stagedFallbacks,
+        "realityYandexEdge",
+      ) ||
+        Object.prototype.hasOwnProperty.call(
+          profile.stagedFallbacks,
+          "realityYandexEdgeProxy",
+        )),
+  ) ||
+  profileProtocolPackHasEntry(profile, "vless-reality-yandex-edge") ||
+  profileProtocolPackHasEntry(profile, "vless-reality-yandex-edge-proxy");
+
+const ownerProfileHasCurrentYandexEdge = (profile: OwnerAccessProfile | null) =>
   Boolean(
     profile?.stagedFallbacks &&
       Object.prototype.hasOwnProperty.call(
         profile.stagedFallbacks,
-        "realityYandexEdge",
+        "realityYandexEdgeProxy",
       ),
-  ) || profileProtocolPackHasEntry(profile, "vless-reality-yandex-edge");
+  ) || profileProtocolPackHasEntry(profile, "vless-reality-yandex-edge-proxy");
 
 const importedProfileHasYandexEdge = (profile: InviteProfile | null) =>
   Boolean(
     profile?.stagedFallbacks &&
-      Object.prototype.hasOwnProperty.call(
+      (Object.prototype.hasOwnProperty.call(
         profile.stagedFallbacks,
         "realityYandexEdge",
+      ) ||
+        Object.prototype.hasOwnProperty.call(
+          profile.stagedFallbacks,
+          "realityYandexEdgeProxy",
+        )),
+  ) ||
+  profileProtocolPackHasEntry(profile, "vless-reality-yandex-edge") ||
+  profileProtocolPackHasEntry(profile, "vless-reality-yandex-edge-proxy");
+
+const importedProfileHasCurrentYandexEdge = (profile: InviteProfile | null) =>
+  Boolean(
+    profile?.stagedFallbacks &&
+      Object.prototype.hasOwnProperty.call(
+        profile.stagedFallbacks,
+        "realityYandexEdgeProxy",
       ),
-  ) || profileProtocolPackHasEntry(profile, "vless-reality-yandex-edge");
+  ) || profileProtocolPackHasEntry(profile, "vless-reality-yandex-edge-proxy");
 
 const ownerProfileHasRealityRelay = (profile: OwnerAccessProfile | null) =>
   Boolean(
@@ -588,7 +692,6 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const [deployPortMode, setDeployPortMode] = useState<DeployPortMode>("auto");
   const [secret, setSecret] = useState("");
   const [validation, setValidation] = useState<ValidationResponse | null>(null);
-  const [showValidationOverlay, setShowValidationOverlay] = useState(false);
   const [plan, setPlan] = useState<DeployStage[]>([]);
   const [deployment, setDeployment] = useState<DeploymentState | null>(null);
   const [showDeploymentOverlay, setShowDeploymentOverlay] = useState(false);
@@ -737,7 +840,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         hostsMatch(draft.host || resolvedDraftHost, importedProfile?.serverHost)),
   );
   const hasLocalAccessProfileForSelectedMode =
-    selectedAccessMode === "yandex-edge"
+    selectedAccessMode === "yandex-edge" ||
+    selectedAccessMode === "yandex-edge-proxy"
       ? hasLocalYandexEdgeAccessProfile
       : selectedAccessMode === "relay-via-server" ||
           selectedAccessMode === "relay-direct"
@@ -790,17 +894,17 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       "runtime-prep":
         "Создаёт изолированные директории Odin's Cat и проверяет сетевую готовность.",
       "edge-runtime-prep":
-        "Ставит socat на edge-хост и пишет manifest для TCP passthrough.",
+        "Готовит выбранный edge-runtime и пишет manifest для нового входа.",
       "install-binaries":
         "Устанавливает xray и загружает server-side vk-turn-proxy для общего dual-stack runtime.",
       "configure-services":
         "Генерирует ключи, пишет конфиги xray и ставит unit-файлы для REALITY и VK relay.",
       "edge-configure":
-        "Ставит systemd forwarder, который поднимает новый вход через Yandex edge.",
+        "Ставит systemd-сервис для выбранного edge path и поднимает новый вход через Yandex edge.",
       "service-start":
         "Запускает xray и vk-turn-proxy на одном сервере и проверяет оба входа.",
       "edge-service-start":
-        "Запускает passthrough-сервис и проверяет reachability до текущего REALITY origin.",
+        "Запускает edge-сервис и проверяет reachability до текущего REALITY origin.",
       "egress-check":
         "Проверяет DNS, HTTP и HTTPS egress на сервере после запуска сервисов.",
       "profile-refresh":
@@ -950,15 +1054,6 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     relayRuntimeActive &&
     localTunnel?.activeFeatures?.includes("reality-vps-owner-egress:off"),
   );
-  const yandexEdgeRuntimeActive = Boolean(
-    localTunnel?.runtimeFamily === "reality-vps-lab" &&
-    localTunnel?.activationState === "active" &&
-    localTunnel?.frontConnectHost === yandexEdgeConnectHost &&
-    localTunnel?.activeFeatures?.includes(
-      `reality-vps-source:${yandexEdgeSource}`,
-    ) &&
-    localTunnel?.activeFeatures?.includes("reality-vps-owner-egress:off"),
-  );
   const deploymentHealthLabel = deployment?.healthChecks?.length
     ? deployment.healthChecks.every((check) => check.ok)
       ? t("remoteEgressReady")
@@ -981,6 +1076,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     : t("vpnDisabled");
   const relayOwnerConnectAnimation =
     (selectedAccessMode === "yandex-edge" ||
+      selectedAccessMode === "yandex-edge-proxy" ||
       selectedAccessMode === "relay-via-server" ||
       selectedAccessMode === "relay-direct") &&
     !vpnVisualActive &&
@@ -1003,6 +1099,23 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           ? t("manualPortsDistinct")
           : null;
   const deployModeLabel = `${t("deployModeDual")} / ${deployPortMode === "manual" ? t("portSetupManual") : t("portSetupAuto")}`;
+  const importedProfileForCurrentHost = importedProfileMatchesHost(
+    importedProfile,
+    resolvedDraftHost,
+  );
+  const ownerYandexEdgeReady = ownerProfileHasCurrentYandexEdge(ownerProfile);
+  const importedYandexEdgeReady = importedProfileHasCurrentYandexEdge(
+    importedProfile,
+  );
+  const importedYandexEdgeStale = Boolean(
+    importedProfileForCurrentHost &&
+      ownerYandexEdgeReady &&
+      !importedYandexEdgeReady,
+  );
+  const originValidation =
+    validation && validation.deployFlow !== "edge-attach" ? validation : null;
+  const edgeAttachValidation =
+    validation?.deployFlow === "edge-attach" ? validation : null;
   const safetyPostureLabel = systemProxyActive
     ? t("safetySystemProxyOn")
     : t("safetyLocalhostOnly");
@@ -1105,15 +1218,21 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     localTunnel?.status === "running" ? tunnelStatusLabel : primaryStatusBadge,
     deploymentHealthLabel,
   ].join(" / ");
-  const currentProtocolPack =
-    ownerProfile?.protocolPack ??
-    importedProfile?.protocolPack ??
-    deployment?.protocolPack ??
-    validation?.protocolPack ??
-    [];
+  const currentProtocolPack = mergeProtocolPackEntries(
+    importedProfile?.protocolPack,
+    ownerProfile?.protocolPack,
+    deployment?.protocolPack,
+    validation?.protocolPack,
+  );
   const protocolEntryById = new Map(
     currentProtocolPack.map((entry) => [entry.id, entry]),
   );
+  const resolvedYandexEdgeFallback =
+    resolveProfileEdgeFallback(importedProfile, "realityYandexEdge") ??
+    resolveProfileEdgeFallback(ownerProfile, "realityYandexEdge");
+  const resolvedYandexEdgeProxyFallback =
+    resolveProfileEdgeFallback(importedProfile, "realityYandexEdgeProxy") ??
+    resolveProfileEdgeFallback(ownerProfile, "realityYandexEdgeProxy");
   const accessModeCards = [
     {
       mode: "vless-reality" as const,
@@ -1126,14 +1245,15 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       available: true,
     },
     {
-      mode: "yandex-edge" as const,
+      mode: "yandex-edge-proxy" as const,
       label: t("runtimeModeYandexEdge"),
       hint: t("runtimeModeYandexEdgeHint"),
-      status: protocolEntryById.has("vless-reality-yandex-edge")
+      status: protocolEntryById.has("vless-reality-yandex-edge-proxy")
         ? t("modeStatusOptional")
-        : t("modeStatusAttach"),
+        : t("modeStatusLocked"),
       available:
-        isAndroidClient && protocolEntryById.has("vless-reality-yandex-edge"),
+        isAndroidClient &&
+        protocolEntryById.has("vless-reality-yandex-edge-proxy"),
     },
     {
       mode: "vk-relay" as const,
@@ -1223,7 +1343,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const routeLensVisible = Boolean(
     isAndroidClient &&
       (routeLensOriginDisplay ||
-        (selectedAccessMode === "yandex-edge" && routeLensTunnelDisplay)),
+        ((selectedAccessMode === "yandex-edge" ||
+          selectedAccessMode === "yandex-edge-proxy") &&
+          routeLensTunnelDisplay)),
   );
   const ownerRuntimeLabPanelVisible =
     isAndroidClient && ownerRuntimeLabUnlocked;
@@ -1466,11 +1588,16 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         if (
           parsed.accessMode === "vless-reality" ||
           parsed.accessMode === "yandex-edge" ||
+          parsed.accessMode === "yandex-edge-proxy" ||
           parsed.accessMode === "vk-relay" ||
           parsed.accessMode === "relay-via-server" ||
           parsed.accessMode === "relay-direct"
         ) {
-          setSelectedAccessMode(parsed.accessMode);
+          setSelectedAccessMode(
+            parsed.accessMode === "yandex-edge"
+              ? "yandex-edge-proxy"
+              : parsed.accessMode,
+          );
         } else {
           setSelectedAccessMode(draftAccessMode(parsed.draft));
         }
@@ -1502,6 +1629,12 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             parsed.edgeDraft.publicPort > 0
               ? parsed.edgeDraft.publicPort
               : initialEdgeDraft.publicPort,
+          routingMode:
+            parsed.edgeDraft.routingMode === "sni-router" ||
+            parsed.edgeDraft.routingMode === "tcp-forward" ||
+            parsed.edgeDraft.routingMode === "xray-proxy"
+              ? parsed.edgeDraft.routingMode
+              : initialEdgeDraft.routingMode,
         });
       }
       if (parsed.importedProfile?.localPath) {
@@ -1538,7 +1671,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             parsed.mode === "reality-vps-scaffold" ||
             parsed.mode === "reality-vps-lab" ||
             parsed.mode === "reality-vps-relay-lab" ||
-            parsed.mode === "reality-yandex-edge"
+            parsed.mode === "reality-yandex-edge" ||
+            parsed.mode === "reality-yandex-edge-proxy"
               ? parsed.mode
               : "off",
           hintServerName:
@@ -1716,11 +1850,23 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   }, [isAndroidClient, localTunnel]);
 
   useEffect(() => {
+    if (selectedAccessMode === "yandex-edge") {
+      setSelectedAccessMode(
+        protocolEntryById.has("vless-reality-yandex-edge-proxy")
+          ? "yandex-edge-proxy"
+          : "vless-reality",
+      );
+      return;
+    }
     if (selectedAccessModeCard.available) {
       return;
     }
     setSelectedAccessMode("vless-reality");
-  }, [selectedAccessModeCard.available, selectedAccessMode]);
+  }, [
+    protocolEntryById,
+    selectedAccessMode,
+    selectedAccessModeCard.available,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1800,6 +1946,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           },
           secret: edgeDraft.secret,
           publicPort: edgeDraft.publicPort,
+          routingMode: edgeDraft.routingMode,
         },
       };
     }
@@ -1819,13 +1966,12 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         const validateRes = await coreApi.validateProvision(payload);
         const validateData = validateRes.data;
         setValidation(validateData);
-        setShowValidationOverlay(true);
 
         const planRes = await coreApi.getProvisionPlan(payload);
         const planData = planRes.data;
         setPlan(planData.steps ?? []);
 
-        if (!validateRes.ok && validateData.error) {
+        if (validateData.error) {
           setError(validateData.error);
         }
       } catch (requestError) {
@@ -1906,7 +2052,10 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
 
     const originHost = resolvedDraftHost.trim();
     const tunnelHost =
-      selectedAccessMode === "yandex-edge" ? yandexEdgeConnectHost : "";
+      selectedAccessMode === "yandex-edge" ||
+      selectedAccessMode === "yandex-edge-proxy"
+        ? yandexEdgeConnectHost
+        : "";
     if (!originHost && !tunnelHost) {
       setMobileNetworkLens(null);
       return null;
@@ -2041,6 +2190,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       if (ownerRuntimeLabRequest?.mode === "reality-yandex-edge") {
         return { runtimeFamily: "reality-vps-lab", activationState: "active" };
       }
+      if (ownerRuntimeLabRequest?.mode === "reality-yandex-edge-proxy") {
+        return { runtimeFamily: "reality-vps-lab", activationState: "active" };
+      }
       if (ownerRuntimeLabRequest?.mode === "reality-vps-scaffold") {
         return {
           runtimeFamily: "reality-vps-lab",
@@ -2164,7 +2316,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       ownerRuntimeLabMode === "reality-vps-scaffold" ||
       ownerRuntimeLabMode === "reality-vps-lab" ||
       ownerRuntimeLabMode === "reality-vps-relay-lab" ||
-      ownerRuntimeLabMode === "reality-yandex-edge"
+      ownerRuntimeLabMode === "reality-yandex-edge" ||
+      ownerRuntimeLabMode === "reality-yandex-edge-proxy"
     ) {
       if (!isAndroidClient) {
         throw new Error(t("ownerLabAndroidOnly"));
@@ -2177,18 +2330,40 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         );
       }
       if (ownerRuntimeLabMode === "reality-yandex-edge") {
+        const yandexEdgeFallback = resolvedYandexEdgeFallback;
         ownerRuntimeLabRequest = {
           mode: ownerRuntimeLabMode,
           hintServerName: "",
           vpsServerName: "www.cloudflare.com",
           vpsPort: 52444,
-          vpsConnectHost: yandexEdgeConnectHost,
-          vpsConnectPort: yandexEdgeConnectPort,
+          vpsConnectHost:
+            yandexEdgeFallback?.connectHost ?? yandexEdgeConnectHost,
+          vpsConnectPort:
+            yandexEdgeFallback?.connectPort ?? yandexEdgeConnectPort,
           vpsTransport: "tcp",
           vpsFlow: "xtls-rprx-vision",
           vpsFingerprint: "chrome",
-          vpsSource: yandexEdgeSource,
-          vpsTag: yandexEdgeTag,
+          vpsSource: yandexEdgeFallback?.source || yandexEdgeSource,
+          vpsTag: yandexEdgeFallback?.tag || yandexEdgeTag,
+        };
+      } else if (ownerRuntimeLabMode === "reality-yandex-edge-proxy") {
+        const yandexEdgeProxyFallback = resolvedYandexEdgeProxyFallback;
+        ownerRuntimeLabRequest = {
+          mode: ownerRuntimeLabMode,
+          hintServerName: "",
+          vpsServerName: "www.cloudflare.com",
+          vpsPort: 52444,
+          vpsConnectHost:
+            yandexEdgeProxyFallback?.connectHost ?? yandexEdgeConnectHost,
+          vpsConnectPort:
+            yandexEdgeProxyFallback?.connectPort ?? yandexEdgeConnectPort,
+          vpsTransport: "tcp",
+          vpsFlow: "xtls-rprx-vision",
+          vpsFingerprint: "chrome",
+          vpsSource:
+            yandexEdgeProxyFallback?.source || `${yandexEdgeSource}:proxy`,
+          vpsTag: yandexEdgeProxyFallback?.tag || `${yandexEdgeTag}-proxy`,
+          vpsOwnerRealityEgress: false,
         };
       } else if (isOwnerRuntimeLabVpsMode(ownerRuntimeLabMode)) {
         const usingRelayOwnerMode =
@@ -2324,7 +2499,13 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
 
   const buildCurrentTunnelStartRequest = (baseDraft: ServerDraft = draft) => {
     if (selectedAccessMode === "yandex-edge") {
-      return buildTunnelStartRequest(baseDraft, "reality-yandex-edge", {
+      return buildTunnelStartRequest(baseDraft, "reality-yandex-edge-proxy", {
+        allowImportedProfileForOwnerRuntimeLab: true,
+        requireYandexEdgeSupport: true,
+      });
+    }
+    if (selectedAccessMode === "yandex-edge-proxy") {
+      return buildTunnelStartRequest(baseDraft, "reality-yandex-edge-proxy", {
         allowImportedProfileForOwnerRuntimeLab: true,
         requireYandexEdgeSupport: true,
       });
@@ -3498,7 +3679,6 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     setDeployPortMode("auto");
     setSecret("");
     setValidation(null);
-    setShowValidationOverlay(false);
     setPlan([]);
     setDeployment(null);
     setShowDeploymentOverlay(false);
@@ -3552,6 +3732,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                       : isPending ||
                         !resolvedDraftHost ||
                         ((selectedAccessMode === "yandex-edge" ||
+                          selectedAccessMode === "yandex-edge-proxy" ||
                           selectedAccessMode === "relay-via-server" ||
                           selectedAccessMode === "relay-direct")
                           ? !hasLocalAccessProfileForSelectedMode
@@ -3590,7 +3771,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
 
                     <div
                       className={`home-network-card__grid ${
-                        selectedAccessMode === "yandex-edge" &&
+                        selectedAccessMode === "yandex-edge-proxy" &&
                         routeLensOriginDisplay &&
                         routeLensTunnelDisplay
                           ? ""
@@ -3613,7 +3794,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                         </div>
                       ) : null}
 
-                      {selectedAccessMode === "yandex-edge" &&
+                      {selectedAccessMode === "yandex-edge-proxy" &&
                       routeLensTunnelDisplay ? (
                         <div className="home-network-hop">
                           <span>{t("routeLensTunnel")}</span>
@@ -4098,6 +4279,54 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                     {t("startDeploy")}
                   </button>
                 </div>
+
+                {originValidation ? (
+                  <div className="check-list" style={{ marginTop: 18 }}>
+                    {originValidation.error ? (
+                      <p className="status-banner status-error">
+                        {translateCheckDetail(originValidation.error)}
+                      </p>
+                    ) : (
+                      <p
+                        className={
+                          originValidation.ok
+                            ? "status-banner status-success"
+                            : "status-banner"
+                        }
+                      >
+                        {originValidation.ok ? t("checkOk") : t("checkFail")}
+                      </p>
+                    )}
+
+                    {originValidation.warnings.map((warning, index) => (
+                      <p className="status-banner" key={`${warning}-${index}`}>
+                        {translateCheckDetail(warning)}
+                      </p>
+                    ))}
+
+                    {originValidation.checks.length > 0 ? (
+                      originValidation.checks.map((check) => (
+                        <div className="check-row" key={check.key}>
+                          <div>
+                            <strong>
+                              {translateCheckLabel(check.key, check.label)}
+                            </strong>
+                            <p>{translateCheckDetail(check.detail)}</p>
+                          </div>
+                          <span
+                            className={
+                              check.ok ? "pill pill-ok" : "pill pill-off"
+                            }
+                          >
+                            {check.ok ? t("checkOk") : t("checkFail")}
+                          </span>
+                        </div>
+                      ))
+                    ) : !originValidation.error ? (
+                      <p className="compact-note">{t("validationEmpty")}</p>
+                    ) : null}
+                  </div>
+                ) : null}
               </section>
 
               <section className="sheet-card">
@@ -4107,12 +4336,18 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                     <strong>{t("deployStepEdgeTitle")}</strong>
                   </div>
                   <span className="sheet-card__badge">
-                    {protocolEntryById.has("vless-reality-yandex-edge")
+                    {protocolEntryById.has("vless-reality-yandex-edge-proxy")
                       ? t("modeStatusOptional")
                       : t("modeStatusAttach")}
                   </span>
                 </div>
                 <p className="compact-note">{t("deployStepEdgeText")}</p>
+
+                {importedYandexEdgeStale ? (
+                  <p className="status-banner">
+                    {t("edgeDiagInviteStaleDetail")}
+                  </p>
+                ) : null}
 
                 <div className="form-grid">
                   <label className="input-field">
@@ -4170,6 +4405,30 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                       placeholder="443"
                       inputMode="numeric"
                     />
+                  </label>
+
+                  <label className="input-field">
+                    <span>{t("edgeRoutingMode")}</span>
+                    <select
+                      value={edgeDraft.routingMode}
+                      onChange={(event) =>
+                        setEdgeDraft((current) => ({
+                          ...current,
+                          routingMode: event.target.value as EdgeRoutingMode,
+                        }))
+                      }
+                    >
+                      <option value="tcp-forward">
+                        {t("edgeRoutingTcpForward")}
+                      </option>
+                      <option value="sni-router">
+                        {t("edgeRoutingSniRouter")}
+                      </option>
+                      <option value="xray-proxy">
+                        {t("edgeRoutingXrayProxy")}
+                      </option>
+                    </select>
+                    <small>{t("edgeRoutingModeHelp")}</small>
                   </label>
 
                   <label className="input-field input-span">
@@ -4261,6 +4520,54 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                     {t("attachEdge")}
                   </button>
                 </div>
+
+                {edgeAttachValidation ? (
+                  <div className="check-list" style={{ marginTop: 18 }}>
+                    {edgeAttachValidation.error ? (
+                      <p className="status-banner status-error">
+                        {translateCheckDetail(edgeAttachValidation.error)}
+                      </p>
+                    ) : (
+                      <p
+                        className={
+                          edgeAttachValidation.ok
+                            ? "status-banner status-success"
+                            : "status-banner"
+                        }
+                      >
+                        {edgeAttachValidation.ok ? t("checkOk") : t("checkFail")}
+                      </p>
+                    )}
+
+                    {edgeAttachValidation.warnings.map((warning, index) => (
+                      <p className="status-banner" key={`${warning}-${index}`}>
+                        {translateCheckDetail(warning)}
+                      </p>
+                    ))}
+
+                    {edgeAttachValidation.checks.length > 0 ? (
+                      edgeAttachValidation.checks.map((check) => (
+                        <div className="check-row" key={check.key}>
+                          <div>
+                            <strong>
+                              {translateCheckLabel(check.key, check.label)}
+                            </strong>
+                            <p>{translateCheckDetail(check.detail)}</p>
+                          </div>
+                          <span
+                            className={
+                              check.ok ? "pill pill-ok" : "pill pill-off"
+                            }
+                          >
+                            {check.ok ? t("checkOk") : t("checkFail")}
+                          </span>
+                        </div>
+                      ))
+                    ) : !edgeAttachValidation.error ? (
+                      <p className="compact-note">{t("validationEmpty")}</p>
+                    ) : null}
+                  </div>
+                ) : null}
               </section>
             </div>
 
@@ -5449,50 +5756,6 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         </div>
       ) : null}
 
-      {showValidationOverlay && validation ? (
-        <div
-          className="deployment-overlay"
-          role="dialog"
-          aria-modal="true"
-          aria-label={t("validationDetails")}
-        >
-          <div
-            className="deployment-overlay__backdrop"
-            onClick={() => setShowValidationOverlay(false)}
-          />
-          <div className="deployment-overlay__panel">
-            <div className="deployment-overlay__head">
-              <div>
-                <span className="section-eyebrow">{t("validation")}</span>
-                <h2 className="section-title">{t("validationDetails")}</h2>
-              </div>
-              <button
-                className="ghost"
-                onClick={() => setShowValidationOverlay(false)}
-                type="button"
-              >
-                {t("close")}
-              </button>
-            </div>
-
-            <div className="check-list">
-              {validation.checks.map((check) => (
-                <div className="check-row" key={check.key}>
-                  <div>
-                    <strong>
-                      {translateCheckLabel(check.key, check.label)}
-                    </strong>
-                    <p>{translateCheckDetail(check.detail)}</p>
-                  </div>
-                  <span className={check.ok ? "pill pill-ok" : "pill pill-off"}>
-                    {check.ok ? t("checkOk") : t("checkFail")}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      ) : null}
     </>
   );
 }

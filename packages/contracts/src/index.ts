@@ -6,6 +6,10 @@ export type StageStatus = "queued" | "current" | "done" | "failed";
 export type ProtocolPackStatus = "active" | "staged";
 export type ProvisionFlow = "origin" | "edge-attach";
 export type EdgeProvider = "yandex-edge";
+export type EdgeRoutingMode =
+  | "tcp-forward"
+  | "sni-router"
+  | "xray-proxy";
 
 export interface ProtocolPackEntry {
   id: string;
@@ -44,6 +48,7 @@ export interface EdgeAttachDraft {
   server: EdgeServerDraft;
   secret: string;
   publicPort?: number;
+  routingMode?: EdgeRoutingMode;
 }
 
 export interface DeployStage {
@@ -165,6 +170,7 @@ export interface DeploymentState {
   edgeEnabled?: boolean;
   edgeHost?: string;
   edgePort?: number;
+  edgeRoutingMode?: EdgeRoutingMode;
   healthChecks?: Array<{
     key: string;
     label: string;
@@ -191,6 +197,7 @@ export interface ValidationResponse {
   edgeEnabled?: boolean;
   edgeHost?: string;
   edgePort?: number;
+  edgeRoutingMode?: EdgeRoutingMode;
   checks: Array<{
     key: string;
     label: string;
@@ -303,7 +310,8 @@ export type OwnerRuntimeLabMode =
   | "reality-vps-scaffold"
   | "reality-vps-lab"
   | "reality-vps-relay-lab"
-  | "reality-yandex-edge";
+  | "reality-yandex-edge"
+  | "reality-yandex-edge-proxy";
 
 export type OwnerRuntimeLabTransport = "tcp" | "grpc";
 

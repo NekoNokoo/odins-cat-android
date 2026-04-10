@@ -45,6 +45,9 @@ func previewProtocolPackFallbacks(edgeHost string, edgePort int) map[string]any 
 		fallbacks["realityYandexEdge"] = map[string]any{
 			"connectPort": edgePort,
 		}
+		fallbacks["realityYandexEdgeProxy"] = map[string]any{
+			"connectPort": edgePort,
+		}
 	}
 	return fallbacks
 }
@@ -94,6 +97,18 @@ func buildProtocolPackWithFallbacks(transport Transport, wireGuardPort, realityP
 				Network: "tcp",
 				Port:    protocolPackPortFromFallback(stagedFallbacks["realityYandexEdge"], "connectPort", yandexEdgeDefaultPort),
 				Notes:   "Optional whitelist-facing entry surface that forwards to the live REALITY origin through a dedicated Yandex edge.",
+			})
+		}
+		if _, ok := stagedFallbacks["realityYandexEdgeProxy"]; ok {
+			entries = append(entries, ProtocolPackEntry{
+				ID:      "vless-reality-yandex-edge-proxy",
+				Label:   "Yandex edge proxy",
+				Status:  ProtocolStatusStaged,
+				Engine:  "sing-box",
+				Scheme:  "vless+reality-edge-proxy",
+				Network: "tcp",
+				Port:    protocolPackPortFromFallback(stagedFallbacks["realityYandexEdgeProxy"], "connectPort", yandexEdgeDefaultPort),
+				Notes:   "Two-hop Yandex edge proxy path for restrictive networks. The client enters through the Yandex edge and keeps egress on the stable REALITY origin.",
 			})
 		}
 		if _, ok := stagedFallbacks["realityRelayOwnerEgress"]; ok {

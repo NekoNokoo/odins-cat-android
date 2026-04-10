@@ -22,22 +22,22 @@ const minVKTurnStreamCount = 1
 const maxVKTurnStreamCount = 16
 
 type inviteProfile struct {
-	ID              string `json:"id,omitempty"`
-	Role            string `json:"role"`
-	Name            string `json:"name"`
-	Protocol        string `json:"protocol"`
-	Transport       string `json:"transport"`
-	ServerHost      string `json:"serverHost"`
-	VKTurnStreamCount int  `json:"vkTurnStreamCount,omitempty"`
-	VKTurnProxyPort int    `json:"vkTurnProxyPort"`
-	WireGuardPort   int    `json:"wireGuardPort,omitempty"`
-	EndpointPort    int    `json:"endpointPort,omitempty"`
-	Endpoint        string `json:"endpoint"`
-	Fingerprint     string `json:"fingerprint"`
-	CreatedAt       string `json:"createdAt,omitempty"`
-	RevokedAt       string `json:"revokedAt,omitempty"`
-	Status          string `json:"status,omitempty"`
-	WireGuard       struct {
+	ID                string `json:"id,omitempty"`
+	Role              string `json:"role"`
+	Name              string `json:"name"`
+	Protocol          string `json:"protocol"`
+	Transport         string `json:"transport"`
+	ServerHost        string `json:"serverHost"`
+	VKTurnStreamCount int    `json:"vkTurnStreamCount,omitempty"`
+	VKTurnProxyPort   int    `json:"vkTurnProxyPort"`
+	WireGuardPort     int    `json:"wireGuardPort,omitempty"`
+	EndpointPort      int    `json:"endpointPort,omitempty"`
+	Endpoint          string `json:"endpoint"`
+	Fingerprint       string `json:"fingerprint"`
+	CreatedAt         string `json:"createdAt,omitempty"`
+	RevokedAt         string `json:"revokedAt,omitempty"`
+	Status            string `json:"status,omitempty"`
+	WireGuard         struct {
 		ServerPublicKey  string `json:"serverPublicKey"`
 		ClientPrivateKey string `json:"clientPrivateKey"`
 		ClientPublicKey  string `json:"clientPublicKey"`
@@ -56,19 +56,19 @@ type inviteProfile struct {
 }
 
 type InviteProfileResponse struct {
-	ID              string `json:"id,omitempty"`
-	Role            string `json:"role"`
-	Name            string `json:"name"`
-	Protocol        string `json:"protocol"`
-	Transport       string `json:"transport"`
-	ServerHost      string `json:"serverHost"`
-	VKTurnStreamCount int  `json:"vkTurnStreamCount,omitempty"`
-	VKTurnProxyPort int    `json:"vkTurnProxyPort"`
-	WireGuardPort   int    `json:"wireGuardPort,omitempty"`
-	EndpointPort    int    `json:"endpointPort,omitempty"`
-	Endpoint        string `json:"endpoint"`
-	Fingerprint     string `json:"fingerprint"`
-	VLESSReality    struct {
+	ID                string `json:"id,omitempty"`
+	Role              string `json:"role"`
+	Name              string `json:"name"`
+	Protocol          string `json:"protocol"`
+	Transport         string `json:"transport"`
+	ServerHost        string `json:"serverHost"`
+	VKTurnStreamCount int    `json:"vkTurnStreamCount,omitempty"`
+	VKTurnProxyPort   int    `json:"vkTurnProxyPort"`
+	WireGuardPort     int    `json:"wireGuardPort,omitempty"`
+	EndpointPort      int    `json:"endpointPort,omitempty"`
+	Endpoint          string `json:"endpoint"`
+	Fingerprint       string `json:"fingerprint"`
+	VLESSReality      struct {
 		Port       int    `json:"port"`
 		ServerName string `json:"serverName"`
 		PublicKey  string `json:"publicKey"`
@@ -372,19 +372,19 @@ func IssueRemoteGuestProfile(req Request, name string) (InviteProfileResponse, e
 
 	guestID := nextGuestID(guestProfiles)
 	guest := inviteProfile{
-		ID:              guestID,
-		Role:            "guest",
-		Name:            defaultInviteName(name),
-		Protocol:        string(ProtocolVLESSReality),
-		Transport:       owner.Transport,
-		ServerHost:      owner.ServerHost,
+		ID:                guestID,
+		Role:              "guest",
+		Name:              defaultInviteName(name),
+		Protocol:          string(ProtocolVLESSReality),
+		Transport:         owner.Transport,
+		ServerHost:        owner.ServerHost,
 		VKTurnStreamCount: effectiveVKTurnStreamCount(owner.VKTurnStreamCount),
-		VKTurnProxyPort: owner.VKTurnProxyPort,
-		WireGuardPort:   xrayState.WireGuardPort,
-		EndpointPort:    xrayState.Reality.Port,
-		Endpoint:        fmt.Sprintf("%s:%d", owner.ServerHost, xrayState.Reality.Port),
-		CreatedAt:       nowRFC3339(),
-		Status:          "active",
+		VKTurnProxyPort:   owner.VKTurnProxyPort,
+		WireGuardPort:     xrayState.WireGuardPort,
+		EndpointPort:      xrayState.Reality.Port,
+		Endpoint:          fmt.Sprintf("%s:%d", owner.ServerHost, xrayState.Reality.Port),
+		CreatedAt:         nowRFC3339(),
+		Status:            "active",
 	}
 	guest.WireGuard.ClientPrivateKey = guestKeys.Private
 	guest.WireGuard.ClientPublicKey = guestKeys.Public
@@ -911,6 +911,22 @@ func syncInviteRealityStagedFallbacks(invite *inviteProfile) {
 			fallback["shortId"] = shortID
 			fallback["uuid"] = uuid
 			fallback["flow"] = flow
+			if strings.TrimSpace(invite.ServerHost) != "" {
+				fallback["originHost"] = strings.TrimSpace(invite.ServerHost)
+			}
+		}
+	}
+
+	if raw, ok := invite.StagedFallbacks["realityYandexEdgeProxy"]; ok {
+		if fallback, ok := raw.(map[string]any); ok {
+			fallback["originPort"] = port
+			fallback["serverName"] = serverName
+			fallback["publicKey"] = publicKey
+			fallback["shortId"] = shortID
+			fallback["uuid"] = uuid
+			fallback["flow"] = flow
+			fallback["ownerRealityEgress"] = false
+			fallback["transport"] = "tcp"
 			if strings.TrimSpace(invite.ServerHost) != "" {
 				fallback["originHost"] = strings.TrimSpace(invite.ServerHost)
 			}
