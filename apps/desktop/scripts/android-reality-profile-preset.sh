@@ -18,6 +18,10 @@ Environment:
   ODIN_ONE_CDN_PLAN_SELECT_TAG=front-primary \
     apps/desktop/scripts/android-reality-profile-preset.sh cdn-ws-lab
 
+  ODIN_ONE_CDN_PLAN_FILE=/tmp/odin-one-cdn-plan.json \
+  ODIN_ONE_CDN_PLAN_SELECT_TAG=front-primary \
+    apps/desktop/scripts/android-reality-profile-preset.sh cdn-xhttp-lab
+
 Presets:
   baseline
   boot-restore
@@ -30,6 +34,10 @@ Presets:
   reality-whitelist-scaffold
   cdn-scaffold
   cdn-ws-lab
+  cdn-xhttp-lab
+  cdn-xhttp-native-lab
+  cdn-xhttp-yandex-camouflage-lab
+  cdn-httpupgrade-lab
 EOF
 }
 
@@ -47,8 +55,10 @@ require_python() {
 emit_cdn_preset() {
   local mode="$1"
   local include_backup="$2"
+  local default_transport="$3"
+  local default_engine="${4:-sing-box}"
   require_python
-  "$PYTHON_BIN" - "$mode" "$include_backup" <<'PY'
+  "$PYTHON_BIN" - "$mode" "$include_backup" "$default_transport" "$default_engine" <<'PY'
 import json
 import os
 import sys
@@ -56,6 +66,8 @@ from pathlib import Path
 
 mode = sys.argv[1]
 include_backup = sys.argv[2].lower() == "true"
+default_transport = sys.argv[3].strip().lower() or "websocket"
+default_engine = sys.argv[4].strip().lower() or "sing-box"
 
 def getenv(name: str, default: str) -> str:
     value = os.environ.get(name, "").strip()
@@ -141,6 +153,9 @@ default_direct_keywords = [
     "ok.ru",
     "mail.ru",
     "gosuslugi",
+    "mos.ru",
+    "yandex",
+    "ya.ru",
     "ozon",
     "wildberries",
     "avito",
@@ -158,6 +173,11 @@ default_direct_keywords = [
     "t-bank",
     "tinkoff",
     "vtb",
+    "sber",
+    "sberbank",
+    "gazprombank",
+    "gpb",
+    "pochta",
 ]
 
 def normalize_front_entry(entry, *, default_provider: str, default_port: int, default_path: str, default_tag_prefix: str, index: int):
@@ -325,7 +345,51 @@ default_routing_policy = {
     "domainStrategy": "ip_if_non_match",
     "domainMatcher": "hybrid",
     "directDomainKeywords": list(default_direct_keywords),
-    "directDomains": [],
+    "directDomains": [
+        "1018213540.rsc.cdn77.org",
+        "avtodor-tr.ru",
+        "b2c-ticket-sentry.onelya.ru",
+        "bitrix.info",
+        "bkvet.ru",
+        "cdn1.ozonusercontent.com",
+        "cms1.dzvr.ru",
+        "counter.yadro.ru",
+        "dzvr.ru",
+        "emex.ru",
+        "fairplay-proxy.ott.yandex.ru",
+        "fssp.gov.ru",
+        "gorzdrav.spb.ru",
+        "gosuslugi.ru",
+        "esia.gosuslugi.ru",
+        "gov.ru",
+        "graphql.kinopoisk.ru",
+        "gu-st.ru",
+        "lk.gosuslugi.ru",
+        "lemanapro.ru",
+        "leroymerlin.ru",
+        "mobileapp.russianpost.ru",
+        "pos.gosuslugi.ru",
+        "mos.ru",
+        "mosenergosbyt.ru",
+        "mosreg.ru",
+        "nalog.ru",
+        "ozon.ru",
+        "pgu.mos.ru",
+        "pesc.ru",
+        "pochta.ru",
+        "reso.ru",
+        "rosreestr.gov.ru",
+        "rzd-bonus.ru",
+        "rzd.ru",
+        "showip.net",
+        "sys.refocus.ru",
+        "vshark.ttk.ru",
+        "widevine-proxy.ott.yandex.ru",
+        "xn--90aijkdmaud0d.xn--p1ai",
+        "yandex.net",
+        "yandex.ru",
+        "ya.ru",
+    ],
     "blockedDomainKeywords": [],
     "blockedDomains": [],
     "blockSelectedFrontHost": True,
@@ -345,8 +409,23 @@ if plan_file:
 
 provider = getenv("ODIN_ONE_CDN_PROVIDER", (plan_dataset.get("provider") if plan_dataset else None) or default_provider)
 front_selection = getenv("ODIN_ONE_CDN_FRONT_SELECTION", (plan_dataset.get("frontSelection") if plan_dataset else None) or "ordered")
-transport = getenv("ODIN_ONE_CDN_TRANSPORT", (plan_dataset.get("transport") if plan_dataset else None) or "websocket").lower()
+transport = getenv("ODIN_ONE_CDN_TRANSPORT", (plan_dataset.get("transport") if plan_dataset else None) or default_transport).lower()
+engine = getenv("ODIN_ONE_CDN_ENGINE", default_engine).lower()
 bootstrap = getenv("ODIN_ONE_CDN_BOOTSTRAP", (plan_dataset.get("bootstrap") if plan_dataset else None) or "direct-reality")
+xhttp_mode = getenv("ODIN_ONE_CDN_XHTTP_MODE", "")
+tls_alpn = getenv_csv("ODIN_ONE_CDN_TLS_ALPN", [])
+tls_allow_insecure = getenv_bool("ODIN_ONE_CDN_TLS_ALLOW_INSECURE", False)
+camouflage_host = getenv("ODIN_ONE_CDN_CAMOUFLAGE_HOST", "")
+xmux_max_concurrency_raw = os.environ.get("ODIN_ONE_CDN_XMUX_MAX_CONCURRENCY", "").strip()
+xmux_hmax_request_times_raw = os.environ.get("ODIN_ONE_CDN_XMUX_HMAX_REQUEST_TIMES", "").strip()
+xmux_hmax_reusable_secs_raw = os.environ.get("ODIN_ONE_CDN_XMUX_HMAX_REUSABLE_SECS", "").strip()
+xmux = {}
+if xmux_max_concurrency_raw:
+    xmux["maxConcurrency"] = parse_positive_int(xmux_max_concurrency_raw, default=1, field_name="ODIN_ONE_CDN_XMUX_MAX_CONCURRENCY")
+if xmux_hmax_request_times_raw:
+    xmux["hMaxRequestTimes"] = parse_positive_int(xmux_hmax_request_times_raw, default=1, field_name="ODIN_ONE_CDN_XMUX_HMAX_REQUEST_TIMES")
+if xmux_hmax_reusable_secs_raw:
+    xmux["hMaxReusableSecs"] = parse_positive_int(xmux_hmax_reusable_secs_raw, default=1, field_name="ODIN_ONE_CDN_XMUX_HMAX_REUSABLE_SECS")
 
 front_host = getenv("ODIN_ONE_CDN_FRONT_HOST", "allowed-front-a.example.com")
 front_port = getenv_int("ODIN_ONE_CDN_FRONT_PORT", default_front_port)
@@ -388,10 +467,11 @@ else:
             "host": front_host,
             "port": front_port,
             "path": front_path,
-            "tlsServerName": tls_server_name,
-            "hostHeader": host_header,
+            "tlsServerName": camouflage_host or tls_server_name,
+            "hostHeader": camouflage_host or host_header,
             "connectHost": connect_host,
             "connectPort": connect_port,
+            "tlsAllowInsecure": tls_allow_insecure,
             "provider": provider,
             "tag": front_tag,
         }
@@ -411,10 +491,11 @@ else:
                 "host": backup_host,
                 "port": backup_port,
                 "path": backup_path,
-                "tlsServerName": backup_tls,
-                "hostHeader": backup_host_header,
+                "tlsServerName": camouflage_host or backup_tls,
+                "hostHeader": camouflage_host or backup_host_header,
                 "connectHost": backup_connect_host,
                 "connectPort": backup_connect_port,
+                "tlsAllowInsecure": tls_allow_insecure,
                 "provider": provider,
                 "tag": backup_tag,
             }
@@ -426,7 +507,16 @@ payload = {
             "enabled": True,
             "mode": mode,
             "provider": provider,
+            "engine": engine,
             "transport": transport,
+            "xhttpMode": xhttp_mode,
+            "tlsAlpn": tls_alpn,
+            "tlsAllowInsecure": tls_allow_insecure,
+            "camouflageHost": camouflage_host,
+            "xmux": xmux,
+            "xmuxMaxConcurrency": xmux.get("maxConcurrency"),
+            "xmuxHMaxRequestTimes": xmux.get("hMaxRequestTimes"),
+            "xmuxHMaxReusableSecs": xmux.get("hMaxReusableSecs"),
             "frontSelection": front_selection,
             "frontPool": front_pool,
             "origin": {
@@ -632,6 +722,10 @@ reality-whitelist-scaffold
 reality-whitelist-lab
 cdn-scaffold
 cdn-ws-lab
+cdn-xhttp-lab
+cdn-xhttp-native-lab
+cdn-xhttp-yandex-camouflage-lab
+cdn-httpupgrade-lab
 EOF
     ;;
   "baseline")
@@ -781,10 +875,31 @@ EOF
     emit_reality_whitelist_preset "false" "lab"
     ;;
   "cdn-scaffold")
-    emit_cdn_preset "scaffold" "true"
+    emit_cdn_preset "scaffold" "true" "websocket"
     ;;
   "cdn-ws-lab")
-    emit_cdn_preset "lab" "false"
+    emit_cdn_preset "lab" "false" "websocket"
+    ;;
+  "cdn-xhttp-lab")
+    emit_cdn_preset "lab" "false" "xhttp"
+    ;;
+  "cdn-xhttp-native-lab")
+    emit_cdn_preset "lab" "false" "xhttp" "xray-native"
+    ;;
+  "cdn-xhttp-yandex-camouflage-lab")
+    ODIN_ONE_CDN_TRANSPORT="${ODIN_ONE_CDN_TRANSPORT:-xhttp}" \
+    ODIN_ONE_CDN_ENGINE="${ODIN_ONE_CDN_ENGINE:-xray-native}" \
+    ODIN_ONE_CDN_XHTTP_MODE="${ODIN_ONE_CDN_XHTTP_MODE:-packet-up}" \
+    ODIN_ONE_CDN_TLS_ALPN="${ODIN_ONE_CDN_TLS_ALPN:-h2,http/1.1}" \
+    ODIN_ONE_CDN_TLS_ALLOW_INSECURE="${ODIN_ONE_CDN_TLS_ALLOW_INSECURE:-true}" \
+    ODIN_ONE_CDN_CAMOUFLAGE_HOST="${ODIN_ONE_CDN_CAMOUFLAGE_HOST:-ya.ru}" \
+    ODIN_ONE_CDN_XMUX_MAX_CONCURRENCY="${ODIN_ONE_CDN_XMUX_MAX_CONCURRENCY:-20}" \
+    ODIN_ONE_CDN_XMUX_HMAX_REQUEST_TIMES="${ODIN_ONE_CDN_XMUX_HMAX_REQUEST_TIMES:-900}" \
+    ODIN_ONE_CDN_XMUX_HMAX_REUSABLE_SECS="${ODIN_ONE_CDN_XMUX_HMAX_REUSABLE_SECS:-1800}" \
+      emit_cdn_preset "lab" "false" "xhttp" "xray-native"
+    ;;
+  "cdn-httpupgrade-lab")
+    emit_cdn_preset "lab" "false" "httpupgrade"
     ;;
   *)
     echo "Unknown preset: $preset" >&2

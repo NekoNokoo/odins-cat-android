@@ -145,6 +145,23 @@ func TestPatchOwnerProfileWithYandexEdgeProxyUsesDedicatedEdgeReality(t *testing
 	if proxy["ownerRealityEgress"] != false {
 		t.Fatalf("proxy fallback should disable owner reality egress, got %#v", proxy["ownerRealityEgress"])
 	}
+	cdnRaw, ok := profile.AndroidRuntime["cdnAntiWhitelist"]
+	if !ok {
+		t.Fatalf("patched owner profile should include yandex camo runtime: %s", patched)
+	}
+	cdn, ok := cdnRaw.(map[string]any)
+	if !ok {
+		t.Fatalf("patched owner profile cdn runtime should be an object, got %#v", cdnRaw)
+	}
+	if cdn["tlsServerName"] != "ya.ru" {
+		t.Fatalf("patched owner profile should use ya.ru camouflage runtime, got %#v", cdn["tlsServerName"])
+	}
+	if cdn["connectHost"] != "62.84.123.148" {
+		t.Fatalf("patched owner profile should target yandex edge host, got %#v", cdn["connectHost"])
+	}
+	if cdn["connectPort"] != float64(443) && cdn["connectPort"] != 443 {
+		t.Fatalf("patched owner profile should expose xhttp connect port 443, got %#v", cdn["connectPort"])
+	}
 
 	foundProtocolPack := false
 	for _, entry := range protocolPack {

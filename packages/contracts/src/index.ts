@@ -85,6 +85,7 @@ export interface InviteProfile {
   supportsVKRelay?: boolean;
   supportsRealityRelay?: boolean;
   protocolPack?: ProtocolPackEntry[];
+  androidRuntime?: Record<string, unknown>;
   stagedFallbacks?: Record<string, unknown>;
   shareCode: string;
   rawJson: string;
@@ -132,6 +133,7 @@ export interface OwnerAccessProfile {
   localPath?: string;
   rawJson?: string;
   protocolPack?: ProtocolPackEntry[];
+  androidRuntime?: Record<string, unknown>;
   stagedFallbacks?: Record<string, unknown>;
   wireguard?: {
     serverPublicKey: string;
@@ -302,6 +304,8 @@ export interface LocalTunnelStartRequest {
   vkLink: string;
   excludePackages?: string[];
   ownerRuntimeLab?: OwnerRuntimeLabRequest;
+  runtimeFamily?: string;
+  activationState?: string;
 }
 
 export type OwnerRuntimeLabMode =

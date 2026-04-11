@@ -30,6 +30,8 @@ class StartTunnelArgs {
     var profileJson: String? = null
     var profileSource: String? = null
     var useRealityStartEndpoint: Boolean = false
+    var runtimeFamily: String? = null
+    var activationState: String? = null
 }
 
 @InvokeArg
@@ -78,6 +80,8 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
         argsJson.put("profileJson", args.profileJson)
         argsJson.put("profileSource", args.profileSource)
         argsJson.put("useRealityStartEndpoint", args.useRealityStartEndpoint)
+        args.runtimeFamily?.trim()?.takeIf { it.isNotEmpty() }?.let { argsJson.put("runtimeFamily", it) }
+        args.activationState?.trim()?.takeIf { it.isNotEmpty() }?.let { argsJson.put("activationState", it) }
         val normalizedArgs =
             VpnRuntimeLibbox.normalizeRuntimeArgs(
                 activity,

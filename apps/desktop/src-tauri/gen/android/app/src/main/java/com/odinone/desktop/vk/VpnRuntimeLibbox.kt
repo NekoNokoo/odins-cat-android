@@ -39,6 +39,7 @@ private const val DEFAULT_TUN_MTU = 1280
 private const val DEFAULT_TUN_ADDRESS = "172.19.0.1/30"
 private const val DEFAULT_TUN_DNS_ADDRESS = "172.19.0.2"
 private const val DEFAULT_SOCKS_PORT = 58371
+private const val DEFAULT_NATIVE_SIDEcar_SOCKS_PORT = 58372
 private const val DEFAULT_VK_BRIDGE_PORT = 39090
 private const val DEFAULT_VK_TURN_STREAM_COUNT = 1
 private const val MIN_VK_TURN_STREAM_COUNT = 1
@@ -55,6 +56,8 @@ private const val RUNTIME_FAMILY_REALITY_WHITELIST_ASSISTED = "reality-whitelist
 private const val RUNTIME_FAMILY_REALITY_VPS_LAB = "reality-vps-lab"
 private const val RUNTIME_FAMILY_CDN_ANTI_WHITELIST = "cdn-anti-whitelist"
 private const val RUNTIME_FAMILY_VK_RELAY = "vk-relay"
+private const val ENGINE_SING_BOX = "sing-box"
+private const val ENGINE_XRAY_NATIVE = "xray-native"
 private const val ACTIVATION_STATE_ACTIVE = "active"
 private const val ACTIVATION_STATE_SCAFFOLD_ONLY = "scaffold_only"
 private const val REALITY_MODE_STABLE = "stable"
@@ -75,6 +78,9 @@ private const val CDN_PROVIDER_GENERIC = "generic"
 private const val CDN_TRANSPORT_WEBSOCKET = "websocket"
 private const val CDN_TRANSPORT_XHTTP = "xhttp"
 private const val CDN_TRANSPORT_HTTP_UPGRADE = "httpupgrade"
+private const val CDN_XHTTP_MODE_STREAM_ONE = "stream-one"
+private const val CDN_XHTTP_MODE_STREAM_UP = "stream-up"
+private const val CDN_XHTTP_MODE_PACKET_UP = "packet-up"
 private const val CDN_BOOTSTRAP_DIRECT_REALITY = "direct-reality"
 private const val CDN_FRONT_SELECTION_ORDERED = "ordered"
 private const val CDN_DEFAULT_FRONT_PATH = "/"
@@ -114,6 +120,10 @@ data class PreparedRuntime(
     val remotePeer: String? = null,
     val vkBinaryPath: String? = null,
     val vkArgs: List<String> = emptyList(),
+    val nativeBinaryPath: String? = null,
+    val nativeArgs: List<String> = emptyList(),
+    val nativeProcessLabel: String? = null,
+    val skipVpnTunnel: Boolean = false,
     val runtimeFamily: String = RUNTIME_FAMILY_DIRECT_REALITY,
     val activationState: String = ACTIVATION_STATE_ACTIVE,
     val frontHost: String? = null,
@@ -252,12 +262,18 @@ private data class CdnAntiWhitelistRuntimeOptions(
     val mode: String,
     val provider: String,
     val transport: String,
+    val xhttpMode: String?,
+    val tlsAlpn: List<String>,
+    val xmuxMaxConcurrency: Int?,
+    val xmuxHMaxRequestTimes: Int?,
+    val xmuxHMaxReusableSecs: Int?,
     val frontHost: String,
     val frontPort: Int,
     val connectHost: String,
     val connectPort: Int,
     val frontPath: String,
     val tlsServerName: String,
+    val tlsAllowInsecure: Boolean,
     val httpHostHeader: String,
     val originHost: String,
     val originPort: Int,
@@ -278,6 +294,13 @@ private data class CdnAntiWhitelistRuntimeOptions(
             add("mode:$mode")
             add("cdn-provider:$provider")
             add("cdn-transport:$transport")
+            xhttpMode?.takeIf { transport == CDN_TRANSPORT_XHTTP }?.let { add("cdn-xhttp-mode:$it") }
+            if (tlsAlpn.isNotEmpty()) {
+                add("cdn-alpn:${tlsAlpn.joinToString(",")}")
+            }
+            xmuxMaxConcurrency?.let { add("cdn-xmux-max-concurrency:$it") }
+            xmuxHMaxRequestTimes?.let { add("cdn-xmux-hmax-requests:$it") }
+            xmuxHMaxReusableSecs?.let { add("cdn-xmux-hmax-reuse-secs:$it") }
             add("cdn-front:$frontHost")
             add("cdn-front-port:$frontPort")
             if (!frontHost.equals(connectHost, ignoreCase = true) || frontPort != connectPort) {
@@ -285,6 +308,9 @@ private data class CdnAntiWhitelistRuntimeOptions(
                 add("cdn-connect-port:$connectPort")
             }
             add("cdn-front-sni:$tlsServerName")
+            if (tlsAllowInsecure) {
+                add("cdn-front-tls:insecure")
+            }
             add("cdn-http-host:$httpHostHeader")
             frontTag?.takeIf { it.isNotBlank() }?.let { add("cdn-front-tag:$it") }
             add("cdn-front-selection:$frontSelection")
@@ -349,6 +375,7 @@ private data class CdnFrontCandidate(
     val connectPort: Int,
     val path: String,
     val tlsServerName: String,
+    val tlsAllowInsecure: Boolean,
     val httpHostHeader: String,
     val provider: String,
     val tag: String?,
@@ -531,14 +558,28 @@ object VpnRuntimeLibbox {
             "vless-reality" -> {
                 when (runtimeFamily) {
                     RUNTIME_FAMILY_CDN_ANTI_WHITELIST ->
-                        prepareCdnAntiWhitelistRuntime(
-                            runtimeDir = runtimeDir,
-                            args = normalizedArgs,
-                            profile = profile,
-                            serverHost = serverHost,
-                            socksPort = socksPort,
-                            socksAddress = socksAddress,
-                        )
+                        when (normalizeRuntimeEngine(normalizedArgs.getString("engine", null))) {
+                            ENGINE_XRAY_NATIVE ->
+                                prepareCdnAntiWhitelistXrayNativeRuntime(
+                                    context = context,
+                                    runtimeDir = runtimeDir,
+                                    args = normalizedArgs,
+                                    profile = profile,
+                                    serverHost = serverHost,
+                                    socksPort = socksPort,
+                                    socksAddress = socksAddress,
+                                )
+
+                            else ->
+                                prepareCdnAntiWhitelistRuntime(
+                                    runtimeDir = runtimeDir,
+                                    args = normalizedArgs,
+                                    profile = profile,
+                                    serverHost = serverHost,
+                                    socksPort = socksPort,
+                                    socksAddress = socksAddress,
+                                )
+                        }
 
                     RUNTIME_FAMILY_REALITY_VPS_LAB ->
                         prepareRealityVpsLabRuntime(
@@ -625,7 +666,9 @@ object VpnRuntimeLibbox {
 
         clearInactiveRuntimeArtifacts(runtimeDir, runtimeFamily)
         File(prepared.configPath).writeText(prepared.configContent)
-        Libbox.checkConfig(prepared.configContent)
+        if (prepared.nativeBinaryPath.isNullOrBlank()) {
+            Libbox.checkConfig(prepared.configContent)
+        }
         return prepared
     }
 
@@ -1275,6 +1318,47 @@ object VpnRuntimeLibbox {
         return process
     }
 
+    fun startNativeProcess(
+        prepared: PreparedRuntime,
+        onLogLine: (String) -> Unit,
+    ): Process {
+        val binary = prepared.nativeBinaryPath
+            ?: throw IllegalArgumentException("Missing native Android binary")
+        val label = prepared.nativeProcessLabel?.takeIf { it.isNotBlank() } ?: "native-runtime"
+        val binaryFile = File(binary)
+        val command = mutableListOf(binary).apply {
+            addAll(prepared.nativeArgs)
+        }
+        onLogLine(
+            "Using $label binary: path=$binary exists=${binaryFile.exists()} executable=${binaryFile.canExecute()} size=${binaryFile.length()}",
+        )
+        onLogLine("Launching $label: ${command.joinToString(" ")}")
+        val process = ProcessBuilder(command)
+            .redirectErrorStream(true)
+            .start()
+        thread(name = "${label}-log-reader", isDaemon = true) {
+            runCatching {
+                process.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line ->
+                        if (line.isNotBlank()) {
+                            onLogLine(line.trim())
+                        }
+                    }
+                }
+            }.onFailure { error ->
+                val message = error.message?.trim().orEmpty()
+                val expectedShutdown =
+                    message.contains("Stream closed", ignoreCase = true) ||
+                        message.contains("closed", ignoreCase = true) ||
+                        !process.isAlive
+                if (!expectedShutdown) {
+                    onLogLine("$label log reader stopped unexpectedly: ${error.message ?: error::class.java.simpleName}")
+                }
+            }
+        }
+        return process
+    }
+
     fun makeSystemProxyStatus(snapshot: TunnelSnapshot): SystemProxyStatus =
         SystemProxyStatus().apply {
             available = true
@@ -1593,7 +1677,7 @@ object VpnRuntimeLibbox {
                 cdnRoutingDirectRuleCount = options.routingPolicy.directRuleCount,
                 cdnRoutingBlockRuleCount = options.routingPolicy.blockRuleCount,
                 cdnRoutingBlockSelectedFrontHost = options.routingPolicy.blockSelectedFrontHost,
-                cdnDnsLocalResolverEnabled = options.routingPolicy.directRuleCount > 0,
+                cdnDnsLocalResolverEnabled = false,
                 configMode = options.mode,
                 activeFeatures = options.featureLabels(),
                 profileHash = args.getString("profileHash", null),
@@ -1602,6 +1686,66 @@ object VpnRuntimeLibbox {
         throw IllegalArgumentException(
             "Android CDN / anti-whitelist mode is scaffolded only on this branch. Review ${scaffoldPath.path} and keep stable VLESS + REALITY as the active path for now.",
         )
+    }
+
+    private fun prepareCdnAntiWhitelistXrayNativeRuntime(
+        context: Context,
+        runtimeDir: File,
+        args: JSObject,
+        profile: JSObject,
+        serverHost: String,
+        socksPort: Int,
+        socksAddress: String,
+    ): PreparedRuntime {
+        val reality = readRealitySettings(profile, serverHost)
+        val options = readCdnAntiWhitelistRuntimeOptions(args, profile, serverHost)
+        if (options.activationState != ACTIVATION_STATE_ACTIVE) {
+            throw IllegalArgumentException("Android CDN Xray-native runtime requires an active owner-lab CDN configuration")
+        }
+        val xrayBinary = File(context.applicationInfo.nativeLibraryDir, "libxray.so")
+        if (!xrayBinary.exists()) {
+            throw IllegalArgumentException("Missing bundled libxray.so in Android runtime")
+        }
+        val sidecarSocksPort = selectTcpPort(DEFAULT_NATIVE_SIDEcar_SOCKS_PORT)
+        val sidecarSocksAddress = "127.0.0.1:$sidecarSocksPort"
+        val configPath = File(runtimeDir, "active-cdn-anti-whitelist-xray-native-bridge.json").path
+        val sidecarConfigPath = File(runtimeDir, "active-cdn-anti-whitelist-xray-native.json").path
+        return PreparedRuntime(
+            configContent = buildCdnAntiWhitelistLocalSocksBridgeConfig(socksPort, sidecarSocksPort, options),
+            configPath = configPath,
+            socksAddress = socksAddress,
+            nativeBinaryPath = xrayBinary.path,
+            nativeArgs = listOf("run", "-config", sidecarConfigPath),
+            nativeProcessLabel = "xray-native",
+            skipVpnTunnel = false,
+            runtimeFamily = RUNTIME_FAMILY_CDN_ANTI_WHITELIST,
+            activationState = options.activationState,
+            frontHost = options.frontHost,
+            frontConnectHost = options.connectHost,
+            frontConnectPort = options.connectPort,
+            frontPath = options.frontPath,
+            frontProvider = options.provider,
+            frontTag = options.frontTag,
+            cdnRoutingDnsQueryStrategy = options.routingPolicy.dnsQueryStrategy,
+            cdnRoutingDomainStrategy = options.routingPolicy.domainStrategy,
+            cdnRoutingDomainMatcher = options.routingPolicy.domainMatcher,
+            cdnRoutingDirectRuleCount = options.routingPolicy.directRuleCount,
+            cdnRoutingBlockRuleCount = options.routingPolicy.blockRuleCount,
+            cdnRoutingBlockSelectedFrontHost = options.routingPolicy.blockSelectedFrontHost,
+            cdnDnsLocalResolverEnabled = false,
+            configMode = options.mode,
+            activeFeatures =
+                options.featureLabels() +
+                    "engine:$ENGINE_XRAY_NATIVE" +
+                    "bridge:libbox-socks" +
+                    "sidecar-socks:$sidecarSocksAddress",
+            profileHash = args.getString("profileHash", null),
+        )
+            .also {
+                File(sidecarConfigPath).writeText(
+                    buildXrayNativeCdnAntiWhitelistConfig(sidecarSocksPort, reality, options),
+                )
+            }
     }
 
     private fun prepareRealityWhitelistAssistedRuntime(
@@ -1877,18 +2021,48 @@ object VpnRuntimeLibbox {
         val profile =
             runCatching { JSObject(rawProfile) }
                 .getOrElse { return normalized }
-        val runtimeFamily =
+        val inferredRuntimeFamily =
             when {
                 isCdnAntiWhitelistEnabled(profile) -> RUNTIME_FAMILY_CDN_ANTI_WHITELIST
                 isRealityVpsLabEnabled(profile) -> RUNTIME_FAMILY_REALITY_VPS_LAB
                 isRealityWhitelistHintsEnabled(profile) -> RUNTIME_FAMILY_REALITY_WHITELIST_ASSISTED
                 else -> RUNTIME_FAMILY_DIRECT_REALITY
             }
+        val requestedRuntimeFamily =
+            normalized.getString("runtimeFamily", null)
+                ?.trim()
+                ?.takeUnless { it.isEmpty() }
+                ?.takeIf {
+                    it == RUNTIME_FAMILY_DIRECT_REALITY ||
+                        it == RUNTIME_FAMILY_CDN_ANTI_WHITELIST ||
+                        it == RUNTIME_FAMILY_REALITY_VPS_LAB ||
+                        it == RUNTIME_FAMILY_REALITY_WHITELIST_ASSISTED ||
+                        it == RUNTIME_FAMILY_VK_RELAY
+                }
+        val runtimeFamily = requestedRuntimeFamily ?: inferredRuntimeFamily
         normalized.put("runtimeFamily", runtimeFamily)
         if (runtimeFamily == RUNTIME_FAMILY_CDN_ANTI_WHITELIST) {
             clearRealityDerivedArgs(normalized)
             clearRealityWhitelistDerivedArgs(normalized)
             val options = readCdnAntiWhitelistRuntimeOptions(normalized, profile, normalized.getString("serverHost", "")?.trim().orEmpty())
+            val engine =
+                normalizeRuntimeEngine(
+                    profile.optJSONObject("androidRuntime")
+                        ?.optJSONObject("cdnAntiWhitelist")
+                        ?.optString("engine")
+                        .takeUnless { it.isNullOrBlank() }
+                        ?: profile.optJSONObject("runtimeOptions")
+                            ?.optJSONObject("cdnAntiWhitelist")
+                            ?.optString("engine")
+                            .takeUnless { it.isNullOrBlank() }
+                        ?: profile.optJSONObject("androidCdnAntiWhitelist")
+                            ?.optString("engine")
+                            .takeUnless { it.isNullOrBlank() }
+                        ?: normalized.getString("engine", null)
+                            ?.trim()
+                            .takeUnless { it.isNullOrBlank() },
+                )
+            normalized.put("engine", engine)
             normalized.put("activationState", options.activationState)
             normalized.put("configMode", options.mode)
             normalized.put("bootRestoreEnabled", false)
@@ -1900,12 +2074,20 @@ object VpnRuntimeLibbox {
             normalized.put("frontTag", options.frontTag)
             normalized.put("cdnProvider", options.provider)
             normalized.put("cdnTransport", options.transport)
+            options.xhttpMode?.let { normalized.put("cdnXhttpMode", it) }
             normalized.put("cdnFrontHost", options.frontHost)
             normalized.put("cdnFrontPort", options.frontPort)
             normalized.put("cdnFrontPath", options.frontPath)
             normalized.put("cdnConnectHost", options.connectHost)
             normalized.put("cdnConnectPort", options.connectPort)
             normalized.put("cdnTlsServerName", options.tlsServerName)
+            normalized.put("cdnTlsAllowInsecure", options.tlsAllowInsecure)
+            if (options.tlsAlpn.isNotEmpty()) {
+                normalized.put("cdnTlsAlpn", JSONArray().apply { options.tlsAlpn.forEach(::put) })
+            }
+            options.xmuxMaxConcurrency?.let { normalized.put("cdnXmuxMaxConcurrency", it) }
+            options.xmuxHMaxRequestTimes?.let { normalized.put("cdnXmuxHMaxRequestTimes", it) }
+            options.xmuxHMaxReusableSecs?.let { normalized.put("cdnXmuxHMaxReusableSecs", it) }
             normalized.put("cdnHttpHostHeader", options.httpHostHeader)
             normalized.put("cdnFrontTag", options.frontTag)
             normalized.put("cdnFrontSelection", options.frontSelection)
@@ -1925,8 +2107,16 @@ object VpnRuntimeLibbox {
             normalized.put("cdnRoutingBlockSelectedFrontHost", options.routingPolicy.blockSelectedFrontHost)
             normalized.put("cdnRoutingDirectRuleCount", options.routingPolicy.directRuleCount)
             normalized.put("cdnRoutingBlockRuleCount", options.routingPolicy.blockRuleCount)
-            normalized.put("cdnDnsLocalResolverEnabled", options.routingPolicy.directRuleCount > 0)
-            normalized.put("activeFeatures", JSONArray(options.featureLabels()))
+            normalized.put("cdnDnsLocalResolverEnabled", false)
+            normalized.put(
+                "activeFeatures",
+                JSONArray(
+                    buildList {
+                        addAll(options.featureLabels())
+                        add("engine:$engine")
+                    },
+                ),
+            )
             normalized.put("profileHash", computeCdnAntiWhitelistProfileHash(normalized, options))
             return normalized
         }
@@ -2033,7 +2223,11 @@ object VpnRuntimeLibbox {
         clearRealityVpsLabDerivedArgs(normalized)
         clearRealityWhitelistDerivedArgs(normalized)
         val options = readRealityRuntimeOptions(normalized, profile)
-        normalized.put("activationState", ACTIVATION_STATE_ACTIVE)
+        normalized.put(
+            "activationState",
+            normalized.getString("activationState", null)?.trim().takeUnless { it.isNullOrEmpty() }
+                ?: ACTIVATION_STATE_ACTIVE,
+        )
         normalized.put("configMode", options.mode)
         normalized.put("dnsMode", options.dnsMode)
         normalized.put("strictRoute", options.strictRoute)
@@ -2313,7 +2507,7 @@ object VpnRuntimeLibbox {
         val config =
             JSONObject()
                 .put("log", JSONObject().put("level", "warn"))
-                .put("dns", buildCdnAntiWhitelistDnsConfig(options))
+                .put("dns", buildCdnAntiWhitelistDnsConfig(options, "main-out"))
                 .put(
                     "inbounds",
                     JSONArray()
@@ -2346,7 +2540,68 @@ object VpnRuntimeLibbox {
         return config.toString(2)
     }
 
-    private fun buildCdnAntiWhitelistDnsConfig(options: CdnAntiWhitelistRuntimeOptions): JSONObject {
+    private fun buildCdnAntiWhitelistLocalSocksBridgeConfig(
+        socksPort: Int,
+        sidecarSocksPort: Int,
+        options: CdnAntiWhitelistRuntimeOptions,
+    ): String {
+        val routeRules = buildCdnAntiWhitelistRouteRules(options)
+        val config =
+            JSONObject()
+                .put("log", JSONObject().put("level", "warn"))
+                .put("dns", buildCdnAntiWhitelistDnsConfig(options, "main-out"))
+                .put(
+                    "inbounds",
+                    JSONArray()
+                        .put(
+                            JSONObject()
+                                .put("type", "tun")
+                                .put("tag", "tun-in")
+                                .put("address", JSONArray().put(DEFAULT_TUN_ADDRESS))
+                                .put("mtu", DEFAULT_TUN_MTU)
+                                .put("auto_route", true)
+                                .put("strict_route", false),
+                        ).put(
+                            JSONObject()
+                                .put("type", "socks")
+                                .put("tag", "socks-in")
+                                .put("listen", "127.0.0.1")
+                                .put("listen_port", socksPort),
+                        ),
+                ).put(
+                    "outbounds",
+                    JSONArray()
+                        .put(
+                            JSONObject()
+                                .put("type", "socks")
+                                .put("tag", "main-out")
+                                .put("server", "127.0.0.1")
+                                .put("server_port", sidecarSocksPort),
+                                )
+                        .put(
+                            JSONObject()
+                                .put("type", "direct")
+                                .put("tag", "direct"),
+                        ).put(
+                            JSONObject()
+                                .put("type", "block")
+                                .put("tag", "block"),
+                        ),
+                ).put(
+                    "route",
+                    JSONObject()
+                        .put("rules", routeRules)
+                        .put("final", "main-out")
+                        .put("auto_detect_interface", true)
+                        .put("default_domain_resolver", "resolver"),
+                )
+        return config.toString(2)
+    }
+
+    private fun buildCdnAntiWhitelistDnsConfig(
+        options: CdnAntiWhitelistRuntimeOptions,
+        detour: String,
+    ): JSONObject {
         val servers =
             JSONArray()
                 .put(
@@ -2354,35 +2609,10 @@ object VpnRuntimeLibbox {
                         .put("tag", "resolver")
                         .put("type", "udp")
                         .put("server", REALITY_DNS_DEFAULT_SERVER)
-                        .put("server_port", 53),
+                        .put("server_port", 53)
+                        .put("detour", detour),
                 )
         val rules = JSONArray()
-        if (options.routingPolicy.directRuleCount > 0) {
-            servers.put(
-                JSONObject()
-                    .put("tag", "local-resolver")
-                    .put("type", "local")
-                    .put("prefer_go", false),
-            )
-            if (options.routingPolicy.directDomainKeywords.isNotEmpty()) {
-                rules.put(
-                    JSONObject()
-                        .put("domain_keyword", JSONArray(options.routingPolicy.directDomainKeywords))
-                        .put("action", "route")
-                        .put("server", "local-resolver")
-                        .put("disable_cache", true),
-                )
-            }
-            if (options.routingPolicy.directDomains.isNotEmpty()) {
-                rules.put(
-                    JSONObject()
-                        .put("domain", JSONArray(options.routingPolicy.directDomains))
-                        .put("action", "route")
-                        .put("server", "local-resolver")
-                        .put("disable_cache", true),
-                )
-            }
-        }
         return JSONObject()
             .put("servers", servers)
             .put("rules", rules)
@@ -2498,6 +2728,19 @@ object VpnRuntimeLibbox {
         return buildCdnAntiWhitelistConfig(DEFAULT_SOCKS_PORT, reality, options)
     }
 
+    internal fun renderXrayNativeCdnAntiWhitelistConfigForTesting(args: JSObject): String {
+        val rawProfile = args.getString("profileJson", "{}") ?: "{}"
+        val profile = JSObject(rawProfile)
+        val serverHost = args.getString("serverHost", "")?.trim().orEmpty().ifBlank {
+            profile.optString("serverHost", "").trim()
+        }
+        require(serverHost.isNotBlank()) { "serverHost is required for CDN config rendering" }
+        val normalized = normalizeRuntimeArgs(args)
+        val reality = readRealitySettings(profile, serverHost)
+        val options = readCdnAntiWhitelistRuntimeOptions(normalized, profile, serverHost)
+        return buildXrayNativeCdnAntiWhitelistConfig(DEFAULT_SOCKS_PORT, reality, options)
+    }
+
     internal fun renderRealityVpsLabConfigForTesting(args: JSObject): String {
         val rawProfile = args.getString("profileJson", "{}") ?: "{}"
         val profile = JSObject(rawProfile)
@@ -2545,6 +2788,120 @@ object VpnRuntimeLibbox {
                     )
         }
 
+    private fun buildXrayNativeCdnAntiWhitelistConfig(
+        socksPort: Int,
+        reality: RealitySettings,
+        options: CdnAntiWhitelistRuntimeOptions,
+    ): String {
+        val streamSettings =
+            JSONObject()
+                .put("security", "tls")
+                .put(
+                    "tlsSettings",
+                    JSONObject()
+                        .put("serverName", options.tlsServerName)
+                        .put("allowInsecure", options.tlsAllowInsecure),
+                )
+        if (options.tlsAlpn.isNotEmpty()) {
+            streamSettings.getJSONObject("tlsSettings").put(
+                "alpn",
+                JSONArray().apply { options.tlsAlpn.forEach(::put) },
+            )
+        }
+        when (options.transport) {
+            CDN_TRANSPORT_XHTTP ->
+                streamSettings
+                    .put("network", "xhttp")
+                    .put(
+                        "xhttpSettings",
+                        JSONObject()
+                            .put("path", options.frontPath)
+                            .put("host", options.httpHostHeader)
+                            .apply {
+                                options.xhttpMode?.let { put("mode", it) }
+                                if (
+                                    options.xmuxMaxConcurrency != null ||
+                                        options.xmuxHMaxRequestTimes != null ||
+                                        options.xmuxHMaxReusableSecs != null
+                                ) {
+                                    put(
+                                        "xmux",
+                                        JSONObject().apply {
+                                            options.xmuxMaxConcurrency?.let { put("maxConcurrency", it) }
+                                            options.xmuxHMaxRequestTimes?.let { put("hMaxRequestTimes", it) }
+                                            options.xmuxHMaxReusableSecs?.let { put("hMaxReusableSecs", it) }
+                                        },
+                                    )
+                                }
+                            },
+                    )
+
+            CDN_TRANSPORT_HTTP_UPGRADE ->
+                streamSettings
+                    .put("network", "httpupgrade")
+                    .put(
+                        "httpupgradeSettings",
+                        JSONObject()
+                            .put("path", options.frontPath)
+                            .put("host", options.httpHostHeader),
+                    )
+
+            else ->
+                streamSettings
+                    .put("network", "ws")
+                    .put(
+                        "wsSettings",
+                        JSONObject()
+                            .put("path", options.frontPath)
+                            .put(
+                                "headers",
+                                JSONObject().put("Host", options.httpHostHeader),
+                            ),
+                    )
+        }
+        return JSONObject()
+            .put("log", JSONObject().put("loglevel", "warning"))
+            .put(
+                "inbounds",
+                JSONArray().put(
+                    JSONObject()
+                        .put("listen", "127.0.0.1")
+                        .put("port", socksPort)
+                        .put("protocol", "socks")
+                        .put(
+                            "settings",
+                            JSONObject().put("udp", true),
+                        ),
+                ),
+            ).put(
+                "outbounds",
+                JSONArray().put(
+                    JSONObject()
+                        .put("tag", "main-out")
+                        .put("protocol", "vless")
+                        .put(
+                            "settings",
+                            JSONObject().put(
+                                "vnext",
+                                JSONArray().put(
+                                    JSONObject()
+                                        .put("address", options.connectHost)
+                                        .put("port", options.connectPort)
+                                        .put(
+                                            "users",
+                                            JSONArray().put(
+                                                JSONObject()
+                                                    .put("id", reality.uuid)
+                                                    .put("encryption", "none"),
+                                            ),
+                                        ),
+                                ),
+                            ),
+                        ).put("streamSettings", streamSettings),
+                ),
+            ).toString(2)
+    }
+
     private fun buildCdnAntiWhitelistScaffoldDocument(
         serverHost: String,
         reality: RealitySettings,
@@ -2558,12 +2915,18 @@ object VpnRuntimeLibbox {
             .put("serverHost", serverHost)
             .put("provider", options.provider)
             .put("transport", options.transport)
+            .put("xhttpMode", options.xhttpMode)
+            .put("tlsAlpn", JSONArray().apply { options.tlsAlpn.forEach(::put) })
+            .put("xmuxMaxConcurrency", options.xmuxMaxConcurrency)
+            .put("xmuxHMaxRequestTimes", options.xmuxHMaxRequestTimes)
+            .put("xmuxHMaxReusableSecs", options.xmuxHMaxReusableSecs)
             .put("frontHost", options.frontHost)
             .put("frontPort", options.frontPort)
             .put("connectHost", options.connectHost)
             .put("connectPort", options.connectPort)
             .put("frontPath", options.frontPath)
             .put("tlsServerName", options.tlsServerName)
+            .put("tlsAllowInsecure", options.tlsAllowInsecure)
             .put("httpHostHeader", options.httpHostHeader)
             .put("frontTag", options.frontTag)
             .put("frontSelection", options.frontSelection)
@@ -2582,6 +2945,7 @@ object VpnRuntimeLibbox {
                     .put("connectPort", options.connectPort)
                     .put("path", options.frontPath)
                     .put("tlsServerName", options.tlsServerName)
+                    .put("tlsAllowInsecure", options.tlsAllowInsecure)
                     .put("httpHostHeader", options.httpHostHeader)
                     .put("provider", options.provider)
                     .put("tag", options.frontTag),
@@ -2598,6 +2962,7 @@ object VpnRuntimeLibbox {
                                 .put("connectPort", candidate.connectPort)
                                 .put("path", candidate.path)
                                 .put("tlsServerName", candidate.tlsServerName)
+                                .put("tlsAllowInsecure", candidate.tlsAllowInsecure)
                                 .put("httpHostHeader", candidate.httpHostHeader)
                                 .put("provider", candidate.provider)
                                 .put("tag", candidate.tag),
@@ -2619,6 +2984,7 @@ object VpnRuntimeLibbox {
                 JSONObject()
                     .put("protocol", "vless")
                     .put("transport", options.transport)
+                    .put("xhttpMode", options.xhttpMode)
                     .put("security", "tls")
                     .put("connectHost", options.connectHost)
                     .put("connectPort", options.connectPort)
@@ -2626,6 +2992,15 @@ object VpnRuntimeLibbox {
                     .put("serverPort", options.connectPort)
                     .put("path", options.frontPath)
                     .put("tlsServerName", options.tlsServerName)
+                    .put("tlsAllowInsecure", options.tlsAllowInsecure)
+                    .put("tlsAlpn", JSONArray().apply { options.tlsAlpn.forEach(::put) })
+                    .put(
+                        "xmux",
+                        JSONObject()
+                            .put("maxConcurrency", options.xmuxMaxConcurrency)
+                            .put("hMaxRequestTimes", options.xmuxHMaxRequestTimes)
+                            .put("hMaxReusableSecs", options.xmuxHMaxReusableSecs),
+                    )
                     .put("httpHostHeader", options.httpHostHeader)
                     .put("routingPolicy", buildCdnRoutingPolicyPlan(options.routingPolicy, options.frontHost)),
             )
@@ -3558,6 +3933,59 @@ object VpnRuntimeLibbox {
                     ?: profileOptions.optString("transport").takeUnless { it.isNullOrBlank() }
                     ?: CDN_TRANSPORT_WEBSOCKET,
             )
+        val xhttpOptions = profileOptions.optJSONObject("xhttp") ?: JSONObject()
+        val xmuxOptions = profileOptions.optJSONObject("xmux") ?: JSONObject()
+        val xhttpMode =
+            normalizeCdnXhttpMode(
+                args.getString("cdnXhttpMode", null)
+                    ?.trim()
+                    .takeUnless { it.isNullOrBlank() }
+                    ?: profileOptions.optString("xhttpMode").takeUnless { it.isNullOrBlank() }
+                    ?: xhttpOptions.optString("mode").takeUnless { it.isNullOrBlank() },
+            )
+        val tlsAlpn =
+            readStringListOption(args, "cdnTlsAlpn", profileOptions, "tlsAlpn")
+                .ifEmpty {
+                    val profileArray = profileOptions.optJSONArray("tlsAlpn")
+                    val xhttpArray = xhttpOptions.optJSONArray("alpn")
+                    buildList {
+                        val source = profileArray ?: xhttpArray
+                        if (source != null) {
+                            for (index in 0 until source.length()) {
+                                source.optString(index)?.trim()?.takeIf { it.isNotEmpty() }?.let(::add)
+                            }
+                        }
+                    }
+                }.map { it.trim().lowercase(Locale.ROOT) }
+                .filter { it.isNotBlank() }
+                .distinct()
+        val xmuxMaxConcurrency =
+            normalizePositiveIntOption(
+                when {
+                    args.has("cdnXmuxMaxConcurrency") && !args.isNull("cdnXmuxMaxConcurrency") -> args.optInt("cdnXmuxMaxConcurrency")
+                    profileOptions.has("xmuxMaxConcurrency") && !profileOptions.isNull("xmuxMaxConcurrency") -> profileOptions.optInt("xmuxMaxConcurrency")
+                    xmuxOptions.has("maxConcurrency") && !xmuxOptions.isNull("maxConcurrency") -> xmuxOptions.optInt("maxConcurrency")
+                    else -> null
+                },
+            )
+        val xmuxHMaxRequestTimes =
+            normalizePositiveIntOption(
+                when {
+                    args.has("cdnXmuxHMaxRequestTimes") && !args.isNull("cdnXmuxHMaxRequestTimes") -> args.optInt("cdnXmuxHMaxRequestTimes")
+                    profileOptions.has("xmuxHMaxRequestTimes") && !profileOptions.isNull("xmuxHMaxRequestTimes") -> profileOptions.optInt("xmuxHMaxRequestTimes")
+                    xmuxOptions.has("hMaxRequestTimes") && !xmuxOptions.isNull("hMaxRequestTimes") -> xmuxOptions.optInt("hMaxRequestTimes")
+                    else -> null
+                },
+            )
+        val xmuxHMaxReusableSecs =
+            normalizePositiveIntOption(
+                when {
+                    args.has("cdnXmuxHMaxReusableSecs") && !args.isNull("cdnXmuxHMaxReusableSecs") -> args.optInt("cdnXmuxHMaxReusableSecs")
+                    profileOptions.has("xmuxHMaxReusableSecs") && !profileOptions.isNull("xmuxHMaxReusableSecs") -> profileOptions.optInt("xmuxHMaxReusableSecs")
+                    xmuxOptions.has("hMaxReusableSecs") && !xmuxOptions.isNull("hMaxReusableSecs") -> xmuxOptions.optInt("hMaxReusableSecs")
+                    else -> null
+                },
+            )
         val explicitFrontHost =
             args.getString("frontHost", null)
                 ?.trim()
@@ -3632,6 +4060,14 @@ object VpnRuntimeLibbox {
                     ?: profileOptions.optString("tlsServerName").takeUnless { it.isNullOrBlank() },
                 explicitFrontHost,
             )
+        val explicitTlsAllowInsecure =
+            if (args.has("cdnTlsAllowInsecure") && !args.isNull("cdnTlsAllowInsecure")) {
+                args.optBoolean("cdnTlsAllowInsecure", false)
+            } else if (args.has("tlsAllowInsecure") && !args.isNull("tlsAllowInsecure")) {
+                args.optBoolean("tlsAllowInsecure", false)
+            } else {
+                profileOptions.optBoolean("tlsAllowInsecure", profileOptions.optBoolean("allowInsecure", false))
+            }
         val explicitHttpHostHeader =
             normalizeCdnHttpHostHeader(
                 args.getString("cdnHttpHostHeader", null)
@@ -3658,6 +4094,7 @@ object VpnRuntimeLibbox {
                     connectPort = explicitConnectPort,
                     path = explicitFrontPath,
                     tlsServerName = explicitTlsServerName,
+                    tlsAllowInsecure = explicitTlsAllowInsecure,
                     httpHostHeader = explicitHttpHostHeader,
                     provider = defaultProvider,
                     tag = explicitFrontTag,
@@ -3681,6 +4118,7 @@ object VpnRuntimeLibbox {
                             connectPort = CDN_DEFAULT_FRONT_PORT,
                             path = CDN_DEFAULT_FRONT_PATH,
                             tlsServerName = serverHost,
+                            tlsAllowInsecure = false,
                             httpHostHeader = serverHost,
                             provider = defaultProvider,
                             tag = explicitFrontTag,
@@ -3689,6 +4127,12 @@ object VpnRuntimeLibbox {
                 }
             }
         val selectedFront = selectCdnFrontCandidate(frontPool, frontSelection)
+        val safeXmuxMaxConcurrency =
+            resolveSafeCdnXmuxMaxConcurrency(
+                transport,
+                selectedFront.port,
+                xmuxMaxConcurrency,
+            )
         val originHost =
             args.getString("originHost", null)
                 ?.trim()
@@ -3733,12 +4177,18 @@ object VpnRuntimeLibbox {
             mode = mode,
             provider = selectedFront.provider,
             transport = transport,
+            xhttpMode = xhttpMode,
+            tlsAlpn = tlsAlpn,
+            xmuxMaxConcurrency = safeXmuxMaxConcurrency,
+            xmuxHMaxRequestTimes = xmuxHMaxRequestTimes,
+            xmuxHMaxReusableSecs = xmuxHMaxReusableSecs,
             frontHost = selectedFront.host,
             frontPort = selectedFront.port,
             connectHost = selectedFront.connectHost,
             connectPort = selectedFront.connectPort,
             frontPath = selectedFront.path,
             tlsServerName = selectedFront.tlsServerName,
+            tlsAllowInsecure = selectedFront.tlsAllowInsecure,
             httpHostHeader = selectedFront.httpHostHeader,
             originHost = originHost,
             originPort = originPort,
@@ -3878,6 +4328,8 @@ object VpnRuntimeLibbox {
                                 entry.optString("tlsServerName").takeUnless { it.isBlank() },
                                 host,
                             ),
+                        tlsAllowInsecure =
+                            entry.optBoolean("tlsAllowInsecure", entry.optBoolean("allowInsecure", false)),
                         httpHostHeader =
                             normalizeCdnHttpHostHeader(
                                 entry.optString("hostHeader").takeUnless { it.isBlank() },
@@ -3967,9 +4419,10 @@ object VpnRuntimeLibbox {
         left.host.equals(right.host, ignoreCase = true) &&
             left.port == right.port &&
             left.connectHost.equals(right.connectHost, ignoreCase = true) &&
-            left.connectPort == right.connectPort &&
+        left.connectPort == right.connectPort &&
             left.path == right.path &&
             left.tlsServerName == right.tlsServerName &&
+            left.tlsAllowInsecure == right.tlsAllowInsecure &&
             left.httpHostHeader == right.httpHostHeader &&
             left.provider == right.provider &&
             left.tag == right.tag
@@ -4567,6 +5020,9 @@ object VpnRuntimeLibbox {
         frontPort: Int,
     ): Int = normalizeCdnPort(rawValue, defaultPort = frontPort)
 
+    private fun normalizePositiveIntOption(rawValue: Int?): Int? =
+        rawValue?.takeIf { it > 0 }
+
     private fun normalizeCdnHttpHostHeader(
         rawValue: String?,
         frontHost: String?,
@@ -4584,6 +5040,32 @@ object VpnRuntimeLibbox {
             else -> CDN_TRANSPORT_WEBSOCKET
         }
 
+    private fun normalizeCdnXhttpMode(value: String?): String? =
+        when (value?.trim()?.lowercase(Locale.ROOT)) {
+            CDN_XHTTP_MODE_PACKET_UP -> CDN_XHTTP_MODE_PACKET_UP
+            CDN_XHTTP_MODE_STREAM_UP -> CDN_XHTTP_MODE_STREAM_UP
+            CDN_XHTTP_MODE_STREAM_ONE -> CDN_XHTTP_MODE_STREAM_ONE
+            else -> null
+        }
+
+    private fun resolveSafeCdnXmuxMaxConcurrency(
+        transport: String,
+        frontPort: Int,
+        currentValue: Int?,
+    ): Int? {
+        if (transport != CDN_TRANSPORT_XHTTP || frontPort != 443) {
+            return currentValue
+        }
+        val base = currentValue ?: 0
+        return maxOf(base, 20).takeIf { it > 0 }
+    }
+
+    private fun normalizeRuntimeEngine(value: String?): String =
+        when (value?.trim()?.lowercase(Locale.ROOT)) {
+            ENGINE_XRAY_NATIVE -> ENGINE_XRAY_NATIVE
+            else -> ENGINE_SING_BOX
+        }
+
     private fun normalizeCdnMode(value: String?): String =
         when (value?.trim()?.lowercase(Locale.ROOT)) {
             CDN_MODE_LAB -> CDN_MODE_LAB
@@ -4594,7 +5076,14 @@ object VpnRuntimeLibbox {
         mode: String,
         transport: String,
     ): String =
-        if (mode == CDN_MODE_LAB && transport == CDN_TRANSPORT_WEBSOCKET) {
+        if (
+            mode == CDN_MODE_LAB &&
+            (
+                transport == CDN_TRANSPORT_WEBSOCKET ||
+                    transport == CDN_TRANSPORT_XHTTP ||
+                    transport == CDN_TRANSPORT_HTTP_UPGRADE
+            )
+        ) {
             ACTIVATION_STATE_ACTIVE
         } else {
             ACTIVATION_STATE_SCAFFOLD_ONLY

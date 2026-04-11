@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -196,5 +197,202 @@ func TestDecodeInviteSyncsYandexEdgeProxyFallbackToGuestReality(t *testing.T) {
 	}
 	if ownerRelay["ownerEgressPort"] != float64(55555) && ownerRelay["ownerEgressPort"] != 55555 {
 		t.Fatalf("expected owner relay egress port to sync to active reality port, got %#v", ownerRelay["ownerEgressPort"])
+	}
+}
+
+func TestBuildInviteResponseAddsCdnAntiWhitelistRuntimeForYandexEdge(t *testing.T) {
+	invite := inviteProfile{
+		Name:         "Friend Phone",
+		Protocol:     string(ProtocolVLESSReality),
+		Transport:    string(TransportXray),
+		ServerHost:   "95.81.120.226",
+		EndpointPort: 55555,
+		Endpoint:     "95.81.120.226:55555",
+		StagedFallbacks: map[string]any{
+			"realityYandexEdgeProxy": map[string]any{
+				"connectHost": "62.84.123.148",
+				"connectPort": 12443,
+			},
+		},
+	}
+	invite.VLESSReality.Port = 55555
+	invite.VLESSReality.ServerName = "www.cloudflare.com"
+	invite.VLESSReality.PublicKey = "test-public-key"
+	invite.VLESSReality.ShortID = "abcd1234"
+	invite.VLESSReality.UUID = "11111111-1111-4111-8111-111111111111"
+	invite.VLESSReality.Flow = "xtls-rprx-vision"
+
+	resp := buildInviteResponse(invite, "")
+	cdnRaw, ok := resp.AndroidRuntime["cdnAntiWhitelist"]
+	if !ok {
+		t.Fatal("expected response androidRuntime.cdnAntiWhitelist block")
+	}
+	cdn, ok := cdnRaw.(map[string]any)
+	if !ok {
+		t.Fatalf("expected cdn runtime object, got %#v", cdnRaw)
+	}
+	if cdn["transport"] != "xhttp" {
+		t.Fatalf("expected xhttp transport, got %#v", cdn["transport"])
+	}
+	if cdn["engine"] != "xray-native" {
+		t.Fatalf("expected xray-native engine, got %#v", cdn["engine"])
+	}
+	if cdn["frontHost"] != "62-84-123-148.sslip.io" {
+		t.Fatalf("expected sslip front host, got %#v", cdn["frontHost"])
+	}
+	if cdn["connectHost"] != "62.84.123.148" {
+		t.Fatalf("expected yandex connect host, got %#v", cdn["connectHost"])
+	}
+	if cdn["tlsServerName"] != "ya.ru" {
+		t.Fatalf("expected ya.ru tls server name, got %#v", cdn["tlsServerName"])
+	}
+	if cdn["hostHeader"] != "ya.ru" {
+		t.Fatalf("expected ya.ru host header, got %#v", cdn["hostHeader"])
+	}
+	if cdn["tlsAllowInsecure"] != true {
+		t.Fatalf("expected tlsAllowInsecure true, got %#v", cdn["tlsAllowInsecure"])
+	}
+	if cdn["camouflageHost"] != "ya.ru" {
+		t.Fatalf("expected camouflageHost ya.ru, got %#v", cdn["camouflageHost"])
+	}
+	if cdn["xhttpMode"] != "packet-up" {
+		t.Fatalf("expected packet-up xhttp mode, got %#v", cdn["xhttpMode"])
+	}
+	if cdn["xmuxMaxConcurrency"] != float64(20) && cdn["xmuxMaxConcurrency"] != 20 {
+		t.Fatalf("expected xmuxMaxConcurrency 20, got %#v", cdn["xmuxMaxConcurrency"])
+	}
+	if cdn["connectPort"] != float64(443) && cdn["connectPort"] != 443 {
+		t.Fatalf("expected connect port 443, got %#v", cdn["connectPort"])
+	}
+	tlsAlpn, ok := cdn["tlsAlpn"].([]string)
+	if !ok {
+		t.Fatalf("expected tlsAlpn array, got %#v", cdn["tlsAlpn"])
+	}
+	if len(tlsAlpn) != 2 || tlsAlpn[0] != "h2" || tlsAlpn[1] != "http/1.1" {
+		t.Fatalf("expected tlsAlpn [h2 http/1.1], got %#v", tlsAlpn)
+	}
+	frontPool, ok := cdn["frontPool"].([]map[string]any)
+	if !ok || len(frontPool) != 1 {
+		t.Fatalf("expected one frontPool entry, got %#v", cdn["frontPool"])
+	}
+	frontEntry := frontPool[0]
+	if frontEntry["tlsServerName"] != "ya.ru" {
+		t.Fatalf("expected frontPool tlsServerName ya.ru, got %#v", frontEntry["tlsServerName"])
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(resp.RawJSON), &raw); err != nil {
+		t.Fatalf("unmarshal raw json: %v", err)
+	}
+	rawRuntime, ok := raw["androidRuntime"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected raw invite to include androidRuntime, got %#v", raw["androidRuntime"])
+	}
+	rawCdn, ok := rawRuntime["cdnAntiWhitelist"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected raw invite to include cdnAntiWhitelist, got %#v", rawRuntime["cdnAntiWhitelist"])
+	}
+	if rawCdn["tlsServerName"] != "ya.ru" {
+		t.Fatalf("expected raw invite tlsServerName ya.ru, got %#v", rawCdn["tlsServerName"])
+	}
+	if rawCdn["frontPath"] != "/odin-ws" {
+		t.Fatalf("expected front path /odin-ws, got %#v", rawCdn["frontPath"])
+	}
+	routingPolicy, ok := cdn["routingPolicy"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected routingPolicy in cdn runtime, got %#v", cdn["routingPolicy"])
+	}
+	if routingPolicy["dnsQueryStrategy"] != "use_ip" {
+		t.Fatalf("expected use_ip dnsQueryStrategy, got %#v", routingPolicy["dnsQueryStrategy"])
+	}
+	if routingPolicy["domainStrategy"] != "ip_if_non_match" {
+		t.Fatalf("expected ip_if_non_match domainStrategy, got %#v", routingPolicy["domainStrategy"])
+	}
+	directDomains, ok := routingPolicy["directDomains"].([]string)
+	if !ok {
+		t.Fatalf("expected directDomains []string, got %#v", routingPolicy["directDomains"])
+	}
+	expectedDomains := []string{
+		"gosuslugi.ru",
+		"mos.ru",
+		"yandex.ru",
+		"ya.ru",
+		"nalog.ru",
+		"rzd.ru",
+		"rosreestr.gov.ru",
+		"mobileapp.russianpost.ru",
+		"fairplay-proxy.ott.yandex.ru",
+	}
+	for _, want := range expectedDomains {
+		found := false
+		for _, got := range directDomains {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected directDomains to include %q, got %#v", want, directDomains)
+		}
+	}
+	directKeywords, ok := routingPolicy["directDomainKeywords"].([]string)
+	if !ok {
+		t.Fatalf("expected directDomainKeywords []string, got %#v", routingPolicy["directDomainKeywords"])
+	}
+	expectedKeywords := []string{"gosuslugi", "mos.ru", "yandex", "sberbank", "gazprombank"}
+	for _, want := range expectedKeywords {
+		found := false
+		for _, got := range directKeywords {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected directDomainKeywords to include %q, got %#v", want, directKeywords)
+		}
+	}
+}
+
+func TestBuildInviteResponsePreservesExplicitCdnAntiWhitelistRuntime(t *testing.T) {
+	invite := inviteProfile{
+		Name:       "Friend Phone",
+		Protocol:   string(ProtocolVLESSReality),
+		Transport:  string(TransportXray),
+		ServerHost: "95.81.120.226",
+		AndroidRuntime: map[string]any{
+			"cdnAntiWhitelist": map[string]any{
+				"enabled":          true,
+				"transport":        "xhttp",
+				"frontHost":        "62-84-123-148.sslip.io",
+				"tlsServerName":    "62-84-123-148.sslip.io",
+				"tlsAllowInsecure": false,
+				"hostHeader":       "62-84-123-148.sslip.io",
+			},
+		},
+		StagedFallbacks: map[string]any{
+			"realityYandexEdgeProxy": map[string]any{
+				"connectHost": "62.84.123.148",
+				"connectPort": 12443,
+			},
+		},
+	}
+	invite.VLESSReality.Port = 55555
+	invite.VLESSReality.ServerName = "www.cloudflare.com"
+	invite.VLESSReality.PublicKey = "test-public-key"
+	invite.VLESSReality.ShortID = "abcd1234"
+	invite.VLESSReality.UUID = "11111111-1111-4111-8111-111111111111"
+	invite.VLESSReality.Flow = "xtls-rprx-vision"
+
+	resp := buildInviteResponse(invite, "")
+	cdn, ok := resp.AndroidRuntime["cdnAntiWhitelist"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected preserved cdn runtime, got %#v", resp.AndroidRuntime["cdnAntiWhitelist"])
+	}
+	if cdn["tlsServerName"] != "62-84-123-148.sslip.io" {
+		t.Fatalf("expected explicit tlsServerName to be preserved, got %#v", cdn["tlsServerName"])
+	}
+	if cdn["tlsAllowInsecure"] != false {
+		t.Fatalf("expected explicit tlsAllowInsecure=false to be preserved, got %#v", cdn["tlsAllowInsecure"])
 	}
 }

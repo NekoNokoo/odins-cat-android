@@ -88,6 +88,19 @@ const OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_CANDIDATE_LIMIT: u64 = 8;
 const OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_MAX_PER_SNI: u64 = 2;
 const YANDEX_EDGE_CONNECT_HOST: &str = "62.84.123.148";
 const YANDEX_EDGE_CONNECT_PORT: u16 = 443;
+const YANDEX_EDGE_FRONT_PATH: &str = "/odin-ws";
+const YANDEX_EDGE_ORIGIN_PATH: &str = "/odin-origin";
+const YANDEX_EDGE_CDN_ENGINE: &str = "xray-native";
+const YANDEX_EDGE_CDN_MODE: &str = "lab";
+const YANDEX_EDGE_CDN_PROVIDER: &str = "generic";
+const YANDEX_EDGE_CDN_TRANSPORT: &str = "xhttp";
+const YANDEX_EDGE_CDN_BOOTSTRAP: &str = "direct-reality";
+const YANDEX_EDGE_CDN_FRONT_SELECTION: &str = "ordered";
+const YANDEX_EDGE_CDN_CAMOUFLAGE_HOST: &str = "ya.ru";
+const YANDEX_EDGE_CDN_XHTTP_MODE: &str = "packet-up";
+const YANDEX_EDGE_CDN_XMUX_MAX_CONCURRENCY: u64 = 20;
+const YANDEX_EDGE_CDN_XMUX_HMAX_REQUEST_TIMES: u64 = 900;
+const YANDEX_EDGE_CDN_XMUX_HMAX_REUSABLE_SECS: u64 = 1800;
 const YANDEX_EDGE_ORIGIN_HOST: &str = "95.81.120.226";
 const YANDEX_EDGE_ORIGIN_PORT: u16 = 52444;
 const YANDEX_EDGE_SERVER_NAME: &str = "www.cloudflare.com";
@@ -190,6 +203,8 @@ struct InviteProfileFile {
     #[serde(default)]
     vless_reality: InviteReality,
     #[serde(default)]
+    android_runtime: Value,
+    #[serde(default)]
     staged_fallbacks: Value,
 }
 
@@ -248,6 +263,8 @@ struct OwnerProfileFile {
     endpoint_port: u16,
     #[serde(default)]
     protocol_pack: Vec<ProtocolPackEntry>,
+    #[serde(default)]
+    android_runtime: Value,
     #[serde(default)]
     staged_fallbacks: Value,
     #[serde(default)]
@@ -360,6 +377,10 @@ pub(crate) struct LocalTunnelStartPayload {
     exclude_packages: Vec<String>,
     #[serde(default)]
     owner_runtime_lab: Option<OwnerRuntimeLabPayload>,
+    #[serde(default)]
+    runtime_family: String,
+    #[serde(default)]
+    activation_state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1694,7 +1715,7 @@ fn bundled_whitelist_source() -> Result<ParsedWhitelistFiles, String> {
 
 async fn fetch_remote_whitelist_files() -> Result<(String, String, String), String> {
     let client = reqwest::Client::builder()
-        .user_agent("odin-one-mobile-bridge/0.6.1")
+        .user_agent("odin-one-mobile-bridge/0.6.2")
         .build()
         .map_err(|err| format!("build whitelist HTTP client: {err}"))?;
 
@@ -1869,10 +1890,17 @@ fn build_invite_response(
     let normalized_stream_count = effective_vk_turn_stream_count(invite.vk_turn_stream_count);
     let mut normalized_invite = invite.clone();
     normalized_invite.vk_turn_stream_count = normalized_stream_count;
+    let normalized_staged_fallbacks = invite_effective_staged_fallbacks(invite);
+    let normalized_android_runtime = invite_effective_android_runtime(invite);
+    normalized_invite.staged_fallbacks = normalized_staged_fallbacks.clone();
+    normalized_invite.android_runtime = normalized_android_runtime.clone();
     let raw_json = match raw_json_override {
-        Some(raw_json) => {
-            apply_vk_turn_stream_count_override(&raw_json, Some(normalized_stream_count))?
-        }
+        Some(raw_json) => apply_invite_runtime_overrides(
+            &raw_json,
+            normalized_stream_count,
+            &normalized_staged_fallbacks,
+            &normalized_android_runtime,
+        )?,
         None => serde_json::to_string_pretty(&normalized_invite)
             .map_err(|err| format!("marshal invite response: {err}"))?,
     };
@@ -1891,7 +1919,8 @@ fn build_invite_response(
         "fingerprint": effective_invite_fingerprint(invite),
         "vlessReality": invite.vless_reality,
         "protocolPack": invite_protocol_pack(invite),
-        "stagedFallbacks": invite_effective_staged_fallbacks(invite),
+        "androidRuntime": normalized_android_runtime,
+        "stagedFallbacks": normalized_staged_fallbacks,
         "supportsReality": invite_supports_reality(invite),
         "supportsVKRelay": invite_supports_vk_relay(invite),
         "supportsRealityRelay": invite_supports_reality_relay(invite),
@@ -1907,6 +1936,24 @@ fn build_invite_response(
     Ok(response)
 }
 
+fn apply_invite_runtime_overrides(
+    raw_json: &str,
+    normalized_stream_count: u16,
+    staged_fallbacks: &Value,
+    android_runtime: &Value,
+) -> Result<String, String> {
+    let patched = apply_vk_turn_stream_count_override(raw_json, Some(normalized_stream_count))?;
+    let mut payload: Value = serde_json::from_str(&patched)
+        .map_err(|err| format!("parse invite response json: {err}"))?;
+    let Some(object) = payload.as_object_mut() else {
+        return Err("invite response json must be an object".to_string());
+    };
+    object.insert("stagedFallbacks".to_string(), staged_fallbacks.clone());
+    object.insert("androidRuntime".to_string(), android_runtime.clone());
+    serde_json::to_string_pretty(&payload)
+        .map_err(|err| format!("marshal invite response json: {err}"))
+}
+
 fn invite_effective_staged_fallbacks(invite: &InviteProfileFile) -> Value {
     let mut staged = invite.staged_fallbacks.clone();
     ensure_reality_relay_direct_fallback(&mut staged);
@@ -1915,6 +1962,113 @@ fn invite_effective_staged_fallbacks(invite: &InviteProfileFile) -> Value {
     normalized.staged_fallbacks = staged;
     sync_invite_reality_staged_fallbacks(&mut normalized);
     normalized.staged_fallbacks
+}
+
+fn invite_effective_android_runtime(invite: &InviteProfileFile) -> Value {
+    let mut runtime = invite.android_runtime.clone();
+    if !runtime.is_object() {
+        runtime = json!({});
+    }
+    let Some(runtime_object) = runtime.as_object_mut() else {
+        return invite.android_runtime.clone();
+    };
+    if runtime_object
+        .get("cdnAntiWhitelist")
+        .and_then(Value::as_object)
+        .is_some_and(|cdn| !cdn.is_empty())
+    {
+        return runtime;
+    }
+    if let Some(cdn_runtime) = build_invite_cdn_anti_whitelist_runtime(invite) {
+        runtime_object.insert("cdnAntiWhitelist".to_string(), cdn_runtime);
+    }
+    runtime
+}
+
+fn sync_invite_android_runtime(invite: &mut InviteProfileFile) {
+    invite.android_runtime = invite_effective_android_runtime(invite);
+}
+
+fn build_invite_cdn_anti_whitelist_runtime(invite: &InviteProfileFile) -> Option<Value> {
+    let connect_host = invite_yandex_connect_host(invite)?;
+    let front_host = sslip_host_for_invite(&connect_host);
+    let origin_host = sslip_host_for_invite(&invite.server_host);
+    let front_tag = format!("yandex-edge-xhttp-{YANDEX_EDGE_CONNECT_PORT}");
+    let tls_server_name = YANDEX_EDGE_CDN_CAMOUFLAGE_HOST;
+    let http_host_header = YANDEX_EDGE_CDN_CAMOUFLAGE_HOST;
+    Some(json!({
+        "enabled": true,
+        "mode": YANDEX_EDGE_CDN_MODE,
+        "engine": YANDEX_EDGE_CDN_ENGINE,
+        "provider": YANDEX_EDGE_CDN_PROVIDER,
+        "transport": YANDEX_EDGE_CDN_TRANSPORT,
+        "frontHost": front_host,
+        "frontPort": YANDEX_EDGE_CONNECT_PORT,
+        "connectHost": connect_host,
+        "connectPort": YANDEX_EDGE_CONNECT_PORT,
+        "frontPath": YANDEX_EDGE_FRONT_PATH,
+        "tlsServerName": tls_server_name,
+        "hostHeader": http_host_header,
+        "tlsAllowInsecure": true,
+        "camouflageHost": YANDEX_EDGE_CDN_CAMOUFLAGE_HOST,
+        "xhttpMode": YANDEX_EDGE_CDN_XHTTP_MODE,
+        "tlsAlpn": ["h2", "http/1.1"],
+        "xmuxMaxConcurrency": YANDEX_EDGE_CDN_XMUX_MAX_CONCURRENCY,
+        "xmuxHMaxRequestTimes": YANDEX_EDGE_CDN_XMUX_HMAX_REQUEST_TIMES,
+        "xmuxHMaxReusableSecs": YANDEX_EDGE_CDN_XMUX_HMAX_REUSABLE_SECS,
+        "frontTag": front_tag,
+        "frontSelection": YANDEX_EDGE_CDN_FRONT_SELECTION,
+        "bootstrap": YANDEX_EDGE_CDN_BOOTSTRAP,
+        "origin": {
+            "host": origin_host,
+            "port": 443,
+            "scheme": "https",
+            "path": YANDEX_EDGE_ORIGIN_PATH
+        },
+        "frontPool": [
+            {
+                "host": front_host,
+                "port": YANDEX_EDGE_CONNECT_PORT,
+                "connectHost": connect_host,
+                "connectPort": YANDEX_EDGE_CONNECT_PORT,
+                "path": YANDEX_EDGE_FRONT_PATH,
+                "tlsServerName": tls_server_name,
+                "hostHeader": http_host_header,
+                "tlsAllowInsecure": true,
+                "provider": YANDEX_EDGE_CDN_PROVIDER,
+                "tag": front_tag
+            }
+        ]
+    }))
+}
+
+fn invite_yandex_connect_host(invite: &InviteProfileFile) -> Option<String> {
+    for key in ["realityYandexEdgeProxy", "realityYandexEdge"] {
+        let host = invite
+            .staged_fallbacks
+            .get(key)
+            .and_then(Value::as_object)
+            .and_then(|fallback| fallback.get("connectHost"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(host) = host {
+            return Some(host.to_string());
+        }
+    }
+    None
+}
+
+fn sslip_host_for_invite(host: &str) -> String {
+    let trimmed = host.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.parse::<std::net::IpAddr>().is_ok() {
+        format!("{}.sslip.io", trimmed.replace('.', "-"))
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn sync_invite_reality_staged_fallbacks(invite: &mut InviteProfileFile) {
@@ -2038,6 +2192,7 @@ fn decode_invite(share_code: &str) -> Result<InviteProfileFile, String> {
     ensure_reality_relay_direct_fallback(&mut invite.staged_fallbacks);
     ensure_reality_relay_owner_egress_fallback(&mut invite.staged_fallbacks);
     sync_invite_reality_staged_fallbacks(&mut invite);
+    sync_invite_android_runtime(&mut invite);
 
     validate_invite(&invite)?;
     Ok(invite)
@@ -2982,6 +3137,7 @@ fn enrich_invite_profile(
         }
     }
     sync_invite_reality_staged_fallbacks(invite);
+    sync_invite_android_runtime(invite);
     if invite.endpoint_port == 0 {
         invite.endpoint_port = if invite.protocol == "vless-reality" {
             effective_reality_port(owner, xray_state)
@@ -4521,6 +4677,7 @@ fn render_owner_profile(
             Some(vk_turn_proxy_port),
             Some(&staged_fallbacks),
         ),
+        android_runtime: json!({}),
         staged_fallbacks,
         wireguard: OwnerWireGuard {
             server_public_key: server_public_key.to_string(),
@@ -4744,6 +4901,8 @@ fn resolve_android_runtime_request(
     let engine = requested_engine(transport, protocol);
     let use_reality_start_endpoint = transport == "xray" && protocol == "vless-reality";
     let owner_runtime_lab = requested_owner_runtime_lab(payload);
+    let runtime_family = requested_runtime_family(payload);
+    let activation_state = requested_activation_state(payload);
 
     if payload.secret.trim().is_empty() {
         if let Ok((invite, local_path)) =
@@ -4774,6 +4933,12 @@ fn resolve_android_runtime_request(
                 "profileSource": "imported",
                 "useRealityStartEndpoint": use_reality_start_endpoint
             });
+            if let Some(runtime_family) = runtime_family {
+                request["runtimeFamily"] = json!(runtime_family);
+            }
+            if let Some(activation_state) = activation_state {
+                request["activationState"] = json!(activation_state);
+            }
             apply_exclude_packages_to_request(&mut request, &exclude_packages);
             return Ok(request);
         }
@@ -4819,6 +4984,12 @@ fn resolve_android_runtime_request(
         "profileSource": "owner",
         "useRealityStartEndpoint": use_reality_start_endpoint
     });
+    if let Some(runtime_family) = runtime_family {
+        request["runtimeFamily"] = json!(runtime_family);
+    }
+    if let Some(activation_state) = activation_state {
+        request["activationState"] = json!(activation_state);
+    }
     apply_exclude_packages_to_request(&mut request, &exclude_packages);
     Ok(request)
 }
@@ -4838,6 +5009,24 @@ fn requested_owner_runtime_lab(
                 | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
         )
     })
+}
+
+fn requested_runtime_family(payload: &LocalTunnelStartPayload) -> Option<&str> {
+    match payload.runtime_family.trim() {
+        "direct-reality"
+        | "cdn-anti-whitelist"
+        | "reality-vps-lab"
+        | "reality-whitelist-assisted"
+        | "vk-relay" => Some(payload.runtime_family.trim()),
+        _ => None,
+    }
+}
+
+fn requested_activation_state(payload: &LocalTunnelStartPayload) -> Option<&str> {
+    match payload.activation_state.trim() {
+        "active" | "scaffold_only" => Some(payload.activation_state.trim()),
+        _ => None,
+    }
 }
 
 fn apply_yandex_edge_reality_preset(
@@ -7057,5 +7246,123 @@ mod tests {
         let invite_override =
             super::decode_invite(&raw_override).expect("invite with override should decode");
         assert_eq!(invite_override.vk_turn_stream_count, 8);
+    }
+
+    #[test]
+    fn decode_invite_adds_cdn_anti_whitelist_runtime_for_yandex_edge() {
+        let raw = serde_json::json!({
+            "role": "guest",
+            "name": "Owner Node",
+            "protocol": "vless-reality",
+            "transport": "xray",
+            "serverHost": "95.81.120.226",
+            "endpointPort": 55555,
+            "endpoint": "95.81.120.226:55555",
+            "vlessReality": {
+                "port": 55555,
+                "serverName": "www.cloudflare.com",
+                "publicKey": "EhIONikEgvX3cReHEHzo1fGwZVXI27XOIt6In4YGgDo",
+                "shortId": "ba81780391343b01",
+                "uuid": "b707d399-3f96-4df9-8daa-8b7b2ea23650",
+                "flow": "xtls-rprx-vision"
+            },
+            "stagedFallbacks": {
+                "realityYandexEdgeProxy": {
+                    "connectHost": "62.84.123.148",
+                    "connectPort": 12443
+                }
+            }
+        })
+        .to_string();
+
+        let invite = super::decode_invite(&raw).expect("invite should decode");
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["transport"].as_str(),
+            Some("xhttp")
+        );
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["engine"].as_str(),
+            Some("xray-native")
+        );
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["frontHost"].as_str(),
+            Some("62-84-123-148.sslip.io")
+        );
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["tlsServerName"].as_str(),
+            Some("ya.ru")
+        );
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["hostHeader"].as_str(),
+            Some("ya.ru")
+        );
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["tlsAllowInsecure"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["xhttpMode"].as_str(),
+            Some("packet-up")
+        );
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["camouflageHost"].as_str(),
+            Some("ya.ru")
+        );
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["connectPort"].as_u64(),
+            Some(443)
+        );
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["xmuxMaxConcurrency"].as_u64(),
+            Some(20)
+        );
+    }
+
+    #[test]
+    fn decode_invite_preserves_explicit_cdn_anti_whitelist_runtime() {
+        let raw = serde_json::json!({
+            "role": "guest",
+            "name": "Owner Node",
+            "protocol": "vless-reality",
+            "transport": "xray",
+            "serverHost": "95.81.120.226",
+            "endpointPort": 55555,
+            "endpoint": "95.81.120.226:55555",
+            "vlessReality": {
+                "port": 55555,
+                "serverName": "www.cloudflare.com",
+                "publicKey": "EhIONikEgvX3cReHEHzo1fGwZVXI27XOIt6In4YGgDo",
+                "shortId": "ba81780391343b01",
+                "uuid": "b707d399-3f96-4df9-8daa-8b7b2ea23650",
+                "flow": "xtls-rprx-vision"
+            },
+            "androidRuntime": {
+                "cdnAntiWhitelist": {
+                    "enabled": true,
+                    "transport": "xhttp",
+                    "frontHost": "62-84-123-148.sslip.io",
+                    "tlsServerName": "62-84-123-148.sslip.io",
+                    "tlsAllowInsecure": false,
+                    "hostHeader": "62-84-123-148.sslip.io"
+                }
+            },
+            "stagedFallbacks": {
+                "realityYandexEdgeProxy": {
+                    "connectHost": "62.84.123.148",
+                    "connectPort": 12443
+                }
+            }
+        })
+        .to_string();
+
+        let invite = super::decode_invite(&raw).expect("invite should decode");
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["tlsServerName"].as_str(),
+            Some("62-84-123-148.sslip.io")
+        );
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["tlsAllowInsecure"].as_bool(),
+            Some(false)
+        );
     }
 }

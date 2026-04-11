@@ -37,7 +37,7 @@ const dictionaries = {
     sheetMoreTitle: "ПОДЕЛИТЬСЯ",
     whitelistEyebrow: "Whitelist check",
     whitelistInputLabel: "Проверка IPv4",
-    whitelistCardTitle: "Проверить IP сервера",
+    whitelistCardTitle: "Проверить IPv4",
     sheetWhitelistText: "",
     whitelistIpv4: "IPv4",
     whitelistCheck: "Проверить IP",
@@ -126,17 +126,17 @@ const dictionaries = {
     sheetModePickerText:
       "Нажмите на нужный режим. Выбрать можно только те варианты, которые уже есть в текущем профиле.",
     runtimeModeRealityHint:
-      "Основной режим. Клиент поднимает прямой VLESS + REALITY path без нового server-side deploy.",
+      "Прямой VLESS + REALITY. Самый простой и быстрый режим, но в сетях с белыми списками может не проходить.",
     runtimeModeYandexEdgeHint:
-      "Двуххоповый режим. Клиент сначала входит через российский Yandex edge, а потом продолжает путь через основной REALITY origin.",
+      "Двуххоповый HTTPS front + xHTTP. Трафик сначала входит через разрешённую российскую поверхность, поэтому шанс пройти белые списки выше.",
     runtimeModeYandexEdgeProxyHint:
-      "Двуххоповый режим. Клиент сначала входит через российский Yandex edge, а потом продолжает путь через основной REALITY origin.",
+      "Двуххоповый HTTPS front + xHTTP. Трафик сначала входит через разрешённую российскую поверхность, поэтому шанс пройти белые списки выше.",
     runtimeModeVkHint:
-      "Использует уже развернутый VK relay на том же сервере. Нужна только свежая ссылка звонка VK.",
+      "Маршрут через уже развернутый VK relay. Полезен как запасной путь, но не является основным способом обхода белых списков.",
     runtimeModeRelayOwnerHint:
-      "white tunel. Клиент сначала поднимает внешний REALITY relay, а затем выпускает трафик уже через ваш сервер.",
+      "REALITY relay с возвратом egress на ваш сервер. Экспериментальный режим для сложных сетей, когда прямой путь нестабилен.",
     runtimeModeRelayDirectHint:
-      "white relay. Клиент берёт рабочий REALITY relay из hourly igareck feed и ходит через него без второго hop на ваш сервер.",
+      "REALITY relay без второго hop на ваш сервер. Экспериментальный режим, который иногда помогает там, где обычный вход режется.",
     portSetup: "Публичные порты",
     portSetupAuto: "Авто",
     portSetupManual: "Вручную",
@@ -552,7 +552,7 @@ const dictionaries = {
     sheetMoreTitle: "SHARE",
     whitelistEyebrow: "Whitelist check",
     whitelistInputLabel: "IPv4 lookup",
-    whitelistCardTitle: "Check server IP",
+    whitelistCardTitle: "Check IPv4",
     sheetWhitelistText: "",
     whitelistIpv4: "IPv4",
     whitelistCheck: "Check IP",
@@ -642,17 +642,17 @@ const dictionaries = {
     sheetModePickerText:
       "Tap a mode to switch right away. Only the modes already present in the current profile can be selected.",
     runtimeModeRealityHint:
-      "Recommended default. The client starts the direct VLESS + REALITY path without another server rollout.",
+      "Direct VLESS + REALITY. Usually the fastest path, but it may fail on strict whitelist networks.",
     runtimeModeYandexEdgeHint:
-      "Two-hop mode. The client enters through the Russian Yandex edge first, then continues through the main REALITY origin.",
+      "Two-hop HTTPS front + xHTTP. Traffic enters through a Russian-reachable surface first, so the chance of passing a whitelist is higher.",
     runtimeModeYandexEdgeProxyHint:
-      "Two-hop mode. The client enters through the Russian Yandex edge first, then continues through the main REALITY origin.",
+      "Two-hop HTTPS front + xHTTP. Traffic enters through a Russian-reachable surface first, so the chance of passing a whitelist is higher.",
     runtimeModeVkHint:
-      "Uses the already deployed VK relay on the same server. You only need a fresh VK call link.",
+      "Uses the already deployed VK relay path. Useful as a fallback, but not the main whitelist-bypass route.",
     runtimeModeRelayOwnerHint:
-      "white tunel. The client first brings up an external REALITY relay and then sends traffic out through your server.",
+      "REALITY relay with egress returned to your server. Experimental mode for harder networks when the direct path is unstable.",
     runtimeModeRelayDirectHint:
-      "white relay. The client takes a working REALITY relay from the hourly igareck feed and uses it directly without a second hop through your server.",
+      "REALITY relay without a second hop through your server. Experimental mode that sometimes helps when a standard entry is blocked.",
     portSetup: "Public ports",
     portSetupAuto: "Auto",
     portSetupManual: "Manual",

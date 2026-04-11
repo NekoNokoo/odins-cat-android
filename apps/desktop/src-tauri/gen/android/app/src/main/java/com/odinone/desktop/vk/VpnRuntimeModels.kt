@@ -457,12 +457,22 @@ internal fun repairRuntimeSnapshotStateForTest(
 
 private fun isVpnRuntimeServiceRunning(context: Context): Boolean {
     val activityManager = context.getSystemService(ActivityManager::class.java) ?: return false
-    val targetClassName = "${context.packageName}.VpnRuntimeService"
     return runCatching {
         @Suppress("DEPRECATION")
         activityManager.getRunningServices(Int.MAX_VALUE)
-            .any { it.service.className == targetClassName }
+            .any { matchesVpnRuntimeServiceClassName(it.service.className, context.packageName) }
     }.getOrDefault(false)
+}
+
+internal fun matchesVpnRuntimeServiceClassName(
+    className: String?,
+    packageName: String,
+): Boolean {
+    val normalized = className?.trim().orEmpty()
+    if (normalized.isBlank()) {
+        return false
+    }
+    return normalized == VpnRuntimeService::class.java.name
 }
 
 private fun resolvePersistedSocksAddress(
@@ -767,10 +777,22 @@ fun mergePersistedHiddenRuntimeOverrides(
         ?: return merged
     val incomingProfile = parseProfileJson(merged.getString("profileJson", null)) ?: JSObject()
     val androidRuntime = incomingProfile.optJSONObject("androidRuntime") ?: JSObject().also { incomingProfile.put("androidRuntime", it) }
+    val requestedRuntimeFamily =
+        normalizeTunnelArg(merged.getString("runtimeFamily", null))
+            .takeUnless { it.isEmpty() }
+            ?: "direct-reality"
     mergeMissingAndroidRuntimeBlock(androidRuntime, previousAndroidRuntime, "reality")
-    mergeMissingAndroidRuntimeBlock(androidRuntime, previousAndroidRuntime, "realityVpsLab")
-    mergeMissingAndroidRuntimeBlock(androidRuntime, previousAndroidRuntime, "cdnAntiWhitelist")
-    mergeMissingAndroidRuntimeBlock(androidRuntime, previousAndroidRuntime, "realityWhitelistHints")
+    when (requestedRuntimeFamily) {
+        "cdn-anti-whitelist" -> {
+            mergeMissingAndroidRuntimeBlock(androidRuntime, previousAndroidRuntime, "cdnAntiWhitelist")
+        }
+        "reality-vps-lab" -> {
+            mergeMissingAndroidRuntimeBlock(androidRuntime, previousAndroidRuntime, "realityVpsLab")
+        }
+        "reality-whitelist-assisted" -> {
+            mergeMissingAndroidRuntimeBlock(androidRuntime, previousAndroidRuntime, "realityWhitelistHints")
+        }
+    }
     merged.put("profileJson", incomingProfile.toString())
     merged.put(PRESERVE_HIDDEN_REALITY_OVERRIDES_KEY, true)
     previous.getString(DEBUG_REALITY_PRESET_KEY, null)

@@ -721,6 +721,11 @@ func patchOwnerProfileWithYandexEdge(rawJSON string, edgeHost string, publicPort
 			fallback["description"] = fmt.Sprintf("Edge-terminated Yandex edge proxy mode. The client first connects to the dedicated edge REALITY inbound on %s:%d, then the Yandex VM forwards traffic to the stable REALITY origin %s:%d.", strings.TrimSpace(edgeHost), publicPort, strings.TrimSpace(originHost), reality.Port)
 		}
 	}
+	profile.AndroidRuntime = effectiveOwnerAndroidRuntime(
+		profile.ServerHost,
+		profile.StagedFallbacks,
+		profile.AndroidRuntime,
+	)
 	protocolPack := buildProtocolPackWithFallbacks(
 		Transport(profile.Transport),
 		effectiveOwnerEndpointPort(profile),

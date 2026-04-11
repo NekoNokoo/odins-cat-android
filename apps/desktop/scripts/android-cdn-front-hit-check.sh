@@ -17,11 +17,11 @@ COMPARE_SCRIPT="${SCRIPT_DIR}/android-runtime-compare-captures.sh"
 REPORT_SCRIPT="${SCRIPT_DIR}/android-runtime-report-draft.sh"
 CHECKLIST_SCRIPT="${SCRIPT_DIR}/android-blocked-direct-checklist.sh"
 
-PRESET="cdn-ws-lab"
+PRESET="cdn-httpupgrade-lab"
 PLAN_FILE=""
 PLAN_TAG=""
 PLAN_INDEX=""
-TEST_URL="https://example.com"
+TEST_URL="https://ya.ru"
 OUTPUT_DIR=""
 RUN_PREFLIGHT="false"
 RESTORE_STABLE="true"
@@ -81,11 +81,11 @@ Usage:
   apps/desktop/scripts/android-cdn-front-hit-check.sh [options]
 
 Options:
-  --preset <preset>            Hidden preset to run. Default: cdn-ws-lab
+  --preset <preset>            Hidden preset to run. Default: cdn-httpupgrade-lab
   --plan-file <file>           Reusable CDN plan JSON passed through the preset helper.
   --plan-tag <tag>             Select one front by tag from the plan file.
   --plan-index <n>             Select one front by 1-based index from the plan file.
-  --test-url <url>             URL used by run-test. Default: https://example.com
+  --test-url <url>             URL used by run-test. Default: https://ya.ru
   --output-dir <dir>           Output directory. Default: /tmp/odin-one-android-cdn-front-hit-check/<stamp>-<preset>
   --settle-seconds <seconds>   Seconds to wait after run-test before the post-test capture. Default: 5
   --run-preflight              Include the base session preflight. Default: off to keep access-log windows clean.

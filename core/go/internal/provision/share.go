@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,6 +21,98 @@ const shareCodePrefix = "odin1:"
 const defaultVKTurnStreamCount = 1
 const minVKTurnStreamCount = 1
 const maxVKTurnStreamCount = 16
+const inviteCdnYandexFrontPath = "/odin-ws"
+const inviteCdnYandexOriginPath = "/odin-origin"
+const inviteCdnYandexFrontPort = 443
+const inviteCdnYandexTransport = "xhttp"
+const inviteCdnYandexEngine = "xray-native"
+const inviteCdnYandexProvider = "generic"
+const inviteCdnYandexMode = "lab"
+const inviteCdnYandexBootstrap = "direct-reality"
+const inviteCdnYandexFrontSelection = "ordered"
+const inviteCdnYandexCamouflageHost = "ya.ru"
+const inviteCdnYandexXhttpMode = "packet-up"
+const inviteCdnYandexXmuxMaxConcurrency = 20
+const inviteCdnYandexXmuxHMaxRequestTimes = 900
+const inviteCdnYandexXmuxHMaxReusableSecs = 1800
+
+var inviteCdnYandexDirectDomainKeywords = []string{
+	"vk",
+	"ok.ru",
+	"mail.ru",
+	"gosuslugi",
+	"mos.ru",
+	"yandex",
+	"ya.ru",
+	"ozon",
+	"wildberries",
+	"avito",
+	"kinopoisk",
+	"dzen",
+	"hh",
+	"2gis",
+	"rutube",
+	"magnit",
+	"5ka",
+	"perekrestok",
+	"alfabank",
+	"alfaonline",
+	"tbank",
+	"t-bank",
+	"tinkoff",
+	"vtb",
+	"sber",
+	"sberbank",
+	"gazprombank",
+	"gpb",
+	"pochta",
+}
+
+var inviteCdnYandexDirectDomains = []string{
+	"1018213540.rsc.cdn77.org",
+	"avtodor-tr.ru",
+	"b2c-ticket-sentry.onelya.ru",
+	"bitrix.info",
+	"bkvet.ru",
+	"cdn1.ozonusercontent.com",
+	"cms1.dzvr.ru",
+	"counter.yadro.ru",
+	"dzvr.ru",
+	"emex.ru",
+	"fairplay-proxy.ott.yandex.ru",
+	"fssp.gov.ru",
+	"gorzdrav.spb.ru",
+	"gosuslugi.ru",
+	"gov.ru",
+	"graphql.kinopoisk.ru",
+	"gu-st.ru",
+	"lemanapro.ru",
+	"leroymerlin.ru",
+	"mobileapp.russianpost.ru",
+	"esia.gosuslugi.ru",
+	"lk.gosuslugi.ru",
+	"pos.gosuslugi.ru",
+	"mos.ru",
+	"mosenergosbyt.ru",
+	"mosreg.ru",
+	"nalog.ru",
+	"ozon.ru",
+	"pgu.mos.ru",
+	"pesc.ru",
+	"pochta.ru",
+	"reso.ru",
+	"rosreestr.gov.ru",
+	"rzd-bonus.ru",
+	"rzd.ru",
+	"showip.net",
+	"sys.refocus.ru",
+	"vshark.ttk.ru",
+	"widevine-proxy.ott.yandex.ru",
+	"xn--90aijkdmaud0d.xn--p1ai",
+	"yandex.net",
+	"yandex.ru",
+	"ya.ru",
+}
 
 type inviteProfile struct {
 	ID                string `json:"id,omitempty"`
@@ -52,6 +145,7 @@ type inviteProfile struct {
 		UUID       string `json:"uuid"`
 		Flow       string `json:"flow"`
 	} `json:"vlessReality,omitempty"`
+	AndroidRuntime  map[string]any `json:"androidRuntime,omitempty"`
 	StagedFallbacks map[string]any `json:"stagedFallbacks,omitempty"`
 }
 
@@ -80,6 +174,7 @@ type InviteProfileResponse struct {
 	SupportsVKRelay      bool                `json:"supportsVKRelay,omitempty"`
 	SupportsRealityRelay bool                `json:"supportsRealityRelay,omitempty"`
 	ProtocolPack         []ProtocolPackEntry `json:"protocolPack,omitempty"`
+	AndroidRuntime       map[string]any      `json:"androidRuntime,omitempty"`
 	StagedFallbacks      map[string]any      `json:"stagedFallbacks,omitempty"`
 	ShareCode            string              `json:"shareCode"`
 	RawJSON              string              `json:"rawJson"`
@@ -129,6 +224,9 @@ func GetImportedInvite(host string) InviteProfileResponse {
 func buildInviteResponse(invite inviteProfile, localPath string) InviteProfileResponse {
 	invite.VKTurnStreamCount = effectiveVKTurnStreamCount(invite.VKTurnStreamCount)
 	stagedFallbacks := effectiveInviteStagedFallbacks(invite)
+	invite.StagedFallbacks = stagedFallbacks
+	androidRuntime := effectiveInviteAndroidRuntime(invite)
+	invite.AndroidRuntime = androidRuntime
 	raw, _ := json.MarshalIndent(invite, "", "  ")
 	return InviteProfileResponse{
 		ID:                   invite.ID,
@@ -154,6 +252,7 @@ func buildInviteResponse(invite inviteProfile, localPath string) InviteProfileRe
 			invite.VKTurnProxyPort,
 			stagedFallbacks,
 		),
+		AndroidRuntime:  androidRuntime,
 		StagedFallbacks: stagedFallbacks,
 		ShareCode:       shareCodePrefix + base64.RawURLEncoding.EncodeToString(raw),
 		RawJSON:         string(raw),
@@ -191,6 +290,7 @@ func decodeInvite(shareCode string) (inviteProfile, string, error) {
 		invite.VLESSReality.Flow = "xtls-rprx-vision"
 	}
 	syncInviteRealityStagedFallbacks(&invite)
+	syncInviteAndroidRuntime(&invite)
 	if err := validateInvite(invite); err != nil {
 		return invite, "", err
 	}
@@ -996,6 +1096,7 @@ func enrichInviteProfile(invite *inviteProfile, owner inviteProfile, xrayState r
 		}
 	}
 	syncInviteRealityStagedFallbacks(invite)
+	syncInviteAndroidRuntime(invite)
 	if invite.EndpointPort == 0 {
 		if invite.Protocol == string(ProtocolVLESSReality) {
 			invite.EndpointPort = effectiveRealityPort(owner, xrayState)
@@ -1015,6 +1116,161 @@ func enrichInviteProfile(invite *inviteProfile, owner inviteProfile, xrayState r
 	if invite.WireGuard.MTU == 0 {
 		invite.WireGuard.MTU = owner.WireGuard.MTU
 	}
+}
+
+func effectiveInviteAndroidRuntime(invite inviteProfile) map[string]any {
+	runtime := cloneInviteMap(invite.AndroidRuntime)
+	if runtime == nil {
+		runtime = map[string]any{}
+	}
+	if existing, ok := runtime["cdnAntiWhitelist"].(map[string]any); ok && len(existing) > 0 {
+		return runtime
+	}
+	cdn := buildInviteCdnAntiWhitelistRuntime(invite)
+	if cdn == nil {
+		if len(runtime) == 0 {
+			return nil
+		}
+		return runtime
+	}
+	runtime["cdnAntiWhitelist"] = cdn
+	return runtime
+}
+
+func syncInviteAndroidRuntime(invite *inviteProfile) {
+	if invite == nil {
+		return
+	}
+	invite.AndroidRuntime = effectiveInviteAndroidRuntime(*invite)
+}
+
+func buildInviteCdnAntiWhitelistRuntime(invite inviteProfile) map[string]any {
+	connectHost := inviteYandexConnectHost(invite)
+	if connectHost == "" {
+		return nil
+	}
+	frontHost := sslipHostForInvite(connectHost)
+	if frontHost == "" {
+		frontHost = connectHost
+	}
+	originHost := sslipHostForInvite(strings.TrimSpace(invite.ServerHost))
+	if originHost == "" {
+		originHost = strings.TrimSpace(invite.ServerHost)
+	}
+	if originHost == "" {
+		originHost = frontHost
+	}
+	frontTag := fmt.Sprintf("yandex-edge-xhttp-%d", inviteCdnYandexFrontPort)
+	tlsServerName := inviteCdnYandexCamouflageHost
+	httpHostHeader := inviteCdnYandexCamouflageHost
+	tlsAlpn := []string{"h2", "http/1.1"}
+	return map[string]any{
+		"enabled":              true,
+		"mode":                 inviteCdnYandexMode,
+		"engine":               inviteCdnYandexEngine,
+		"provider":             inviteCdnYandexProvider,
+		"transport":            inviteCdnYandexTransport,
+		"frontHost":            frontHost,
+		"frontPort":            inviteCdnYandexFrontPort,
+		"connectHost":          connectHost,
+		"connectPort":          inviteCdnYandexFrontPort,
+		"frontPath":            inviteCdnYandexFrontPath,
+		"tlsServerName":        tlsServerName,
+		"hostHeader":           httpHostHeader,
+		"tlsAllowInsecure":     true,
+		"camouflageHost":       inviteCdnYandexCamouflageHost,
+		"xhttpMode":            inviteCdnYandexXhttpMode,
+		"tlsAlpn":              tlsAlpn,
+		"xmuxMaxConcurrency":   inviteCdnYandexXmuxMaxConcurrency,
+		"xmuxHMaxRequestTimes": inviteCdnYandexXmuxHMaxRequestTimes,
+		"xmuxHMaxReusableSecs": inviteCdnYandexXmuxHMaxReusableSecs,
+		"frontTag":             frontTag,
+		"frontSelection":       inviteCdnYandexFrontSelection,
+		"bootstrap":            inviteCdnYandexBootstrap,
+		"routingPolicy": map[string]any{
+			"dnsQueryStrategy":      "use_ip",
+			"domainStrategy":        "ip_if_non_match",
+			"domainMatcher":         "hybrid",
+			"directDomainKeywords":  inviteCdnYandexDirectDomainKeywords,
+			"directDomains":         inviteCdnYandexDirectDomains,
+			"blockedDomainKeywords": []string{},
+			"blockedDomains":        []string{},
+			"blockSelectedFrontHost": true,
+		},
+		"origin": map[string]any{
+			"host":   originHost,
+			"port":   inviteCdnYandexFrontPort,
+			"scheme": "https",
+			"path":   inviteCdnYandexOriginPath,
+		},
+		"frontPool": []map[string]any{
+			{
+				"host":             frontHost,
+				"port":             inviteCdnYandexFrontPort,
+				"connectHost":      connectHost,
+				"connectPort":      inviteCdnYandexFrontPort,
+				"path":             inviteCdnYandexFrontPath,
+				"tlsServerName":    tlsServerName,
+				"hostHeader":       httpHostHeader,
+				"tlsAllowInsecure": true,
+				"provider":         inviteCdnYandexProvider,
+				"tag":              frontTag,
+			},
+		},
+	}
+}
+
+func inviteYandexConnectHost(invite inviteProfile) string {
+	for _, key := range []string{"realityYandexEdgeProxy", "realityYandexEdge"} {
+		raw, ok := invite.StagedFallbacks[key]
+		if !ok {
+			continue
+		}
+		fallback, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if host, ok := fallback["connectHost"].(string); ok {
+			host = strings.TrimSpace(host)
+			if host != "" {
+				return host
+			}
+		}
+	}
+	return ""
+}
+
+func sslipHostForInvite(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return ""
+	}
+	if parsed := net.ParseIP(host); parsed != nil {
+		return strings.ReplaceAll(host, ".", "-") + ".sslip.io"
+	}
+	return host
+}
+
+func cloneInviteMap(source map[string]any) map[string]any {
+	if len(source) == 0 {
+		return nil
+	}
+	raw, err := json.Marshal(source)
+	if err != nil {
+		cloned := map[string]any{}
+		for key, value := range source {
+			cloned[key] = value
+		}
+		return cloned
+	}
+	var cloned map[string]any
+	if err := json.Unmarshal(raw, &cloned); err != nil {
+		cloned = map[string]any{}
+		for key, value := range source {
+			cloned[key] = value
+		}
+	}
+	return cloned
 }
 
 func remoteGuestProfilePath(guestID string) string {

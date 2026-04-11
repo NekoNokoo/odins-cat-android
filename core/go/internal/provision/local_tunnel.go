@@ -31,6 +31,7 @@ type ownerProfile struct {
 	VKTurnProxyPort int                 `json:"vkTurnProxyPort"`
 	EndpointPort    int                 `json:"endpointPort,omitempty"`
 	ProtocolPack    []ProtocolPackEntry `json:"protocolPack,omitempty"`
+	AndroidRuntime  map[string]any      `json:"androidRuntime,omitempty"`
 	StagedFallbacks map[string]any      `json:"stagedFallbacks,omitempty"`
 	WireGuard       struct {
 		ServerPublicKey  string `json:"serverPublicKey"`
@@ -53,6 +54,7 @@ type OwnerProfileResponse struct {
 	LocalPath       string              `json:"localPath,omitempty"`
 	RawJSON         string              `json:"rawJson,omitempty"`
 	ProtocolPack    []ProtocolPackEntry `json:"protocolPack,omitempty"`
+	AndroidRuntime  map[string]any      `json:"androidRuntime,omitempty"`
 	StagedFallbacks map[string]any      `json:"stagedFallbacks,omitempty"`
 	WireGuard       struct {
 		ServerPublicKey  string `json:"serverPublicKey"`
@@ -252,6 +254,11 @@ func GetLocalOwnerProfile(host string) OwnerProfileResponse {
 	if profile.StagedFallbacks == nil {
 		profile.StagedFallbacks = map[string]any{}
 	}
+	profile.AndroidRuntime = effectiveOwnerAndroidRuntime(
+		profile.ServerHost,
+		profile.StagedFallbacks,
+		profile.AndroidRuntime,
+	)
 	profile.VKTurnStreamCount = effectiveVKTurnStreamCount(profile.VKTurnStreamCount)
 	ensureRealityRelayDirectFallback(profile.StagedFallbacks)
 	ensureRealityRelayOwnerEgressFallback(profile.StagedFallbacks)
@@ -275,6 +282,7 @@ func GetLocalOwnerProfile(host string) OwnerProfileResponse {
 			profile.VKTurnProxyPort,
 			profile.StagedFallbacks,
 		),
+		AndroidRuntime: profile.AndroidRuntime,
 		StagedFallbacks: profile.StagedFallbacks,
 	}
 	resp.WireGuard.ServerPublicKey = profile.WireGuard.ServerPublicKey

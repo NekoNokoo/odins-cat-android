@@ -447,25 +447,8 @@ class VpnRuntimeLibboxTest {
         val dns = parsed.getJSONObject("dns")
         val dnsServers = dns.getJSONArray("servers")
         val dnsRules = dns.getJSONArray("rules")
-        assertTrue(jsonArrayContainsObjectWithString(dnsServers, "tag", "local-resolver"))
-        assertTrue(
-            jsonArrayContainsDnsRule(
-                dnsRules,
-                "domain_keyword",
-                "vk",
-                "server",
-                "local-resolver",
-            ),
-        )
-        assertTrue(
-            jsonArrayContainsDnsRule(
-                dnsRules,
-                "domain",
-                "ok.ru",
-                "server",
-                "local-resolver",
-            ),
-        )
+        assertFalse(jsonArrayContainsObjectWithString(dnsServers, "tag", "local-resolver"))
+        assertEquals(0, dnsRules.length())
     }
 
     @Test
@@ -1069,7 +1052,7 @@ class VpnRuntimeLibboxTest {
     }
 
     @Test
-    fun cdnAntiWhitelistLabModeStaysScaffoldedForNonWebsocketTransport() {
+    fun cdnAntiWhitelistXhttpLabModeActivatesHiddenFamily() {
         val normalized =
             VpnRuntimeLibbox.normalizeRuntimeArgs(
                 JSObject().apply {
@@ -1109,9 +1092,401 @@ class VpnRuntimeLibboxTest {
             )
 
         assertEquals("cdn-anti-whitelist", normalized.getString("runtimeFamily", null))
-        assertEquals("scaffold_only", normalized.getString("activationState", null))
+        assertEquals("active", normalized.getString("activationState", null))
         assertEquals("lab", normalized.getString("configMode", null))
         assertEquals("xhttp", normalized.getString("cdnTransport", null))
+        assertFeature(normalized, "activation:active")
+        assertFeature(normalized, "cdn-transport:xhttp")
+    }
+
+    @Test
+    fun cdnAntiWhitelistXhttpLabModeNormalizesTuningHints() {
+        val normalized =
+            VpnRuntimeLibbox.normalizeRuntimeArgs(
+                JSObject().apply {
+                    put("serverHost", "example.com")
+                    put("transport", "xray")
+                    put("engine", "sing-box")
+                    put("protocol", "vless-reality")
+                    put(
+                        "profileJson",
+                        """
+                        {
+                          "stagedFallbacks": {
+                            "vlessReality": {
+                              "port": 443,
+                              "uuid": "9425da86-1560-4f77-ac53-076a2fa7eecd",
+                              "serverName": "www.cloudflare.com",
+                              "publicKey": "HR2qUZNinSLuJx2-dvQNMpjEyqZ6spD-8TNzGEwuyW8",
+                              "shortId": "9a3d8b86a93616a7"
+                            }
+                          },
+                          "androidRuntime": {
+                            "cdnAntiWhitelist": {
+                              "enabled": true,
+                              "mode": "lab",
+                              "transport": "xhttp",
+                              "xhttpMode": "stream-up",
+                              "tlsAlpn": ["h3"],
+                              "xmux": {
+                                "maxConcurrency": 32,
+                                "hMaxRequestTimes": 800,
+                                "hMaxReusableSecs": 900
+                              },
+                              "frontPool": [
+                                {
+                                  "host": "edge-a.example.com",
+                                  "port": 443,
+                                  "connectHost": "connect-a.example.net",
+                                  "connectPort": 9443,
+                                  "path": "/odin-a",
+                                  "tlsServerName": "front-a.example.com",
+                                  "hostHeader": "allowed-a.example.com"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                        """.trimIndent(),
+                    )
+                },
+            )
+
+        assertEquals("stream-up", normalized.getString("cdnXhttpMode", null))
+        assertEquals("h3", normalized.getJSONArray("cdnTlsAlpn").getString(0))
+        assertEquals(32, normalized.getInt("cdnXmuxMaxConcurrency"))
+        assertEquals(800, normalized.getInt("cdnXmuxHMaxRequestTimes"))
+        assertEquals(900, normalized.getInt("cdnXmuxHMaxReusableSecs"))
+        assertFeature(normalized, "cdn-xhttp-mode:stream-up")
+        assertFeature(normalized, "cdn-alpn:h3")
+        assertFeature(normalized, "cdn-xmux-max-concurrency:32")
+    }
+
+    @Test
+    fun cdnAntiWhitelistXhttpNativeLabModeSelectsXrayEngine() {
+        val normalized =
+            VpnRuntimeLibbox.normalizeRuntimeArgs(
+                JSObject().apply {
+                    put("serverHost", "example.com")
+                    put("transport", "xray")
+                    put("engine", "sing-box")
+                    put("protocol", "vless-reality")
+                    put(
+                        "profileJson",
+                        """
+                        {
+                          "stagedFallbacks": {
+                            "vlessReality": {
+                              "port": 443,
+                              "uuid": "9425da86-1560-4f77-ac53-076a2fa7eecd",
+                              "serverName": "www.cloudflare.com",
+                              "publicKey": "HR2qUZNinSLuJx2-dvQNMpjEyqZ6spD-8TNzGEwuyW8",
+                              "shortId": "9a3d8b86a93616a7"
+                            }
+                          },
+                          "androidRuntime": {
+                            "cdnAntiWhitelist": {
+                              "enabled": true,
+                              "mode": "lab",
+                              "engine": "xray-native",
+                              "transport": "xhttp",
+                              "frontPool": [
+                                {
+                                  "host": "edge-a.example.com"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                        """.trimIndent(),
+                    )
+                },
+            )
+
+        assertEquals("xray-native", normalized.getString("engine", null))
+        assertFeature(normalized, "engine:xray-native")
+    }
+
+    @Test
+    fun activeCdnXhttpConfigUsesXhttpTransportObject() {
+        val config =
+            VpnRuntimeLibbox.renderCdnAntiWhitelistConfigForTesting(
+                JSObject().apply {
+                    put("serverHost", "example.com")
+                    put("transport", "xray")
+                    put("engine", "sing-box")
+                    put("protocol", "vless-reality")
+                    put(
+                        "profileJson",
+                        """
+                        {
+                          "stagedFallbacks": {
+                            "vlessReality": {
+                              "port": 443,
+                              "uuid": "9425da86-1560-4f77-ac53-076a2fa7eecd",
+                              "serverName": "www.cloudflare.com",
+                              "publicKey": "HR2qUZNinSLuJx2-dvQNMpjEyqZ6spD-8TNzGEwuyW8",
+                              "shortId": "9a3d8b86a93616a7"
+                            }
+                          },
+                          "androidRuntime": {
+                            "cdnAntiWhitelist": {
+                              "enabled": true,
+                              "mode": "lab",
+                              "transport": "xhttp",
+                              "frontHost": "edge-a.example.com",
+                              "connectHost": "connect-a.example.net",
+                              "connectPort": 9443,
+                              "frontPath": "/odin-xhttp",
+                              "tlsServerName": "front-a.example.com",
+                              "hostHeader": "allowed-a.example.com"
+                            }
+                          }
+                        }
+                        """.trimIndent(),
+                    )
+                },
+            )
+
+        val outbound =
+            JSONObject(config)
+                .getJSONArray("outbounds")
+                .let { outbounds ->
+                    (0 until outbounds.length())
+                        .map { outbounds.getJSONObject(it) }
+                        .first { it.optString("tag") == "main-out" }
+                }
+        val transport = outbound.getJSONObject("transport")
+
+        assertEquals("xhttp", transport.getString("type"))
+        assertEquals("/odin-xhttp", transport.getString("path"))
+        assertEquals(
+            "allowed-a.example.com",
+            transport.getJSONObject("headers").getString("Host"),
+        )
+    }
+
+    @Test
+    fun activeXrayNativeCdnXhttpConfigUsesRealityXhttpStreamSettings() {
+        val config =
+            VpnRuntimeLibbox.renderXrayNativeCdnAntiWhitelistConfigForTesting(
+                JSObject().apply {
+                    put("serverHost", "example.com")
+                    put("transport", "xray")
+                    put("engine", "xray-native")
+                    put("protocol", "vless-reality")
+                    put(
+                        "profileJson",
+                        """
+                        {
+                          "stagedFallbacks": {
+                            "vlessReality": {
+                              "port": 443,
+                              "uuid": "9425da86-1560-4f77-ac53-076a2fa7eecd",
+                              "serverName": "www.cloudflare.com",
+                              "publicKey": "HR2qUZNinSLuJx2-dvQNMpjEyqZ6spD-8TNzGEwuyW8",
+                              "shortId": "9a3d8b86a93616a7",
+                              "flow": "xtls-rprx-vision"
+                            }
+                          },
+                          "androidRuntime": {
+                            "cdnAntiWhitelist": {
+                              "enabled": true,
+                              "mode": "lab",
+                              "engine": "xray-native",
+                              "transport": "xhttp",
+                              "frontHost": "edge-a.example.com",
+                              "connectHost": "connect-a.example.net",
+                              "connectPort": 9443,
+                              "frontPath": "/odin-xhttp",
+                              "tlsServerName": "front-a.example.com",
+                              "hostHeader": "allowed-a.example.com"
+                            }
+                          }
+                        }
+                        """.trimIndent(),
+                    )
+                },
+            )
+
+        val outbound = JSONObject(config).getJSONArray("outbounds").getJSONObject(0)
+        val stream = outbound.getJSONObject("streamSettings")
+
+        assertEquals("xhttp", stream.getString("network"))
+        assertEquals("tls", stream.getString("security"))
+        assertEquals("/odin-xhttp", stream.getJSONObject("xhttpSettings").getString("path"))
+        assertEquals("allowed-a.example.com", stream.getJSONObject("xhttpSettings").getString("host"))
+        assertEquals("front-a.example.com", stream.getJSONObject("tlsSettings").getString("serverName"))
+    }
+
+    @Test
+    fun activeXrayNativeCdnXhttpConfigCarriesModeAlpnAndXmuxTuning() {
+        val config =
+            VpnRuntimeLibbox.renderXrayNativeCdnAntiWhitelistConfigForTesting(
+                JSObject().apply {
+                    put("serverHost", "example.com")
+                    put("transport", "xray")
+                    put("engine", "xray-native")
+                    put("protocol", "vless-reality")
+                    put(
+                        "profileJson",
+                        """
+                        {
+                          "stagedFallbacks": {
+                            "vlessReality": {
+                              "port": 443,
+                              "uuid": "9425da86-1560-4f77-ac53-076a2fa7eecd",
+                              "serverName": "www.cloudflare.com",
+                              "publicKey": "HR2qUZNinSLuJx2-dvQNMpjEyqZ6spD-8TNzGEwuyW8",
+                              "shortId": "9a3d8b86a93616a7"
+                            }
+                          },
+                          "androidRuntime": {
+                            "cdnAntiWhitelist": {
+                              "enabled": true,
+                              "mode": "lab",
+                              "engine": "xray-native",
+                              "transport": "xhttp",
+                              "xhttpMode": "packet-up",
+                              "tlsAlpn": ["h2", "http/1.1"],
+                              "xmux": {
+                                "maxConcurrency": 16,
+                                "hMaxRequestTimes": 900,
+                                "hMaxReusableSecs": 1800
+                              },
+                              "frontHost": "edge-a.example.com",
+                              "connectHost": "connect-a.example.net",
+                              "connectPort": 9443,
+                              "frontPath": "/odin-xhttp",
+                              "tlsServerName": "front-a.example.com",
+                              "hostHeader": "allowed-a.example.com"
+                            }
+                          }
+                        }
+                        """.trimIndent(),
+                    )
+                },
+            )
+
+        val outbound = JSONObject(config).getJSONArray("outbounds").getJSONObject(0)
+        val stream = outbound.getJSONObject("streamSettings")
+        val xhttpSettings = stream.getJSONObject("xhttpSettings")
+        val tlsSettings = stream.getJSONObject("tlsSettings")
+        val xmux = xhttpSettings.getJSONObject("xmux")
+
+        assertEquals("packet-up", xhttpSettings.getString("mode"))
+        assertEquals("h2", tlsSettings.getJSONArray("alpn").getString(0))
+        assertEquals("http/1.1", tlsSettings.getJSONArray("alpn").getString(1))
+        assertEquals(20, xmux.getInt("maxConcurrency"))
+        assertEquals(900, xmux.getInt("hMaxRequestTimes"))
+        assertEquals(1800, xmux.getInt("hMaxReusableSecs"))
+    }
+
+    @Test
+    fun cdnAntiWhitelistHttpupgradeLabModeActivatesHiddenFamily() {
+        val normalized =
+            VpnRuntimeLibbox.normalizeRuntimeArgs(
+                JSObject().apply {
+                    put("serverHost", "example.com")
+                    put("transport", "xray")
+                    put("engine", "sing-box")
+                    put("protocol", "vless-reality")
+                    put(
+                        "profileJson",
+                        """
+                        {
+                          "stagedFallbacks": {
+                            "vlessReality": {
+                              "port": 443,
+                              "uuid": "9425da86-1560-4f77-ac53-076a2fa7eecd",
+                              "serverName": "www.cloudflare.com",
+                              "publicKey": "HR2qUZNinSLuJx2-dvQNMpjEyqZ6spD-8TNzGEwuyW8",
+                              "shortId": "9a3d8b86a93616a7"
+                            }
+                          },
+                          "androidRuntime": {
+                            "cdnAntiWhitelist": {
+                              "enabled": true,
+                              "mode": "lab",
+                              "transport": "httpupgrade",
+                              "frontPool": [
+                                {
+                                  "host": "edge-a.example.com"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                        """.trimIndent(),
+                    )
+                },
+            )
+
+        assertEquals("cdn-anti-whitelist", normalized.getString("runtimeFamily", null))
+        assertEquals("active", normalized.getString("activationState", null))
+        assertEquals("lab", normalized.getString("configMode", null))
+        assertEquals("httpupgrade", normalized.getString("cdnTransport", null))
+        assertFeature(normalized, "activation:active")
+        assertFeature(normalized, "cdn-transport:httpupgrade")
+    }
+
+    @Test
+    fun activeCdnHttpupgradeConfigUsesHttpupgradeTransportObject() {
+        val config =
+            VpnRuntimeLibbox.renderCdnAntiWhitelistConfigForTesting(
+                JSObject().apply {
+                    put("serverHost", "example.com")
+                    put("transport", "xray")
+                    put("engine", "sing-box")
+                    put("protocol", "vless-reality")
+                    put(
+                        "profileJson",
+                        """
+                        {
+                          "stagedFallbacks": {
+                            "vlessReality": {
+                              "port": 443,
+                              "uuid": "9425da86-1560-4f77-ac53-076a2fa7eecd",
+                              "serverName": "www.cloudflare.com",
+                              "publicKey": "HR2qUZNinSLuJx2-dvQNMpjEyqZ6spD-8TNzGEwuyW8",
+                              "shortId": "9a3d8b86a93616a7"
+                            }
+                          },
+                          "androidRuntime": {
+                            "cdnAntiWhitelist": {
+                              "enabled": true,
+                              "mode": "lab",
+                              "transport": "httpupgrade",
+                              "frontHost": "edge-a.example.com",
+                              "connectHost": "connect-a.example.net",
+                              "connectPort": 9443,
+                              "frontPath": "/odin-httpupgrade",
+                              "tlsServerName": "front-a.example.com",
+                              "hostHeader": "allowed-a.example.com"
+                            }
+                          }
+                        }
+                        """.trimIndent(),
+                    )
+                },
+            )
+
+        val outbound =
+            JSONObject(config)
+                .getJSONArray("outbounds")
+                .let { outbounds ->
+                    (0 until outbounds.length())
+                        .map { outbounds.getJSONObject(it) }
+                        .first { it.optString("tag") == "main-out" }
+                }
+        val transport = outbound.getJSONObject("transport")
+
+        assertEquals("httpupgrade", transport.getString("type"))
+        assertEquals("/odin-httpupgrade", transport.getString("path"))
+        assertEquals(
+            "allowed-a.example.com",
+            transport.getJSONObject("headers").getString("Host"),
+        )
     }
 
     @Test
@@ -1295,6 +1670,28 @@ class VpnRuntimeLibboxTest {
 
         assertEquals("running", repaired.status)
         assertEquals("127.0.0.1:58371", repaired.socksAddress)
+    }
+
+    @Test
+    fun serviceClassMatcherAcceptsDebugPackageSuffix() {
+        assertTrue(
+            matchesVpnRuntimeServiceClassName(
+                className = "com.odinone.desktop.vk.VpnRuntimeService",
+                packageName = "com.odinone.desktop.vk.debug",
+            ),
+        )
+        assertTrue(
+            matchesVpnRuntimeServiceClassName(
+                className = "com.odinone.desktop.vk.VpnRuntimeService",
+                packageName = "com.odinone.desktop.vk",
+            ),
+        )
+        assertFalse(
+            matchesVpnRuntimeServiceClassName(
+                className = "com.odinone.desktop.vk.debug.VpnRuntimeService",
+                packageName = "com.odinone.desktop.vk.debug",
+            ),
+        )
     }
 
     @Test
@@ -2173,7 +2570,7 @@ class VpnRuntimeLibboxTest {
     }
 
     @Test
-    fun persistedHiddenCdnOverridesCanBeMergedIntoCompatibleAppStart() {
+    fun directRealityStartDoesNotInheritPersistedHiddenCdnOverrides() {
         val previous =
             JSObject().apply {
                 put("serverHost", "example.com")
@@ -2221,15 +2618,15 @@ class VpnRuntimeLibboxTest {
         val merged = mergePersistedHiddenRuntimeOverrides(previous, incoming)
         val normalized = VpnRuntimeLibbox.normalizeRuntimeArgs(merged)
 
-        assertEquals("cdn-anti-whitelist", normalized.getString("runtimeFamily", null))
-        assertEquals("scaffold_only", normalized.getString("activationState", null))
-        assertEquals("cloudflare", normalized.getString("cdnProvider", null))
-        assertEquals("websocket", normalized.getString("cdnTransport", null))
-        assertEquals("edge.example.com", normalized.getString("cdnFrontHost", null))
+        assertEquals("direct-reality", normalized.getString("runtimeFamily", null))
+        assertEquals("active", normalized.getString("activationState", null))
+        assertFalse(normalized.has("cdnProvider"))
+        assertFalse(normalized.has("cdnTransport"))
+        assertFalse(normalized.has("cdnFrontHost"))
     }
 
     @Test
-    fun persistedHiddenRealityWhitelistOverridesCanBeMergedIntoCompatibleAppStart() {
+    fun directRealityStartDoesNotInheritPersistedWhitelistHints() {
         val previous =
             JSObject().apply {
                 put("serverHost", "example.com")
@@ -2273,11 +2670,11 @@ class VpnRuntimeLibboxTest {
         val merged = mergePersistedHiddenRuntimeOverrides(previous, incoming)
         val normalized = VpnRuntimeLibbox.normalizeRuntimeArgs(merged)
 
-        assertEquals("reality-whitelist-assisted", normalized.getString("runtimeFamily", null))
-        assertEquals("max.ru", normalized.getString("selectedSniHint", null))
-        assertEquals("white-cidr-a", normalized.getString("selectedCidrHint", null))
-        assertEquals("operator-curated", normalized.getString("whitelistHintSource", null))
-        assertEquals("primary-whitelist", normalized.getString("whitelistHintTag", null))
+        assertEquals("direct-reality", normalized.getString("runtimeFamily", null))
+        assertEquals(null, normalized.getString("selectedSniHint", null))
+        assertEquals(null, normalized.getString("selectedCidrHint", null))
+        assertEquals(null, normalized.getString("whitelistHintSource", null))
+        assertEquals(null, normalized.getString("whitelistHintTag", null))
     }
 
     @Test
@@ -2490,6 +2887,59 @@ class VpnRuntimeLibboxTest {
         assertTrue(normalized.getBoolean("bootRestoreEnabled", false))
         assertFeature(normalized, "boot-restore")
         assertNotEquals("", normalized.getString("profileHash", ""))
+    }
+
+    @Test
+    fun explicitDirectRealityRuntimeFamilyWinsOverImportedCdnRuntime() {
+        val normalized =
+            VpnRuntimeLibbox.normalizeRuntimeArgs(
+                JSObject().apply {
+                    put("serverHost", "95.81.120.226")
+                    put("transport", "xray")
+                    put("engine", "sing-box")
+                    put("protocol", "vless-reality")
+                    put("runtimeFamily", "direct-reality")
+                    put("activationState", "active")
+                    put(
+                        "profileJson",
+                        """
+                        {
+                          "serverHost": "95.81.120.226",
+                          "vlessReality": {
+                            "port": 55555,
+                            "uuid": "4c31841d-9267-4ab7-974c-25908e6ea88b",
+                            "flow": "xtls-rprx-vision",
+                            "serverName": "www.cloudflare.com",
+                            "publicKey": "EhIONikEgvX3cReHEHzo1fGwZVXI27XOIt6In4YGgDo",
+                            "shortId": "ba81780391343b01"
+                          },
+                          "androidRuntime": {
+                            "cdnAntiWhitelist": {
+                              "enabled": true,
+                              "mode": "lab",
+                              "engine": "xray-native",
+                              "provider": "generic",
+                              "transport": "xhttp",
+                              "frontHost": "62-84-123-148.sslip.io",
+                              "frontPort": 443,
+                              "connectHost": "62.84.123.148",
+                              "connectPort": 443,
+                              "frontPath": "/odin-ws",
+                              "tlsServerName": "ya.ru",
+                              "hostHeader": "ya.ru",
+                              "tlsAllowInsecure": true
+                            }
+                          }
+                        }
+                        """.trimIndent(),
+                    )
+                },
+            )
+
+        assertEquals("direct-reality", normalized.getString("runtimeFamily", null))
+        assertEquals("active", normalized.getString("activationState", null))
+        assertFalse(normalized.has("cdnFrontHost"))
+        assertFalse(normalized.has("frontConnectHost"))
     }
 
     @Test(expected = IllegalArgumentException::class)

@@ -48,9 +48,11 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
     private var commandServer: CommandServer? = null
     private var tunDescriptor: ParcelFileDescriptor? = null
     private var vkProcess: Process? = null
+    private var nativeProcess: Process? = null
     private var activeRuntime: PreparedRuntime? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var lastVkProcessLogLine: String? = null
+    private var lastNativeProcessLogLine: String? = null
     private var pendingVkCaptchaUrl: String? = null
     private var lastOpenedVkCaptchaUrl: String? = null
     @Volatile
@@ -466,6 +468,13 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                         watchVkProcess(process)
                     }
                 }
+                if (!prepared.nativeBinaryPath.isNullOrBlank()) {
+                    nativeProcess = VpnRuntimeLibbox.startNativeProcess(prepared) { line ->
+                        handleNativeProcessLogLine(line)
+                    }.also { process ->
+                        watchNativeProcess(process)
+                    }
+                }
 
                 if (vkWarmupOnly) {
                     val waiting =
@@ -585,6 +594,16 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         prepared: PreparedRuntime,
         startedAt: Long,
     ): Long {
+        if (prepared.skipVpnTunnel) {
+            updateStartupStage("native_process_started")
+            appendDiagnostic("Native sidecar runtime started without libbox CommandServer.")
+            VpnRuntimeLibbox.waitForLocalSocks(prepared.socksAddress, 20_000)
+            updateStartupStage("socks_ready")
+            appendDiagnostic("Local SOCKS endpoint became ready at ${prepared.socksAddress}.")
+            val startupDurationMs = SystemClock.elapsedRealtime() - startedAt
+            appendDiagnostic("Android native sidecar startup completed in ${startupDurationMs}ms.")
+            return startupDurationMs
+        }
         var startupStage = "command_server_ready"
         val server = CommandServer(this, this)
         server.start()
@@ -618,11 +637,14 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         shuttingDown = true
         try {
             appendDiagnostic(
-                "Closing runtime resources. origin=$origin commandServer=${commandServer != null} vkProcess=${vkProcess != null} tun=${tunDescriptor != null} wakeLock=${wakeLock?.isHeld == true}",
+                "Closing runtime resources. origin=$origin commandServer=${commandServer != null} vkProcess=${vkProcess != null} nativeProcess=${nativeProcess != null} tun=${tunDescriptor != null} wakeLock=${wakeLock?.isHeld == true}",
             )
             val process = vkProcess
+            val sidecarProcess = nativeProcess
             vkProcess = null
+            nativeProcess = null
             lastVkProcessLogLine = null
+            lastNativeProcessLogLine = null
             pendingVkCaptchaUrl = null
             lastOpenedVkCaptchaUrl = null
             vkTunnelStartPending = false
@@ -651,6 +673,17 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                         process.waitFor(250, TimeUnit.MILLISECONDS)
                     }
                 }.onFailure { appendDiagnostic("vkProcess teardown failed during $origin: ${it.message}") }
+            }
+            if (sidecarProcess != null) {
+                appendDiagnostic("Stopping native sidecar after Android tunnel shutdown. origin=$origin")
+                runCatching {
+                    sidecarProcess.destroy()
+                    if (!sidecarProcess.waitFor(750, TimeUnit.MILLISECONDS)) {
+                        appendDiagnostic("native sidecar did not exit after destroy(); forcing termination during $origin")
+                        sidecarProcess.destroyForcibly()
+                        sidecarProcess.waitFor(250, TimeUnit.MILLISECONDS)
+                    }
+                }.onFailure { appendDiagnostic("nativeProcess teardown failed during $origin: ${it.message}") }
             }
 
             activeRuntime = null
@@ -681,6 +714,23 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             handleFailure(
                 message = "vk-turn-proxy Android bridge exited with code $exitCode",
                 extraLogLine = lastLine?.let { "Last vk-turn-proxy log: $it" },
+            )
+        }
+    }
+
+    private fun watchNativeProcess(process: Process) {
+        thread(name = "odin-one-native-watch", isDaemon = true) {
+            val exitCode = runCatching { process.waitFor() }.getOrDefault(-1)
+            appendDiagnostic(
+                "Native sidecar watcher observed process exit. exitCode=$exitCode shuttingDown=$shuttingDown sameProcess=${process === nativeProcess}",
+            )
+            if (shuttingDown || process !== nativeProcess) {
+                return@thread
+            }
+            val lastLine = lastNativeProcessLogLine?.takeIf { it.isNotBlank() }
+            handleFailure(
+                message = "Native Android sidecar exited with code $exitCode",
+                extraLogLine = lastLine?.let { "Last native sidecar log: $it" },
             )
         }
     }
@@ -789,6 +839,11 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         maybeHandleVkCaptchaPrompt(line)
     }
 
+    private fun handleNativeProcessLogLine(line: String) {
+        lastNativeProcessLogLine = line
+        appendLog(line)
+    }
+
     private fun maybeHandleVkCaptchaPrompt(line: String) {
         val url = extractVkCaptchaUrl(line) ?: return
         if (pendingVkCaptchaUrl == url) {
@@ -854,7 +909,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         if (!isActiveTunnelStatus(snapshot.status) || !matchesTunnelRequest(snapshot, args)) {
             return false
         }
-        return activeRuntime != null || commandServer != null || vkProcess != null || tunDescriptor != null
+        return activeRuntime != null || commandServer != null || vkProcess != null || nativeProcess != null || tunDescriptor != null
     }
 
     private fun acquireWakeLock() {

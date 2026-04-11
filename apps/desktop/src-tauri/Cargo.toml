@@ -1,6 +1,6 @@
 [package]
 name = "odin-one-desktop"
-version = "0.6.1"
+version = "0.6.2"
 description = "Odin One desktop shell"
 authors = ["Odin One"]
 license = ""

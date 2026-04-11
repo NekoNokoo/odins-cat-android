@@ -82,6 +82,11 @@ type ControlCenterProps = {
   onNetworkLensChange?: (lens: MobileNetworkLensResult | null) => void;
 };
 
+type RuntimeIdentity = {
+  runtimeFamily: string;
+  activationState: string;
+};
+
 type OwnerRuntimeLabMode =
   | "off"
   | "reality-whitelist-scaffold"
@@ -274,6 +279,78 @@ const importedProfileHasVKRelay = (profile: InviteProfile | null) =>
     (profile?.vkTurnProxyPort && profile?.wireGuardPort),
   );
 
+type CdnAntiWhitelistRuntimeSummary = {
+  frontHost: string;
+  connectHost: string;
+  connectPort: number;
+  tlsServerName: string;
+  hostHeader: string;
+  tlsAllowInsecure: boolean;
+};
+
+const resolveProfileCdnAntiWhitelistRuntime = (
+  profile:
+    | Pick<InviteProfile, "androidRuntime">
+    | Pick<OwnerAccessProfile, "androidRuntime">
+    | null
+    | undefined,
+): CdnAntiWhitelistRuntimeSummary | null => {
+  const runtime = profile?.androidRuntime;
+  if (!runtime || typeof runtime !== "object") {
+    return null;
+  }
+  const cdnAntiWhitelist = (runtime as Record<string, unknown>).cdnAntiWhitelist;
+  if (!cdnAntiWhitelist || typeof cdnAntiWhitelist !== "object") {
+    return null;
+  }
+  const candidate = cdnAntiWhitelist as Record<string, unknown>;
+  if (candidate.enabled !== true) {
+    return null;
+  }
+  const frontHost =
+    typeof candidate.frontHost === "string" ? candidate.frontHost.trim() : "";
+  const connectHost =
+    typeof candidate.connectHost === "string"
+      ? candidate.connectHost.trim()
+      : "";
+  const connectPort =
+    typeof candidate.connectPort === "number"
+      ? candidate.connectPort
+      : typeof candidate.connectPort === "string"
+        ? Number.parseInt(candidate.connectPort, 10)
+        : Number.NaN;
+  if (
+    !frontHost ||
+    !connectHost ||
+    !Number.isInteger(connectPort) ||
+    connectPort <= 0 ||
+    connectPort > 65535
+  ) {
+    return null;
+  }
+  return {
+    frontHost,
+    connectHost,
+    connectPort,
+    tlsServerName:
+      typeof candidate.tlsServerName === "string"
+        ? candidate.tlsServerName.trim()
+        : "",
+    hostHeader:
+      typeof candidate.hostHeader === "string"
+        ? candidate.hostHeader.trim()
+        : "",
+    tlsAllowInsecure: candidate.tlsAllowInsecure === true,
+  };
+};
+
+const importedProfileHasCdnAntiWhitelist = (profile: InviteProfile | null) =>
+  Boolean(resolveProfileCdnAntiWhitelistRuntime(profile));
+
+const importedProfilePrefersCdnYandexMode = (
+  profile: InviteProfile | null,
+) => importedProfileHasCdnAntiWhitelist(profile);
+
 const profileProtocolPackHasEntry = (
   profile:
     | Pick<OwnerAccessProfile, "protocolPack">
@@ -399,6 +476,12 @@ const importedProfileHasCurrentYandexEdge = (profile: InviteProfile | null) =>
         "realityYandexEdgeProxy",
       ),
   ) || profileProtocolPackHasEntry(profile, "vless-reality-yandex-edge-proxy");
+
+const importedProfilePrefersYandexEdgeMode = (
+  profile: InviteProfile | null,
+) =>
+  importedProfileHasCdnAntiWhitelist(profile) ||
+  importedProfileHasYandexEdge(profile);
 
 const ownerProfileHasRealityRelay = (profile: OwnerAccessProfile | null) =>
   Boolean(
@@ -696,7 +779,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const [deployment, setDeployment] = useState<DeploymentState | null>(null);
   const [showDeploymentOverlay, setShowDeploymentOverlay] = useState(false);
   const [vkLink, setVKLink] = useState("");
-  const [whitelistIp, setWhitelistIp] = useState(yandexEdgeConnectHost);
+  const [whitelistIp, setWhitelistIp] = useState("");
   const [whitelistLookup, setWhitelistLookup] =
     useState<WhitelistLookupResult | null>(null);
   const [whitelistLookupError, setWhitelistLookupError] = useState<
@@ -1233,6 +1316,20 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const resolvedYandexEdgeProxyFallback =
     resolveProfileEdgeFallback(importedProfile, "realityYandexEdgeProxy") ??
     resolveProfileEdgeFallback(ownerProfile, "realityYandexEdgeProxy");
+  const resolvedYandexEdgeRuntime =
+    resolveProfileCdnAntiWhitelistRuntime(importedProfile) ??
+    resolveProfileCdnAntiWhitelistRuntime(ownerProfile);
+  const yandexEdgeRuntimeHint = resolvedYandexEdgeRuntime
+    ? resolvedYandexEdgeRuntime.tlsAllowInsecure
+      ? locale === "ru"
+        ? "Yandex camo: первый hop маскируется под обычный HTTPS-трафик. Этот режим сделан специально для повышения шанса пройти белые списки."
+        : "Yandex camo masks the first hop as ordinary HTTPS traffic. This mode is designed to improve the chance of passing a whitelist."
+      : locale === "ru"
+        ? "Yandex fast: первый hop идёт через ускоренный HTTPS front. Обычно он быстрее, но camo-режим лучше подходит для жёстких белых списков."
+        : "Yandex fast sends the first hop through a faster HTTPS front. It is usually faster, while camo is better for stricter whitelists."
+    : null;
+  const importedProfileOffersYandexEdge =
+    isAndroidClient && importedProfilePrefersYandexEdgeMode(importedProfile);
   const accessModeCards = [
     {
       mode: "vless-reality" as const,
@@ -1245,15 +1342,18 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       available: true,
     },
     {
-      mode: "yandex-edge-proxy" as const,
+      mode: "yandex-edge" as const,
       label: t("runtimeModeYandexEdge"),
-      hint: t("runtimeModeYandexEdgeHint"),
+      hint: yandexEdgeRuntimeHint ?? t("runtimeModeYandexEdgeHint"),
       status: protocolEntryById.has("vless-reality-yandex-edge-proxy")
         ? t("modeStatusOptional")
-        : t("modeStatusLocked"),
+        : importedProfileOffersYandexEdge
+          ? t("modeStatusReady")
+          : t("modeStatusLocked"),
       available:
         isAndroidClient &&
-        protocolEntryById.has("vless-reality-yandex-edge-proxy"),
+        (protocolEntryById.has("vless-reality-yandex-edge-proxy") ||
+          importedProfileOffersYandexEdge),
     },
     {
       mode: "vk-relay" as const,
@@ -1339,6 +1439,10 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         : "unknown";
   const routeLensNote =
     mobileNetworkLens?.note?.trim() ||
+    (((selectedAccessMode === "yandex-edge" ||
+      selectedAccessMode === "yandex-edge-proxy") &&
+      yandexEdgeRuntimeHint) ||
+      "") ||
     (!mobileNetworkLens?.isCellular ? t("whitelistProbeCellularOnly") : "");
   const routeLensVisible = Boolean(
     isAndroidClient &&
@@ -1594,8 +1698,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           parsed.accessMode === "relay-direct"
         ) {
           setSelectedAccessMode(
-            parsed.accessMode === "yandex-edge"
-              ? "yandex-edge-proxy"
+            parsed.accessMode === "yandex-edge-proxy"
+              ? "yandex-edge"
               : parsed.accessMode,
           );
         } else {
@@ -1850,12 +1954,18 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   }, [isAndroidClient, localTunnel]);
 
   useEffect(() => {
-    if (selectedAccessMode === "yandex-edge") {
-      setSelectedAccessMode(
-        protocolEntryById.has("vless-reality-yandex-edge-proxy")
-          ? "yandex-edge-proxy"
-          : "vless-reality",
-      );
+    if (selectedAccessMode === "yandex-edge-proxy") {
+      setSelectedAccessMode("yandex-edge");
+      return;
+    }
+    if (
+      selectedAccessMode === "yandex-edge" &&
+      !(
+        protocolEntryById.has("vless-reality-yandex-edge-proxy") ||
+        importedProfileOffersYandexEdge
+      )
+    ) {
+      setSelectedAccessMode("vless-reality");
       return;
     }
     if (selectedAccessModeCard.available) {
@@ -1863,6 +1973,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     }
     setSelectedAccessMode("vless-reality");
   }, [
+    importedProfileOffersYandexEdge,
     protocolEntryById,
     selectedAccessMode,
     selectedAccessModeCard.available,
@@ -2151,11 +2262,15 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     const importedProtocol = normalizeInviteProtocol(profile.protocol);
     setImportedProfile(profile);
     setSelectedAccessMode(
-      draftAccessMode({
-        ...initialDraft,
-        transport: importedTransport,
-        protocol: importedProtocol,
-      }),
+      importedProfilePrefersCdnYandexMode(profile)
+        ? "yandex-edge"
+        : importedProfilePrefersYandexEdgeMode(profile)
+          ? "yandex-edge"
+        : draftAccessMode({
+            ...initialDraft,
+            transport: importedTransport,
+            protocol: importedProtocol,
+          }),
     );
     setDraft((current) => ({
       ...current,
@@ -2177,7 +2292,11 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const resolveRuntimeIdentity = (
     serverDraft: ServerDraft,
     ownerRuntimeLabRequest?: OwnerRuntimeLabRequest,
+    runtimeIdentityOverride?: RuntimeIdentity,
   ) => {
+    if (runtimeIdentityOverride) {
+      return runtimeIdentityOverride;
+    }
     const transport = normalizeTransport(serverDraft.transport);
     const protocol =
       transport === "xray"
@@ -2494,17 +2613,55 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       usingImportedProfile,
       excludePackages: splitTunnelExcludePackages,
       ownerRuntimeLabRequest,
+      runtimeIdentityOverride: undefined as RuntimeIdentity | undefined,
     };
   };
 
   const buildCurrentTunnelStartRequest = (baseDraft: ServerDraft = draft) => {
+    const importedProfileUsesCdnYandexEdge =
+      !secret.trim() &&
+      importedProfileMatchesHost(
+        importedProfile,
+        baseDraft.host || resolvedDraftHost,
+      ) &&
+      importedProfileHasCdnAntiWhitelist(importedProfile);
+    if (selectedAccessMode === "vless-reality") {
+      if (importedProfileUsesCdnYandexEdge) {
+        return {
+          ...buildTunnelStartRequest(baseDraft),
+          runtimeIdentityOverride: {
+            runtimeFamily: "direct-reality",
+            activationState: "active",
+          },
+        };
+      }
+      return buildTunnelStartRequest(baseDraft);
+    }
     if (selectedAccessMode === "yandex-edge") {
+      if (importedProfileUsesCdnYandexEdge) {
+        return {
+          ...buildTunnelStartRequest(baseDraft),
+          runtimeIdentityOverride: {
+            runtimeFamily: "cdn-anti-whitelist",
+            activationState: "active",
+          },
+        };
+      }
       return buildTunnelStartRequest(baseDraft, "reality-yandex-edge-proxy", {
         allowImportedProfileForOwnerRuntimeLab: true,
         requireYandexEdgeSupport: true,
       });
     }
     if (selectedAccessMode === "yandex-edge-proxy") {
+      if (importedProfileUsesCdnYandexEdge) {
+        return {
+          ...buildTunnelStartRequest(baseDraft),
+          runtimeIdentityOverride: {
+            runtimeFamily: "cdn-anti-whitelist",
+            activationState: "active",
+          },
+        };
+      }
       return buildTunnelStartRequest(baseDraft, "reality-yandex-edge-proxy", {
         allowImportedProfileForOwnerRuntimeLab: true,
         requireYandexEdgeSupport: true,
@@ -2531,6 +2688,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     serverDraft: ServerDraft,
     ownerRuntimeLabRequest?: OwnerRuntimeLabRequest,
     excludePackages: string[] = splitTunnelExcludePackages,
+    runtimeIdentityOverride?: RuntimeIdentity,
   ) => {
     if (!tunnel || tunnel.status !== "running" || !tunnel.socksAddress) {
       return false;
@@ -2541,6 +2699,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     const expectedRuntimeIdentity = resolveRuntimeIdentity(
       serverDraft,
       ownerRuntimeLabRequest,
+      runtimeIdentityOverride,
     );
     if (
       expectedHost &&
@@ -3063,6 +3222,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           usingImportedProfile,
           excludePackages,
           ownerRuntimeLabRequest,
+          runtimeIdentityOverride,
         } = buildCurrentTunnelStartRequest();
         if (
           isAndroidClient &&
@@ -3074,6 +3234,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             serverDraft,
             ownerRuntimeLabRequest,
             excludePackages,
+            runtimeIdentityOverride,
           )
         ) {
           const stopRes = await coreApi.stopLocalTunnel();
@@ -3215,7 +3376,13 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           usingImportedProfile,
           excludePackages,
           ownerRuntimeLabRequest,
+          runtimeIdentityOverride,
         } = buildCurrentTunnelStartRequest();
+        const runtimeIdentity = resolveRuntimeIdentity(
+          serverDraft,
+          ownerRuntimeLabRequest,
+          runtimeIdentityOverride,
+        );
         let tunnelData = localTunnel;
         if (
           isAndroidClient &&
@@ -3227,6 +3394,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             serverDraft,
             ownerRuntimeLabRequest,
             excludePackages,
+            runtimeIdentityOverride,
           )
         ) {
           const stopRes = await coreApi.stopLocalTunnel();
@@ -3241,6 +3409,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             serverDraft,
             ownerRuntimeLabRequest,
             excludePackages,
+            runtimeIdentityOverride,
           )
         ) {
           const startApi =
@@ -3252,6 +3421,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
               server: serverDraft,
               secret: usingImportedProfile ? "" : secret,
               vkLink,
+              runtimeFamily: runtimeIdentity.runtimeFamily,
+              activationState: runtimeIdentity.activationState,
               ...(isAndroidClient && excludePackages.length > 0
                 ? { excludePackages }
                 : {}),
@@ -3682,7 +3853,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     setPlan([]);
     setDeployment(null);
     setShowDeploymentOverlay(false);
-    setWhitelistIp(yandexEdgeConnectHost);
+    setWhitelistIp("");
     setWhitelistLookup(null);
     setWhitelistLookupError(null);
     setMobileNetworkLens(null);
@@ -3771,7 +3942,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
 
                     <div
                       className={`home-network-card__grid ${
-                        selectedAccessMode === "yandex-edge-proxy" &&
+                        (selectedAccessMode === "yandex-edge" ||
+                          selectedAccessMode === "yandex-edge-proxy") &&
                         routeLensOriginDisplay &&
                         routeLensTunnelDisplay
                           ? ""
@@ -3794,7 +3966,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                         </div>
                       ) : null}
 
-                      {selectedAccessMode === "yandex-edge-proxy" &&
+                      {(selectedAccessMode === "yandex-edge" ||
+                        selectedAccessMode === "yandex-edge-proxy") &&
                       routeLensTunnelDisplay ? (
                         <div className="home-network-hop">
                           <span>{t("routeLensTunnel")}</span>
@@ -4799,7 +4972,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                       setWhitelistLookup(null);
                       setWhitelistLookupError(null);
                     }}
-                    placeholder="62.84.123.148"
+                    placeholder="IPv4"
                     inputMode="decimal"
                   />
                 </label>

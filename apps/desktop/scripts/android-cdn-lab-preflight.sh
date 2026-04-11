@@ -21,6 +21,8 @@ Usage:
 
 Examples:
   apps/desktop/scripts/android-cdn-lab-preflight.sh --preset cdn-ws-lab
+  apps/desktop/scripts/android-cdn-lab-preflight.sh --preset cdn-xhttp-lab
+  apps/desktop/scripts/android-cdn-lab-preflight.sh --preset cdn-httpupgrade-lab
   apps/desktop/scripts/android-cdn-lab-preflight.sh --preset cdn-ws-lab --plan-file /tmp/odin-one-cdn-plan.json --plan-tag front-primary
   ODIN_ONE_CDN_FRONT_HOST=edge.example.com \
   ODIN_ONE_CDN_ORIGIN_HOST=origin.example.com \
@@ -184,7 +186,7 @@ def extract_from_profile(raw: dict) -> dict:
     origin = runtime.get("origin") or {}
     mode = (runtime.get("mode") or "scaffold").strip().lower()
     transport = (runtime.get("transport") or "websocket").strip().lower()
-    activation = "active" if mode == "lab" and transport == "websocket" else "scaffold_only"
+    activation = "active" if mode == "lab" and transport in {"websocket", "xhttp", "httpupgrade"} else "scaffold_only"
     front_host = first_text(selected.get("host"), runtime.get("frontHost"))
     front_port = first_port(selected.get("port"), runtime.get("frontPort"), default=443)
     return {
@@ -193,6 +195,11 @@ def extract_from_profile(raw: dict) -> dict:
         "activationState": activation,
         "provider": (selected.get("provider") or runtime.get("provider") or "generic").strip().lower(),
         "transport": transport,
+        "xhttpMode": (runtime.get("xhttpMode") or ((runtime.get("xhttp") or {}).get("mode") if isinstance(runtime.get("xhttp"), dict) else "") or "").strip().lower(),
+        "tlsAlpn": runtime.get("tlsAlpn") or (((runtime.get("xhttp") or {}).get("alpn")) if isinstance(runtime.get("xhttp"), dict) else []) or [],
+        "xmuxMaxConcurrency": runtime.get("xmuxMaxConcurrency") or (((runtime.get("xmux") or {}).get("maxConcurrency")) if isinstance(runtime.get("xmux"), dict) else None),
+        "xmuxHMaxRequestTimes": runtime.get("xmuxHMaxRequestTimes") or (((runtime.get("xmux") or {}).get("hMaxRequestTimes")) if isinstance(runtime.get("xmux"), dict) else None),
+        "xmuxHMaxReusableSecs": runtime.get("xmuxHMaxReusableSecs") or (((runtime.get("xmux") or {}).get("hMaxReusableSecs")) if isinstance(runtime.get("xmux"), dict) else None),
         "frontHost": front_host,
         "frontPort": front_port,
         "connectHost": first_text(
@@ -223,6 +230,7 @@ def extract_from_profile(raw: dict) -> dict:
         ),
         "frontPath": normalize_path(selected.get("path") or runtime.get("frontPath") or "/", "/"),
         "tlsServerName": first_text(selected.get("tlsServerName"), runtime.get("tlsServerName"), front_host),
+        "tlsAllowInsecure": bool(selected.get("tlsAllowInsecure", runtime.get("tlsAllowInsecure", runtime.get("allowInsecure", False)))),
         "httpHostHeader": first_text(selected.get("hostHeader"), selected.get("httpHostHeader"), runtime.get("hostHeader"), runtime.get("httpHostHeader"), front_host),
         "frontTag": (selected.get("tag") or runtime.get("frontTag") or "").strip(),
         "originHost": (origin.get("host") or runtime.get("originHost") or "").strip(),
@@ -242,6 +250,11 @@ def extract_from_scaffold(raw: dict) -> dict:
         "activationState": (raw.get("activationState") or "scaffold_only").strip().lower(),
         "provider": (raw.get("provider") or selected.get("provider") or "generic").strip().lower(),
         "transport": (raw.get("transport") or "websocket").strip().lower(),
+        "xhttpMode": (raw.get("xhttpMode") or "").strip().lower(),
+        "tlsAlpn": raw.get("tlsAlpn") or [],
+        "xmuxMaxConcurrency": raw.get("xmuxMaxConcurrency"),
+        "xmuxHMaxRequestTimes": raw.get("xmuxHMaxRequestTimes"),
+        "xmuxHMaxReusableSecs": raw.get("xmuxHMaxReusableSecs"),
         "frontHost": front_host,
         "frontPort": front_port,
         "connectHost": first_text(
@@ -272,6 +285,7 @@ def extract_from_scaffold(raw: dict) -> dict:
         ),
         "frontPath": normalize_path(raw.get("frontPath") or selected.get("path") or "/", "/"),
         "tlsServerName": first_text(raw.get("tlsServerName"), selected.get("tlsServerName"), front_host),
+        "tlsAllowInsecure": bool(raw.get("tlsAllowInsecure", selected.get("tlsAllowInsecure", selected.get("allowInsecure", False)))),
         "httpHostHeader": first_text(raw.get("httpHostHeader"), selected.get("httpHostHeader"), selected.get("hostHeader"), front_host),
         "frontTag": (raw.get("frontTag") or selected.get("tag") or "").strip(),
         "originHost": (raw.get("originHost") or "").strip(),

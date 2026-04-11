@@ -21,6 +21,8 @@ Usage:
 
 Examples:
   apps/desktop/scripts/android-cdn-origin-lab.sh --preset cdn-ws-lab
+  apps/desktop/scripts/android-cdn-origin-lab.sh --preset cdn-xhttp-lab
+  apps/desktop/scripts/android-cdn-origin-lab.sh --preset cdn-httpupgrade-lab
   apps/desktop/scripts/android-cdn-origin-lab.sh --preset cdn-ws-lab --plan-file /tmp/odin-one-cdn-plan.json --plan-tag front-primary
   apps/desktop/scripts/android-cdn-origin-lab.sh --preset cdn-ws-lab --output-dir /tmp/odin-one-android-cdn-origin-lab
 
@@ -195,7 +197,7 @@ def extract_from_profile(raw: dict) -> dict:
     origin = runtime.get("origin") or {}
     mode = (runtime.get("mode") or "scaffold").strip().lower()
     transport = (runtime.get("transport") or "websocket").strip().lower()
-    activation = "active" if mode == "lab" and transport == "websocket" else "scaffold_only"
+    activation = "active" if mode == "lab" and transport in {"websocket", "xhttp", "httpupgrade"} else "scaffold_only"
     front_host = first_text(selected.get("host"), runtime.get("frontHost"))
     front_port = first_port(selected.get("port"), runtime.get("frontPort"), default=443)
     return {
@@ -204,6 +206,11 @@ def extract_from_profile(raw: dict) -> dict:
         "activationState": activation,
         "provider": (selected.get("provider") or runtime.get("provider") or "generic").strip().lower(),
         "transport": transport,
+        "xhttpMode": (runtime.get("xhttpMode") or ((runtime.get("xhttp") or {}).get("mode") if isinstance(runtime.get("xhttp"), dict) else "") or "").strip().lower(),
+        "tlsAlpn": runtime.get("tlsAlpn") or (((runtime.get("xhttp") or {}).get("alpn")) if isinstance(runtime.get("xhttp"), dict) else []) or [],
+        "xmuxMaxConcurrency": runtime.get("xmuxMaxConcurrency") or (((runtime.get("xmux") or {}).get("maxConcurrency")) if isinstance(runtime.get("xmux"), dict) else None),
+        "xmuxHMaxRequestTimes": runtime.get("xmuxHMaxRequestTimes") or (((runtime.get("xmux") or {}).get("hMaxRequestTimes")) if isinstance(runtime.get("xmux"), dict) else None),
+        "xmuxHMaxReusableSecs": runtime.get("xmuxHMaxReusableSecs") or (((runtime.get("xmux") or {}).get("hMaxReusableSecs")) if isinstance(runtime.get("xmux"), dict) else None),
         "frontHost": front_host,
         "frontPort": front_port,
         "connectHost": first_text(
@@ -234,6 +241,7 @@ def extract_from_profile(raw: dict) -> dict:
         ),
         "frontPath": normalize_path(selected.get("path") or runtime.get("frontPath") or "/", "/"),
         "tlsServerName": first_text(selected.get("tlsServerName"), runtime.get("tlsServerName"), front_host),
+        "tlsAllowInsecure": bool(selected.get("tlsAllowInsecure", runtime.get("tlsAllowInsecure", runtime.get("allowInsecure", False)))),
         "httpHostHeader": first_text(selected.get("hostHeader"), selected.get("httpHostHeader"), runtime.get("hostHeader"), runtime.get("httpHostHeader"), front_host),
         "frontTag": (selected.get("tag") or runtime.get("frontTag") or "").strip(),
         "originHost": (origin.get("host") or runtime.get("originHost") or "origin.example.com").strip(),
@@ -254,6 +262,11 @@ def extract_from_scaffold(raw: dict) -> dict:
         "activationState": (raw.get("activationState") or "scaffold_only").strip().lower(),
         "provider": (raw.get("provider") or selected.get("provider") or "generic").strip().lower(),
         "transport": (raw.get("transport") or "websocket").strip().lower(),
+        "xhttpMode": (raw.get("xhttpMode") or "").strip().lower(),
+        "tlsAlpn": raw.get("tlsAlpn") or [],
+        "xmuxMaxConcurrency": raw.get("xmuxMaxConcurrency"),
+        "xmuxHMaxRequestTimes": raw.get("xmuxHMaxRequestTimes"),
+        "xmuxHMaxReusableSecs": raw.get("xmuxHMaxReusableSecs"),
         "frontHost": front_host,
         "frontPort": front_port,
         "connectHost": first_text(
@@ -284,6 +297,7 @@ def extract_from_scaffold(raw: dict) -> dict:
         ),
         "frontPath": normalize_path(raw.get("frontPath") or selected.get("path") or "/", "/"),
         "tlsServerName": first_text(raw.get("tlsServerName"), selected.get("tlsServerName"), front_host),
+        "tlsAllowInsecure": bool(raw.get("tlsAllowInsecure", selected.get("tlsAllowInsecure", selected.get("allowInsecure", False)))),
         "httpHostHeader": first_text(raw.get("httpHostHeader"), selected.get("httpHostHeader"), selected.get("hostHeader"), front_host),
         "frontTag": (raw.get("frontTag") or selected.get("tag") or "").strip(),
         "originHost": (raw.get("originHost") or "origin.example.com").strip(),
@@ -301,20 +315,26 @@ def build_caddy(plan: dict) -> str:
     origin_port = plan["coreLoopbackPort"]
     host_header = plan["httpHostHeader"] or front_host
     front_tag = plan["frontTag"] or "owner-lab"
+    transport = (plan.get("transport") or "").strip().lower()
+    proxy_header_lines = [
+        f"            header_up Host {host_header}",
+        "            header_up X-Forwarded-Host {host}",
+        "            header_up X-Forwarded-Proto https",
+        f"            header_up X-Odin-Front-Tag {front_tag}",
+    ]
+    proxy_headers = "\n".join(proxy_header_lines)
     return f"""https://{front_host} {{
     log {{
         output stdout
         format json
     }}
 
-    @odin_front path {front_path}
+    @odin_front path {front_path} {front_path}/*
     handle @odin_front {{
-        rewrite * {origin_path}
+        uri replace {front_path} {origin_path}
         reverse_proxy 127.0.0.1:{origin_port} {{
-            header_up Host {host_header}
-            header_up X-Forwarded-Host {{host}}
-            header_up X-Forwarded-Proto https
-            header_up X-Odin-Front-Tag {front_tag}
+            flush_interval -1
+{proxy_headers}
         }}
     }}
 
@@ -329,27 +349,35 @@ def build_nginx(plan: dict) -> str:
     origin_path = plan["originPath"]
     origin_port = plan["coreLoopbackPort"]
     host_header = plan["httpHostHeader"] or front_host
-    return f"""map $http_upgrade $connection_upgrade {{
+    transport = (plan.get("transport") or "").strip().lower()
+    upgrade_block = ""
+    if transport in {"websocket", "httpupgrade"}:
+        upgrade_block = """        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+"""
+    map_block = ""
+    if transport in {"websocket", "httpupgrade"}:
+        map_block = """map $http_upgrade $connection_upgrade {
     default upgrade;
     ''      close;
-}}
+}
 
-server {{
+"""
+    return f"""{map_block}server {{
     listen 443 ssl http2;
     server_name {front_host};
 
     ssl_certificate     /etc/letsencrypt/live/{front_host}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/{front_host}/privkey.pem;
 
-    location = {front_path} {{
-        proxy_pass http://127.0.0.1:{origin_port}{origin_path};
-        proxy_http_version 1.1;
+    location ^~ {front_path} {{
+        rewrite ^{front_path}(.*)$ {origin_path}$1 break;
+        proxy_pass http://127.0.0.1:{origin_port};
         proxy_set_header Host {host_header};
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
         proxy_set_header X-Forwarded-Host $host;
         proxy_set_header X-Forwarded-Proto https;
-    }}
+{upgrade_block}    }}
 
     location / {{
         return 404;
@@ -377,6 +405,12 @@ def build_core_requirements(plan: dict) -> str:
         "- Return 404 for unrelated paths and keep the front lane narrow.",
         "",
     ]
+    if plan["transport"] == "xhttp":
+        lines.append("- Treat this lane as plain HTTP-shaped tunneling; do not add WebSocket-only upgrade handling unless the edge really needs it.")
+        lines.append("")
+    if plan["transport"] == "httpupgrade":
+        lines.append("- This lane expects HTTP Upgrade semantics at the front and `httpupgrade` on the loopback xray inbound.")
+        lines.append("")
     if (plan["connectHost"], plan["connectPort"]) != (plan["frontHost"], plan["frontPort"]):
         lines.append("- The handset can dial a separate `connectHost` / `connectPort` while still presenting the visible front in TLS and HTTP metadata.")
         lines.append("")
