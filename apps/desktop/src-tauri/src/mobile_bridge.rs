@@ -1715,7 +1715,7 @@ fn bundled_whitelist_source() -> Result<ParsedWhitelistFiles, String> {
 
 async fn fetch_remote_whitelist_files() -> Result<(String, String, String), String> {
     let client = reqwest::Client::builder()
-        .user_agent("odin-one-mobile-bridge/0.6.2")
+        .user_agent("odin-one-mobile-bridge/0.7.0")
         .build()
         .map_err(|err| format!("build whitelist HTTP client: {err}"))?;
 

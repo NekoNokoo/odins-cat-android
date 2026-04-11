@@ -106,6 +106,84 @@ private const val REALITY_DNS_DEFAULT_DOH_PATH = "/dns-query"
 private const val REALITY_NETWORK_RELOAD_DEBOUNCE_DEFAULT_MS = 1500L
 private const val REALITY_NETWORK_RELOAD_DEBOUNCE_MIN_MS = 250L
 private const val REALITY_NETWORK_RELOAD_DEBOUNCE_MAX_MS = 5000L
+private val DEFAULT_LOCAL_BYPASS_DOMAIN_KEYWORDS =
+    listOf(
+        "vk",
+        "ok.ru",
+        "mail.ru",
+        "gosuslugi",
+        "mos.ru",
+        "yandex",
+        "ya.ru",
+        "ozon",
+        "wildberries",
+        "avito",
+        "kinopoisk",
+        "dzen",
+        "hh",
+        "2gis",
+        "rutube",
+        "magnit",
+        "5ka",
+        "perekrestok",
+        "alfabank",
+        "alfaonline",
+        "tbank",
+        "t-bank",
+        "tinkoff",
+        "vtb",
+        "sber",
+        "sberbank",
+        "gazprombank",
+        "gpb",
+        "pochta",
+    )
+private val DEFAULT_LOCAL_BYPASS_DOMAINS =
+    listOf(
+        "1018213540.rsc.cdn77.org",
+        "avtodor-tr.ru",
+        "b2c-ticket-sentry.onelya.ru",
+        "bitrix.info",
+        "bkvet.ru",
+        "cdn1.ozonusercontent.com",
+        "cms1.dzvr.ru",
+        "counter.yadro.ru",
+        "dzvr.ru",
+        "emex.ru",
+        "fairplay-proxy.ott.yandex.ru",
+        "fssp.gov.ru",
+        "gorzdrav.spb.ru",
+        "gosuslugi.ru",
+        "gov.ru",
+        "graphql.kinopoisk.ru",
+        "gu-st.ru",
+        "lemanapro.ru",
+        "leroymerlin.ru",
+        "mobileapp.russianpost.ru",
+        "esia.gosuslugi.ru",
+        "lk.gosuslugi.ru",
+        "pos.gosuslugi.ru",
+        "mos.ru",
+        "mosenergosbyt.ru",
+        "mosreg.ru",
+        "nalog.ru",
+        "ozon.ru",
+        "pgu.mos.ru",
+        "pesc.ru",
+        "pochta.ru",
+        "reso.ru",
+        "rosreestr.gov.ru",
+        "rzd-bonus.ru",
+        "rzd.ru",
+        "showip.net",
+        "sys.refocus.ru",
+        "vshark.ttk.ru",
+        "widevine-proxy.ott.yandex.ru",
+        "xn--90aijkdmaud0d.xn--p1ai",
+        "yandex.net",
+        "yandex.ru",
+        "ya.ru",
+    )
 private val DIRECT_REALITY_RUNTIME_ARTIFACTS = listOf("reality-whitelist-assisted-scaffold.json", "active-vless-reality-vps-lab.json", "reality-vps-lab-scaffold.json", "active-cdn-anti-whitelist.json", "cdn-anti-whitelist-scaffold.json", "active-vk-relay.json")
 private val REALITY_WHITELIST_RUNTIME_ARTIFACTS = listOf("active-vless-reality.json", "active-vless-reality-vps-lab.json", "reality-vps-lab-scaffold.json", "active-cdn-anti-whitelist.json", "cdn-anti-whitelist-scaffold.json", "active-vk-relay.json")
 private val REALITY_VPS_LAB_RUNTIME_ARTIFACTS = listOf("active-vless-reality.json", "reality-whitelist-assisted-scaffold.json", "active-cdn-anti-whitelist.json", "cdn-anti-whitelist-scaffold.json", "active-vk-relay.json")
@@ -211,6 +289,8 @@ private data class RealityRuntimeOptions(
     val dnsIndependentCache: Boolean,
     val includePackages: List<String>,
     val excludePackages: List<String>,
+    val localBypassDomainKeywords: List<String>,
+    val localBypassDomains: List<String>,
 ) {
     fun featureLabels(): List<String> =
         buildList {
@@ -249,6 +329,10 @@ private data class RealityRuntimeOptions(
             }
             if (excludePackages.isNotEmpty()) {
                 add("pkg-exclude:${excludePackages.size}")
+            }
+            val localBypassCount = localBypassDomainKeywords.size + localBypassDomains.size
+            if (localBypassCount > 0) {
+                add("local-bypass:$localBypassCount")
             }
             when {
                 privateBypassCidrs.isNotEmpty() -> add("private-bypass:selective:${privateBypassCidrs.size}")
@@ -1884,6 +1968,7 @@ object VpnRuntimeLibbox {
                     .put("outbound", "direct"),
             )
         }
+        appendLocalBypassRouteRules(routeRules, options.localBypassDomainKeywords, options.localBypassDomains)
 
         val relayOutbound =
             JSONObject()
@@ -2426,6 +2511,7 @@ object VpnRuntimeLibbox {
                     .put("outbound", "direct"),
             )
         }
+        appendLocalBypassRouteRules(routeRules, options.localBypassDomainKeywords, options.localBypassDomains)
 
         val config =
             JSONObject()
@@ -4953,6 +5039,16 @@ object VpnRuntimeLibbox {
             )
         val includePackages = readStringListOption(args, "includePackages", profileOptions, "includePackages")
         val excludePackages = readStringListOption(args, "excludePackages", profileOptions, "excludePackages")
+        val localBypassDomainKeywords =
+            readStringListOption(args, "localBypassDomainKeywords", profileOptions, "localBypassDomainKeywords")
+                .mapNotNull(::normalizeCdnRoutingKeyword)
+                .ifEmpty { DEFAULT_LOCAL_BYPASS_DOMAIN_KEYWORDS }
+                .distinct()
+        val localBypassDomains =
+            readStringListOption(args, "localBypassDomains", profileOptions, "localBypassDomains")
+                .mapNotNull(::normalizeCdnRoutingDomain)
+                .ifEmpty { DEFAULT_LOCAL_BYPASS_DOMAINS }
+                .distinct()
         if (includePackages.isNotEmpty() && excludePackages.isNotEmpty()) {
             throw IllegalArgumentException("Only one of includePackages or excludePackages may be set for Android REALITY runtime")
         }
@@ -4977,7 +5073,30 @@ object VpnRuntimeLibbox {
             dnsIndependentCache = dnsIndependentCache,
             includePackages = includePackages,
             excludePackages = excludePackages,
+            localBypassDomainKeywords = localBypassDomainKeywords,
+            localBypassDomains = localBypassDomains,
         )
+    }
+
+    private fun appendLocalBypassRouteRules(
+        routeRules: JSONArray,
+        domainKeywords: List<String>,
+        domains: List<String>,
+    ) {
+        if (domainKeywords.isNotEmpty()) {
+            routeRules.put(
+                JSONObject()
+                    .put("domain_keyword", JSONArray(domainKeywords))
+                    .put("outbound", "direct"),
+            )
+        }
+        if (domains.isNotEmpty()) {
+            routeRules.put(
+                JSONObject()
+                    .put("domain", JSONArray(domains))
+                    .put("outbound", "direct"),
+            )
+        }
     }
 
     private fun normalizeRealityMode(value: String?): String =
@@ -5869,6 +5988,14 @@ object VpnRuntimeLibbox {
               },
               {
                 "ip_is_private": true,
+                "outbound": "direct"
+              },
+              {
+                "domain_keyword": [${DEFAULT_LOCAL_BYPASS_DOMAIN_KEYWORDS.joinToString(",") { jsonString(it) }}],
+                "outbound": "direct"
+              },
+              {
+                "domain": [${DEFAULT_LOCAL_BYPASS_DOMAINS.joinToString(",") { jsonString(it) }}],
                 "outbound": "direct"
               }
             ],
