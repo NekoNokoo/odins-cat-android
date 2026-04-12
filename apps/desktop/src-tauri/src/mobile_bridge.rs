@@ -859,6 +859,13 @@ pub async fn mobile_check_whitelist_ip(app: AppHandle, ip: String) -> Result<Val
 #[tauri::command]
 pub async fn mobile_validate_provision(payload: ProvisionPayload) -> Result<Value, String> {
     let flow = normalized_provision_flow(&payload.flow);
+    eprintln!(
+        "[mobile-provision] validate flow={} host={} user={} edge_enabled={}",
+        flow,
+        payload.server.host.trim(),
+        payload.server.username.trim(),
+        payload.edge.as_ref().is_some_and(|edge| edge.enabled)
+    );
     let protocol_pack = build_protocol_pack(&payload);
     let mut warnings = build_plan_warnings(&payload.server, flow);
     warnings.insert(
@@ -1254,6 +1261,16 @@ pub fn mobile_start_deployment(
         .filter(|edge| edge.enabled)
         .map(|edge| normalized_edge_routing_mode(Some(edge)).to_string());
     let mut steps = build_plan_steps(flow);
+    eprintln!(
+        "[mobile-provision] start deployment_id={} flow={} host={} user={} edge_enabled={} edge_host={} edge_port={}",
+        deployment_id,
+        flow,
+        payload.server.host.trim(),
+        payload.server.username.trim(),
+        edge_enabled,
+        edge_host.as_deref().unwrap_or_default(),
+        edge_port.unwrap_or_default()
+    );
     if let Some(first) = steps.first_mut() {
         first.status = "current".to_string();
     }
@@ -3172,7 +3189,15 @@ async fn mobile_run_deployment(
     deployment_id: &str,
     payload: ProvisionPayload,
 ) -> Result<(), String> {
-    if normalized_provision_flow(&payload.flow) == PROVISION_FLOW_EDGE_ATTACH {
+    let flow = normalized_provision_flow(&payload.flow);
+    eprintln!(
+        "[mobile-provision] run deployment_id={} flow={} host={} user={}",
+        deployment_id,
+        flow,
+        payload.server.host.trim(),
+        payload.server.username.trim()
+    );
+    if flow == PROVISION_FLOW_EDGE_ATTACH {
         return mobile_run_edge_attach(app, deployment_id, payload).await;
     }
 
@@ -3691,10 +3716,31 @@ async fn mobile_run_edge_attach(
     let mut origin = MobileSshSession::connect(&payload.server, &payload.secret).await?;
     origin.run("whoami && uname -a").await?;
     complete_step(&app, deployment_id, 0);
+    eprintln!(
+        "[mobile-provision] edge-attach deployment_id={} origin_host={} edge_host={} edge_port={} routing_mode={}",
+        deployment_id,
+        payload.server.host.trim(),
+        edge.server.host.trim(),
+        public_port,
+        routing_mode
+    );
 
-    let owner_text = origin
+    let owner_text = match origin
         .run(&format!("cat {}", quote_shell(WHITELIST_INVITE_PATH)))
-        .await?;
+        .await
+    {
+        Ok(text) => text,
+        Err(error) => {
+            if error.contains("No such file or directory") {
+                return Err(format!(
+                    "edge attach requires an existing origin deployment: {} is missing on {}. Run the regular origin deploy first, then attach the Yandex edge.",
+                    WHITELIST_INVITE_PATH,
+                    payload.server.host.trim()
+                ));
+            }
+            return Err(error);
+        }
+    };
     let (owner, xray_state) = load_remote_access_state(&mut origin).await?;
     let reality = read_invite_reality_fallback(&owner)
         .map_err(|err| format!("read origin reality fallback: {err}"))?;
@@ -4328,6 +4374,7 @@ async fn remote_existing_reality_uses_port(ssh: &mut MobileSshSession, port: u16
 async fn remote_existing_reality_port(ssh: &mut MobileSshSession) -> Result<Option<u16>, String> {
     match load_remote_access_state(ssh).await {
         Ok((_, state)) => Ok(nonzero_u16(state.reality.port)),
+        Err(err) if err.contains("No such file or directory") => Ok(None),
         Err(err) => Err(err),
     }
 }

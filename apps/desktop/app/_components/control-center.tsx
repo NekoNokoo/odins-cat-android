@@ -1415,6 +1415,12 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const routeLensTunnel = formatNetworkEndpoint(mobileNetworkLens?.tunnel);
   const routeLensOriginDisplay = routeLensOrigin.ip || routeLensOrigin.host;
   const routeLensTunnelDisplay = routeLensTunnel.ip || routeLensTunnel.host;
+  const activeYandexTunnelHost =
+    localTunnel?.frontConnectHost?.trim() ||
+    resolvedYandexEdgeRuntime?.connectHost ||
+    resolvedYandexEdgeProxyFallback?.connectHost ||
+    resolvedYandexEdgeFallback?.connectHost ||
+    yandexEdgeConnectHost;
   const routeLensNetworkLabel =
     mobileNetworkLens?.networkType === "cellular"
       ? t("routeLensNetworkCellular")
@@ -1893,7 +1899,16 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       return;
     }
     void refreshMobileNetworkLens(true);
-  }, [isAndroidClient, resolvedDraftHost, selectedAccessMode]);
+  }, [
+    activeYandexTunnelHost,
+    isAndroidClient,
+    localTunnel?.activationState,
+    localTunnel?.frontConnectHost,
+    localTunnel?.runtimeFamily,
+    localTunnel?.status,
+    resolvedDraftHost,
+    selectedAccessMode,
+  ]);
 
   useEffect(() => {
     if (!isAndroidClient || !error) {
@@ -1933,7 +1948,12 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     }, 30000);
 
     return () => window.clearInterval(intervalId);
-  }, [isAndroidClient, resolvedDraftHost, selectedAccessMode]);
+  }, [
+    activeYandexTunnelHost,
+    isAndroidClient,
+    resolvedDraftHost,
+    selectedAccessMode,
+  ]);
 
   useEffect(() => {
     onNetworkLensChange?.(mobileNetworkLens);
@@ -2074,8 +2094,22 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     startTransition(async () => {
       try {
         const payload = buildProvisionPayload(flow);
+        console.info("[provision] validate request", {
+          flow,
+          host: payload.server.host,
+          user: payload.server.username,
+          edgeEnabled: payload.edge?.enabled ?? false,
+          edgeHost: payload.edge?.server.host ?? "",
+          edgePort: payload.edge?.publicPort ?? 0,
+        });
         const validateRes = await coreApi.validateProvision(payload);
         const validateData = validateRes.data;
+        console.info("[provision] validate response", {
+          requestedFlow: flow,
+          resolvedFlow: validateData?.deployFlow ?? "",
+          ok: validateData?.ok ?? false,
+          error: validateData?.error ?? "",
+        });
         setValidation(validateData);
 
         const planRes = await coreApi.getProvisionPlan(payload);
@@ -2100,8 +2134,24 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     setSuccessNotice(null);
     startTransition(async () => {
       try {
-        const deployRes = await coreApi.startDeployment(buildProvisionPayload(flow));
+        const payload = buildProvisionPayload(flow);
+        console.info("[provision] deploy request", {
+          flow,
+          host: payload.server.host,
+          user: payload.server.username,
+          edgeEnabled: payload.edge?.enabled ?? false,
+          edgeHost: payload.edge?.server.host ?? "",
+          edgePort: payload.edge?.publicPort ?? 0,
+        });
+        const deployRes = await coreApi.startDeployment(payload);
         const deployData = deployRes.data;
+        console.info("[provision] deploy response", {
+          requestedFlow: flow,
+          resolvedFlow: deployData?.deployFlow ?? "",
+          deploymentId: deployData?.deploymentId ?? "",
+          status: deployData?.status ?? "",
+          error: deployData?.error ?? "",
+        });
         setDeployment(deployData);
         setPlan(deployData.steps);
         setShowDeploymentOverlay(true);
@@ -2165,7 +2215,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     const tunnelHost =
       selectedAccessMode === "yandex-edge" ||
       selectedAccessMode === "yandex-edge-proxy"
-        ? yandexEdgeConnectHost
+        ? activeYandexTunnelHost
         : "";
     if (!originHost && !tunnelHost) {
       setMobileNetworkLens(null);
