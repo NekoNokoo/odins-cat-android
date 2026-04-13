@@ -104,6 +104,82 @@ const YANDEX_EDGE_CDN_CAMOUFLAGE_HOST_POOL: &[&str] = &[
     "5post-gate.x5.ru",
     "ads.x5.ru",
 ];
+const YANDEX_EDGE_CDN_DIRECT_DOMAIN_KEYWORDS: &[&str] = &[
+    "vk",
+    "ok.ru",
+    "mail.ru",
+    "gosuslugi",
+    "mos.ru",
+    "yandex",
+    "ya.ru",
+    "ozon",
+    "wildberries",
+    "avito",
+    "kinopoisk",
+    "dzen",
+    "hh",
+    "2gis",
+    "rutube",
+    "magnit",
+    "5ka",
+    "perekrestok",
+    "alfabank",
+    "alfaonline",
+    "tbank",
+    "t-bank",
+    "tinkoff",
+    "vtb",
+    "sber",
+    "sberbank",
+    "gazprombank",
+    "gpb",
+    "pochta",
+];
+const YANDEX_EDGE_CDN_DIRECT_DOMAINS: &[&str] = &[
+    "1018213540.rsc.cdn77.org",
+    "avtodor-tr.ru",
+    "b2c-ticket-sentry.onelya.ru",
+    "bitrix.info",
+    "bkvet.ru",
+    "cdn1.ozonusercontent.com",
+    "cms1.dzvr.ru",
+    "counter.yadro.ru",
+    "dzvr.ru",
+    "emex.ru",
+    "fairplay-proxy.ott.yandex.ru",
+    "fssp.gov.ru",
+    "gorzdrav.spb.ru",
+    "gosuslugi.ru",
+    "gov.ru",
+    "graphql.kinopoisk.ru",
+    "gu-st.ru",
+    "lemanapro.ru",
+    "leroymerlin.ru",
+    "mobileapp.russianpost.ru",
+    "esia.gosuslugi.ru",
+    "lk.gosuslugi.ru",
+    "pos.gosuslugi.ru",
+    "mos.ru",
+    "mosenergosbyt.ru",
+    "mosreg.ru",
+    "nalog.ru",
+    "ozon.ru",
+    "pgu.mos.ru",
+    "pesc.ru",
+    "pochta.ru",
+    "reso.ru",
+    "rosreestr.gov.ru",
+    "rzd-bonus.ru",
+    "rzd.ru",
+    "showip.net",
+    "sys.refocus.ru",
+    "vshark.ttk.ru",
+    "widevine-proxy.ott.yandex.ru",
+    "xn--90aijkdmaud0d.xn--p1ai",
+    "yandex.net",
+    "yandex.ru",
+    "ya.ru",
+];
 const YANDEX_EDGE_CDN_XHTTP_MODE: &str = "packet-up";
 const YANDEX_EDGE_CDN_XMUX_MAX_CONCURRENCY: u64 = 20;
 const YANDEX_EDGE_CDN_XMUX_HMAX_REQUEST_TIMES: u64 = 900;
@@ -1732,6 +1808,24 @@ fn merge_json_object(target: &mut Value, extra: &Value) {
     }
 }
 
+fn merge_json_object_deep(target: &mut Value, extra: &Value) {
+    let Some(target_object) = target.as_object_mut() else {
+        return;
+    };
+    let Some(extra_object) = extra.as_object() else {
+        return;
+    };
+    for (key, value) in extra_object {
+        if let Some(target_value) = target_object.get_mut(key) {
+            if target_value.is_object() && value.is_object() {
+                merge_json_object_deep(target_value, value);
+                continue;
+            }
+        }
+        target_object.insert(key.clone(), value.clone());
+    }
+}
+
 async fn load_whitelist_lookup_source(
     app: &AppHandle,
 ) -> Result<(ParsedWhitelistFiles, bool, Option<String>), String> {
@@ -2035,14 +2129,17 @@ fn invite_effective_android_runtime(invite: &InviteProfileFile) -> Value {
     let Some(runtime_object) = runtime.as_object_mut() else {
         return invite.android_runtime.clone();
     };
-    if runtime_object
-        .get("cdnAntiWhitelist")
-        .and_then(Value::as_object)
-        .is_some_and(|cdn| !cdn.is_empty())
-    {
-        return runtime;
-    }
     if let Some(cdn_runtime) = build_invite_cdn_anti_whitelist_runtime(invite) {
+        if let Some(existing_cdn) = runtime_object
+            .get("cdnAntiWhitelist")
+            .and_then(Value::as_object)
+            .filter(|cdn| !cdn.is_empty())
+        {
+            let mut merged = cdn_runtime;
+            merge_json_object_deep(&mut merged, &Value::Object(existing_cdn.clone()));
+            runtime_object.insert("cdnAntiWhitelist".to_string(), merged);
+            return runtime;
+        }
         runtime_object.insert("cdnAntiWhitelist".to_string(), cdn_runtime);
     }
     runtime
@@ -2135,6 +2232,16 @@ fn build_invite_cdn_anti_whitelist_runtime(invite: &InviteProfileFile) -> Option
         "frontTag": front_tag,
         "frontSelection": YANDEX_EDGE_CDN_FRONT_SELECTION,
         "bootstrap": YANDEX_EDGE_CDN_BOOTSTRAP,
+        "routingPolicy": {
+            "dnsQueryStrategy": "use_ip",
+            "domainStrategy": "ip_if_non_match",
+            "domainMatcher": "hybrid",
+            "directDomainKeywords": YANDEX_EDGE_CDN_DIRECT_DOMAIN_KEYWORDS,
+            "directDomains": YANDEX_EDGE_CDN_DIRECT_DOMAINS,
+            "blockedDomainKeywords": [],
+            "blockedDomains": [],
+            "blockSelectedFrontHost": true
+        },
         "origin": {
             "host": origin_host,
             "port": 443,
@@ -7716,5 +7823,20 @@ mod tests {
             invite.android_runtime["cdnAntiWhitelist"]["tlsAllowInsecure"].as_bool(),
             Some(false)
         );
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["frontSelection"].as_str(),
+            Some("ordered")
+        );
+        let direct_domains = invite.android_runtime["cdnAntiWhitelist"]["routingPolicy"]["directDomains"]
+            .as_array()
+            .expect("directDomains should be present");
+        assert!(direct_domains
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|domain| domain == "yandex.ru"));
+        assert!(direct_domains
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|domain| domain == "ya.ru"));
     }
 }

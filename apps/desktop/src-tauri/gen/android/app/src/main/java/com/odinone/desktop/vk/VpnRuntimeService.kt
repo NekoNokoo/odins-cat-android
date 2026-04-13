@@ -39,6 +39,12 @@ import io.nekohasekai.libbox.StringIterator
 import io.nekohasekai.libbox.SystemProxyStatus
 import io.nekohasekai.libbox.TunOptions
 import io.nekohasekai.libbox.WIFIState
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.EOFException
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.net.Socket
 import java.net.NetworkInterface
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -227,7 +233,69 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
 
     override fun includeAllNetworks(): Boolean = false
 
-    override fun localDNSTransport(): LocalDNSTransport? = null
+    override fun localDNSTransport(): LocalDNSTransport? {
+        val prepared = activeRuntime ?: return null
+        if (prepared.runtimeFamily != "cdn-anti-whitelist") {
+            return null
+        }
+        val (proxyHost, proxyPort) = parseSocksAddress(prepared.socksAddress)
+        return object : LocalDNSTransport {
+            override fun exchange(
+                context: io.nekohasekai.libbox.ExchangeContext,
+                payload: ByteArray,
+            ) {
+                try {
+                    context.rawSuccess(queryDnsOverSocks(payload, proxyHost, proxyPort))
+                } catch (error: Exception) {
+                    appendDiagnostic("LocalDNSTransport exchange failed: ${error.message}")
+                    throw error
+                }
+            }
+
+            override fun lookup(
+                context: io.nekohasekai.libbox.ExchangeContext,
+                network: String,
+                domain: String,
+            ) {
+                val error = UnsupportedOperationException("lookup() is unsupported for raw LocalDNSTransport")
+                appendDiagnostic("LocalDNSTransport lookup fallback hit for $domain on $network.")
+                throw error
+            }
+
+            override fun raw(): Boolean = true
+        }
+    }
+
+    private fun parseSocksAddress(socksAddress: String): Pair<String, Int> {
+        val pieces = socksAddress.trim().split(':')
+        require(pieces.size == 2) { "Invalid SOCKS address: $socksAddress" }
+        val port = pieces[1].toIntOrNull() ?: error("Invalid SOCKS port: $socksAddress")
+        return pieces[0] to port
+    }
+
+    private fun queryDnsOverSocks(
+        payload: ByteArray,
+        proxyHost: String,
+        proxyPort: Int,
+    ): ByteArray =
+        Socket(Proxy(Proxy.Type.SOCKS, InetSocketAddress(proxyHost, proxyPort))).use { socket ->
+            socket.soTimeout = 10_000
+            socket.connect(InetSocketAddress("1.1.1.1", 53), 10_000)
+            DataOutputStream(socket.getOutputStream()).use { output ->
+                output.writeShort(payload.size)
+                output.write(payload)
+                output.flush()
+            }
+            DataInputStream(socket.getInputStream()).use { input ->
+                val responseSize = input.readUnsignedShort()
+                if (responseSize <= 0) {
+                    throw EOFException("DNS-over-TCP response was empty")
+                }
+                val response = ByteArray(responseSize)
+                input.readFully(response)
+                response
+            }
+        }
 
     override fun openTun(options: TunOptions): Int {
         if (prepare(this) != null) {
@@ -247,7 +315,12 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         addAddresses(builder, options.inet6Address)
 
         if (options.autoRoute) {
-            options.dnsServerAddress.value.takeIf { it.isNotBlank() }?.let { builder.addDnsServer(it) }
+            val advertisedDnsServers =
+                when (activeRuntime?.runtimeFamily) {
+                    "cdn-anti-whitelist" -> listOf(PUBLIC_VPN_DNS_PRIMARY, PUBLIC_VPN_DNS_SECONDARY)
+                    else -> options.dnsServerAddress.value.takeIf { it.isNotBlank() }?.let(::listOf).orEmpty()
+                }
+            advertisedDnsServers.forEach { builder.addDnsServer(it) }
             addRoutes(builder, options.inet4RouteAddress, "0.0.0.0", 0, options.inet4Address.hasNext())
             addRoutes(builder, options.inet6RouteAddress, "::", 0, options.inet6Address.hasNext())
             excludeOwnPackageFromVpn(builder)
@@ -680,7 +753,6 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             vkTunnelStartPending = false
             vkTunnelActivationInFlight = false
             vkStartupStartedAtMs = 0L
-
             appendDiagnostic("Stopping libbox service before tearing down Android tunnel resources. origin=$origin")
             runCatching { commandServer?.closeService() }
                 .onFailure { appendDiagnostic("commandServer.closeService failed during $origin: ${it.message}") }
@@ -1525,6 +1597,8 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
 
     companion object {
         private const val TAG = "VpnRuntimeService"
+        private const val PUBLIC_VPN_DNS_PRIMARY = "1.1.1.1"
+        private const val PUBLIC_VPN_DNS_SECONDARY = "1.0.0.1"
         const val ACTION_START = "com.odinone.desktop.vk.action.START_VPN_RUNTIME"
         const val ACTION_STOP = "com.odinone.desktop.vk.action.STOP_VPN_RUNTIME"
         const val EXTRA_START_ARGS = "start_args"

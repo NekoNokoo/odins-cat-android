@@ -1129,14 +1129,15 @@ func effectiveInviteAndroidRuntime(invite inviteProfile) map[string]any {
 	if runtime == nil {
 		runtime = map[string]any{}
 	}
-	if existing, ok := runtime["cdnAntiWhitelist"].(map[string]any); ok && len(existing) > 0 {
-		return runtime
-	}
 	cdn := buildInviteCdnAntiWhitelistRuntime(invite)
 	if cdn == nil {
 		if len(runtime) == 0 {
 			return nil
 		}
+		return runtime
+	}
+	if existing, ok := runtime["cdnAntiWhitelist"].(map[string]any); ok && len(existing) > 0 {
+		runtime["cdnAntiWhitelist"] = mergeInviteMaps(cdn, existing)
 		return runtime
 	}
 	runtime["cdnAntiWhitelist"] = cdn
@@ -1285,6 +1286,23 @@ func cloneInviteMap(source map[string]any) map[string]any {
 		}
 	}
 	return cloned
+}
+
+func mergeInviteMaps(defaults map[string]any, overrides map[string]any) map[string]any {
+	merged := cloneInviteMap(defaults)
+	if merged == nil {
+		merged = map[string]any{}
+	}
+	for key, value := range overrides {
+		if overrideMap, ok := value.(map[string]any); ok {
+			if defaultMap, ok := merged[key].(map[string]any); ok {
+				merged[key] = mergeInviteMaps(defaultMap, overrideMap)
+				continue
+			}
+		}
+		merged[key] = value
+	}
+	return merged
 }
 
 func remoteGuestProfilePath(guestID string) string {

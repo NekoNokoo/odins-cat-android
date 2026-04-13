@@ -1965,6 +1965,17 @@ object VpnRuntimeLibbox {
             .put(
                 JSONObject()
                     .put("type", "logical")
+                    .put("mode", "or")
+                    .put(
+                        "rules",
+                        JSONArray()
+                            .put(JSONObject().put("network", "udp").put("port", 53))
+                            .put(JSONObject().put("network", "tcp").put("port", 53)),
+                    ).put("action", "hijack-dns"),
+            )
+            .put(
+                JSONObject()
+                    .put("type", "logical")
                     .put("mode", "and")
                     .put(
                         "rules",
@@ -2730,10 +2741,15 @@ object VpnRuntimeLibbox {
                 .put(
                     JSONObject()
                         .put("tag", "resolver")
-                        .put("type", "udp")
+                        .put("type", "https")
                         .put("server", REALITY_DNS_DEFAULT_SERVER)
-                        .put("server_port", 53)
-                        .put("detour", detour),
+                        .put("server_port", 443)
+                        .put("path", REALITY_DNS_DEFAULT_DOH_PATH)
+                        .put("detour", detour)
+                        .put(
+                            "tls",
+                            JSONObject().put("server_name", REALITY_DNS_DEFAULT_SERVER_NAME),
+                        ),
                 )
         val rules = JSONArray()
         return JSONObject()
@@ -2784,19 +2800,7 @@ object VpnRuntimeLibbox {
     private fun buildCdnAntiWhitelistRouteRules(options: CdnAntiWhitelistRuntimeOptions): JSONArray =
         JSONArray()
             .put(JSONObject().put("action", "sniff"))
-            .put(JSONObject().put("protocol", "dns").put("action", "hijack-dns"))
             .put(
-                JSONObject()
-                    .put("type", "logical")
-                    .put("mode", "and")
-                    .put(
-                        "rules",
-                        JSONArray()
-                            .put(JSONObject().put("ip_cidr", JSONArray().put("$DEFAULT_TUN_DNS_ADDRESS/32")))
-                            .put(JSONObject().put("network", "tcp"))
-                            .put(JSONObject().put("port", 853)),
-                    ).put("action", "hijack-dns"),
-            ).put(
                 JSONObject()
                     .put("ip_is_private", true)
                     .put("outbound", "direct"),
