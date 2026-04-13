@@ -20,7 +20,7 @@
 ## Что перенести в публичный репозиторий
 
 - `README.md`
-- `docs/releases/v0.7.0.md`
+- `docs/releases/v0.8.0.md`
 - `docs/guides/yandex-vm-ssh-phone-bootstrap-guide.md`
 - `docs/guides/yandex-vm-ssh-phone-bootstrap-guide.pdf`
 
@@ -34,8 +34,8 @@
 - тесты
 - provisioning internals
 
-## Release assets для `0.7.0`
+## Release assets для `0.8.0`
 
-- `Odin-Cat-0.7.0.apk`
-- `Odin-Cat-0.7.0.aab`
+- `Odin-Cat-0.8.0.apk`
+- `Odin-Cat-0.8.0.aab`
 - `yandex-vm-ssh-phone-bootstrap-guide.pdf`
