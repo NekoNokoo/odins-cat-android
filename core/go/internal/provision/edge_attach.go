@@ -4,10 +4,20 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
 )
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
 
 const (
 	legacyWhitelistEdgeRoot        = "/opt/whitelist-edge"
@@ -21,6 +31,8 @@ type yandexEdgeRuntimeLayout struct {
 	haproxyPath  string
 	xrayPath     string
 	xrayConfig   string
+	xrayCert     string
+	xrayKey      string
 	serviceName  string
 	servicePath  string
 }
@@ -40,6 +52,8 @@ func buildYandexEdgeRuntimeLayout(publicPort int, routingMode EdgeRoutingMode) y
 			haproxyPath:  legacyWhitelistEdgeRoot + "/config/haproxy.cfg",
 			xrayPath:     legacyWhitelistEdgeRoot + "/bin/xray",
 			xrayConfig:   legacyWhitelistEdgeRoot + "/config/xray-edge-proxy.json",
+			xrayCert:     legacyWhitelistEdgeRoot + "/config/xhttp-edge.crt",
+			xrayKey:      legacyWhitelistEdgeRoot + "/config/xhttp-edge.key",
 			serviceName:  legacyWhitelistEdgeServiceName,
 			servicePath:  "/etc/systemd/system/" + legacyWhitelistEdgeServiceName,
 		}
@@ -53,6 +67,8 @@ func buildYandexEdgeRuntimeLayout(publicPort int, routingMode EdgeRoutingMode) y
 		haproxyPath:  rootDir + "/config/haproxy.cfg",
 		xrayPath:     rootDir + "/bin/xray",
 		xrayConfig:   rootDir + "/config/xray-edge-proxy.json",
+		xrayCert:     rootDir + "/config/xhttp-edge.crt",
+		xrayKey:      rootDir + "/config/xhttp-edge.key",
 		serviceName:  serviceName,
 		servicePath:  "/etc/systemd/system/" + serviceName,
 	}
@@ -85,11 +101,11 @@ func normalizedEdgePublicPort(edge *EdgeAttach) int {
 
 func normalizedEdgeRoutingMode(edge *EdgeAttach) EdgeRoutingMode {
 	if edge == nil {
-		return EdgeRoutingModeTCPForward
+		return EdgeRoutingModeXrayProxy
 	}
 	trimmed := strings.TrimSpace(string(edge.RoutingMode))
 	if trimmed == "" {
-		return EdgeRoutingModeTCPForward
+		return EdgeRoutingModeXrayProxy
 	}
 	return EdgeRoutingMode(trimmed)
 }
@@ -244,8 +260,7 @@ WantedBy=multi-user.target
 
 func renderYandexEdgeXrayProxyConfig(
 	publicPort int,
-	edgeUUID, edgePrivateKey, edgeShortID string,
-	edgeServerName string,
+	certPath, keyPath string,
 	originHost string,
 	originPort int,
 	originServerName, originPublicKey, originShortID, originUUID, originFlow string,
@@ -260,34 +275,33 @@ func renderYandexEdgeXrayProxyConfig(
 		},
 		"inbounds": []map[string]any{
 			{
-				"tag":      "edge-reality-in",
+				"tag":      "cdn-xhttp-in",
 				"listen":   "0.0.0.0",
 				"port":     publicPort,
 				"protocol": "vless",
 				"settings": map[string]any{
 					"clients": []map[string]any{
 						{
-							"id":   edgeUUID,
-							"flow": "xtls-rprx-vision",
+							"id": originUUID,
 						},
 					},
 					"decryption": "none",
 				},
 				"streamSettings": map[string]any{
-					"network":  "tcp",
-					"security": "reality",
-					"realitySettings": map[string]any{
-						"show":        false,
-						"dest":        realityDestination(),
-						"xver":        0,
-						"serverNames": []string{edgeServerName},
-						"privateKey":  edgePrivateKey,
-						"shortIds":    []string{edgeShortID},
+					"network":  inviteCdnYandexTransport,
+					"security": "tls",
+					"tlsSettings": map[string]any{
+						"alpn": []string{"h2", "http/1.1"},
+						"certificates": []map[string]any{
+							{
+								"certificateFile": certPath,
+								"keyFile":         keyPath,
+							},
+						},
 					},
-				},
-				"sniffing": map[string]any{
-					"enabled":      true,
-					"destOverride": []string{"http", "tls", "quic"},
+					"xhttpSettings": map[string]any{
+						"path": inviteCdnYandexFrontPath,
+					},
 				},
 			},
 		},
@@ -333,7 +347,7 @@ func renderYandexEdgeXrayProxyConfig(
 			"rules": []map[string]any{
 				{
 					"type":        "field",
-					"inboundTag":  []string{"edge-reality-in"},
+					"inboundTag":  []string{"cdn-xhttp-in"},
 					"outboundTag": "origin-reality-out",
 				},
 			},
@@ -344,6 +358,40 @@ func renderYandexEdgeXrayProxyConfig(
 		return "", err
 	}
 	return string(raw), nil
+}
+
+func renderYandexEdgeXrayProxyCertificateCommand(layout yandexEdgeRuntimeLayout, edgeHost string) string {
+	sanEntries := []string{"DNS:" + inviteCdnYandexCamouflageHost}
+	for _, host := range inviteCdnYandexCamouflageHostPool {
+		entry := "DNS:" + host
+		if !containsString(sanEntries, entry) {
+			sanEntries = append(sanEntries, entry)
+		}
+	}
+	trimmedEdgeHost := strings.TrimSpace(edgeHost)
+	if sslipHost := sslipHostForInvite(trimmedEdgeHost); strings.TrimSpace(sslipHost) != "" {
+		entry := "DNS:" + sslipHost
+		if !containsString(sanEntries, entry) {
+			sanEntries = append(sanEntries, entry)
+		}
+	}
+	if trimmedEdgeHost != "" {
+		if net.ParseIP(trimmedEdgeHost) != nil {
+			sanEntries = append(sanEntries, "IP:"+trimmedEdgeHost)
+		} else if !containsString(sanEntries, "DNS:"+trimmedEdgeHost) {
+			sanEntries = append(sanEntries, "DNS:"+trimmedEdgeHost)
+		}
+	}
+	return remoteRootShell(fmt.Sprintf(
+		"mkdir -p %s && if ! command -v openssl >/dev/null 2>&1; then if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y openssl; else echo 'openssl is required and apt-get was not found' >&2; exit 1; fi; fi && openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 3650 -keyout %s -out %s -subj %s -addext %s >/dev/null 2>&1 && chmod 0600 %s && chmod 0644 %s",
+		quoteShell(layout.configDir),
+		quoteShell(layout.xrayKey),
+		quoteShell(layout.xrayCert),
+		quoteShell("/CN="+inviteCdnYandexCamouflageHost),
+		quoteShell("subjectAltName="+strings.Join(sanEntries, ",")),
+		quoteShell(layout.xrayKey),
+		quoteShell(layout.xrayCert),
+	))
 }
 
 func renderYandexEdgeXrayProxySystemdUnit(binaryPath, configPath string) string {
@@ -367,6 +415,29 @@ func renderYandexEdgeManifest(edgeHost string, publicPort int, originHost string
 	raw, err := json.MarshalIndent(map[string]any{
 		"provider":    EdgeProviderYandex,
 		"routingMode": routingMode,
+		"bridgeMode": func() string {
+			if routingMode == EdgeRoutingModeXrayProxy {
+				return "cdn-xhttp-in -> origin-reality-out"
+			}
+			return "passthrough"
+		}(),
+		"chain": func() []string {
+			if routingMode == EdgeRoutingModeXrayProxy {
+				return []string{
+					"client",
+					fmt.Sprintf("yandex-edge:%s:%d", edgeHost, publicPort),
+					fmt.Sprintf("edge-xhttp:%s:%d%s", edgeHost, publicPort, inviteCdnYandexFrontPath),
+					fmt.Sprintf("origin-reality:%s:%d", originHost, originPort),
+					"internet",
+				}
+			}
+			return []string{
+				"client",
+				fmt.Sprintf("yandex-edge:%s:%d", edgeHost, publicPort),
+				fmt.Sprintf("origin:%s:%d", originHost, originPort),
+				"internet",
+			}
+		}(),
 		"edgeHost":    edgeHost,
 		"publicPort":  publicPort,
 		"serviceName": layout.serviceName,
@@ -376,6 +447,8 @@ func renderYandexEdgeManifest(edgeHost string, publicPort int, originHost string
 		"configPath":  layout.manifestPath,
 		"xrayPath":    layout.xrayPath,
 		"xrayConfig":  layout.xrayConfig,
+		"xrayCert":    layout.xrayCert,
+		"xrayKey":     layout.xrayKey,
 		"originHost":  originHost,
 		"originPort":  originPort,
 		"serverName":  serverName,

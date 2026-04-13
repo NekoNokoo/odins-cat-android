@@ -153,7 +153,7 @@ const initialEdgeDraft: EdgeDraft = {
   authMethod: "password",
   secret: "",
   publicPort: 443,
-  routingMode: "tcp-forward",
+  routingMode: "xray-proxy",
 };
 const diagnosticsPreviewMaxLines = 8;
 const diagnosticsPreviewMaxChars = 720;
@@ -345,6 +345,9 @@ const resolveProfileCdnAntiWhitelistRuntime = (
 };
 
 const importedProfileHasCdnAntiWhitelist = (profile: InviteProfile | null) =>
+  Boolean(resolveProfileCdnAntiWhitelistRuntime(profile));
+
+const ownerProfileHasCdnAntiWhitelist = (profile: OwnerAccessProfile | null) =>
   Boolean(resolveProfileCdnAntiWhitelistRuntime(profile));
 
 const importedProfilePrefersCdnYandexMode = (
@@ -658,14 +661,18 @@ const ownerProfileSupportsYandexEdgeMode = (
   serverDraft: ServerDraft,
 ) =>
   ownerProfileSupportsDraft(profile, serverDraft) &&
-  ownerProfileHasYandexEdge(profile);
+  (ownerProfileHasYandexEdge(profile) ||
+    ownerProfileHasCurrentYandexEdge(profile) ||
+    ownerProfileHasCdnAntiWhitelist(profile));
 
 const importedProfileSupportsYandexEdgeMode = (
   profile: InviteProfile | null,
   serverDraft: ServerDraft,
 ) =>
   importedProfileSupportsDraft(profile, serverDraft) &&
-  importedProfileHasYandexEdge(profile);
+  (importedProfileHasYandexEdge(profile) ||
+    importedProfileHasCurrentYandexEdge(profile) ||
+    importedProfileHasCdnAntiWhitelist(profile));
 
 const importedProfileMatchesHost = (
   profile: InviteProfile | null,
@@ -1310,12 +1317,13 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const protocolEntryById = new Map(
     currentProtocolPack.map((entry) => [entry.id, entry]),
   );
-  const resolvedYandexEdgeFallback =
-    resolveProfileEdgeFallback(importedProfile, "realityYandexEdge") ??
-    resolveProfileEdgeFallback(ownerProfile, "realityYandexEdge");
   const resolvedYandexEdgeProxyFallback =
     resolveProfileEdgeFallback(importedProfile, "realityYandexEdgeProxy") ??
     resolveProfileEdgeFallback(ownerProfile, "realityYandexEdgeProxy");
+  const resolvedYandexEdgeFallback =
+    resolvedYandexEdgeProxyFallback ??
+    resolveProfileEdgeFallback(importedProfile, "realityYandexEdge") ??
+    resolveProfileEdgeFallback(ownerProfile, "realityYandexEdge");
   const resolvedYandexEdgeRuntime =
     resolveProfileCdnAntiWhitelistRuntime(importedProfile) ??
     resolveProfileCdnAntiWhitelistRuntime(ownerProfile);
@@ -1330,6 +1338,12 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     : null;
   const importedProfileOffersYandexEdge =
     isAndroidClient && importedProfilePrefersYandexEdgeMode(importedProfile);
+  const ownerProfileOffersYandexEdge =
+    isAndroidClient &&
+    (ownerProfileHasCurrentYandexEdge(ownerProfile) ||
+      ownerProfileHasCdnAntiWhitelist(ownerProfile));
+  const localProfileOffersYandexEdge =
+    importedProfileOffersYandexEdge || ownerProfileOffersYandexEdge;
   const accessModeCards = [
     {
       mode: "vless-reality" as const,
@@ -1347,13 +1361,13 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       hint: yandexEdgeRuntimeHint ?? t("runtimeModeYandexEdgeHint"),
       status: protocolEntryById.has("vless-reality-yandex-edge-proxy")
         ? t("modeStatusOptional")
-        : importedProfileOffersYandexEdge
+        : localProfileOffersYandexEdge
           ? t("modeStatusReady")
           : t("modeStatusLocked"),
       available:
         isAndroidClient &&
         (protocolEntryById.has("vless-reality-yandex-edge-proxy") ||
-          importedProfileOffersYandexEdge),
+          localProfileOffersYandexEdge),
     },
     {
       mode: "vk-relay" as const,
@@ -1415,12 +1429,18 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const routeLensTunnel = formatNetworkEndpoint(mobileNetworkLens?.tunnel);
   const routeLensOriginDisplay = routeLensOrigin.ip || routeLensOrigin.host;
   const routeLensTunnelDisplay = routeLensTunnel.ip || routeLensTunnel.host;
+  const yandexTunnelRuntimeActive =
+    (selectedAccessMode === "yandex-edge" ||
+      selectedAccessMode === "yandex-edge-proxy") &&
+    runtimeTunnelActive;
   const activeYandexTunnelHost =
-    localTunnel?.frontConnectHost?.trim() ||
-    resolvedYandexEdgeRuntime?.connectHost ||
-    resolvedYandexEdgeProxyFallback?.connectHost ||
-    resolvedYandexEdgeFallback?.connectHost ||
-    yandexEdgeConnectHost;
+    yandexTunnelRuntimeActive
+      ? localTunnel?.frontConnectHost?.trim() ||
+        resolvedYandexEdgeRuntime?.connectHost ||
+        resolvedYandexEdgeProxyFallback?.connectHost ||
+        resolvedYandexEdgeFallback?.connectHost ||
+        yandexEdgeConnectHost
+      : "";
   const routeLensNetworkLabel =
     mobileNetworkLens?.networkType === "cellular"
       ? t("routeLensNetworkCellular")
@@ -1982,7 +2002,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       selectedAccessMode === "yandex-edge" &&
       !(
         protocolEntryById.has("vless-reality-yandex-edge-proxy") ||
-        importedProfileOffersYandexEdge
+        localProfileOffersYandexEdge
       )
     ) {
       setSelectedAccessMode("vless-reality");
@@ -1994,6 +2014,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     setSelectedAccessMode("vless-reality");
   }, [
     importedProfileOffersYandexEdge,
+    localProfileOffersYandexEdge,
     protocolEntryById,
     selectedAccessMode,
     selectedAccessModeCard.available,
@@ -2360,7 +2381,10 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         return { runtimeFamily: "reality-vps-lab", activationState: "active" };
       }
       if (ownerRuntimeLabRequest?.mode === "reality-yandex-edge-proxy") {
-        return { runtimeFamily: "reality-vps-lab", activationState: "active" };
+        return {
+          runtimeFamily: "cdn-anti-whitelist",
+          activationState: "active",
+        };
       }
       if (ownerRuntimeLabRequest?.mode === "reality-vps-scaffold") {
         return {
@@ -2675,6 +2699,26 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         baseDraft.host || resolvedDraftHost,
       ) &&
       importedProfileHasCdnAntiWhitelist(importedProfile);
+    const importedProfileSupportsCurrentYandexEdge =
+      !secret.trim() &&
+      importedProfileMatchesHost(
+        importedProfile,
+        baseDraft.host || resolvedDraftHost,
+      ) &&
+      importedProfileHasCurrentYandexEdge(importedProfile);
+    const ownerProfileUsesCdnYandexEdge =
+      !secret.trim() &&
+      hostsMatch(baseDraft.host || resolvedDraftHost, ownerProfile?.serverHost) &&
+      ownerProfileHasCdnAntiWhitelist(ownerProfile);
+    const ownerProfileSupportsCurrentYandexEdge =
+      !secret.trim() &&
+      hostsMatch(baseDraft.host || resolvedDraftHost, ownerProfile?.serverHost) &&
+      ownerProfileHasCurrentYandexEdge(ownerProfile);
+    const localProfileUsesCdnYandexEdge =
+      importedProfileUsesCdnYandexEdge ||
+      importedProfileSupportsCurrentYandexEdge ||
+      ownerProfileUsesCdnYandexEdge ||
+      ownerProfileSupportsCurrentYandexEdge;
     if (selectedAccessMode === "vless-reality") {
       if (importedProfileUsesCdnYandexEdge) {
         return {
@@ -2688,7 +2732,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       return buildTunnelStartRequest(baseDraft);
     }
     if (selectedAccessMode === "yandex-edge") {
-      if (importedProfileUsesCdnYandexEdge) {
+      if (localProfileUsesCdnYandexEdge) {
         return {
           ...buildTunnelStartRequest(baseDraft),
           runtimeIdentityOverride: {
@@ -2703,7 +2747,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       });
     }
     if (selectedAccessMode === "yandex-edge-proxy") {
-      if (importedProfileUsesCdnYandexEdge) {
+      if (localProfileUsesCdnYandexEdge) {
         return {
           ...buildTunnelStartRequest(baseDraft),
           runtimeIdentityOverride: {
@@ -3433,6 +3477,26 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           ownerRuntimeLabRequest,
           runtimeIdentityOverride,
         );
+        console.info("[vpn-enable] request", {
+          selectedAccessMode,
+          serverHost: serverDraft.host,
+          usingImportedProfile,
+          ownerRuntimeLabMode: ownerRuntimeLabRequest?.mode ?? "",
+          runtimeFamily: runtimeIdentity.runtimeFamily,
+          activationState: runtimeIdentity.activationState,
+          runtimeIdentityOverride:
+            runtimeIdentityOverride?.runtimeFamily ?? "",
+          hasLocalYandexEdgeAccessProfile,
+          localProfileOffersYandexEdge,
+          ownerProfileHasCdnAntiWhitelist:
+            ownerProfileHasCdnAntiWhitelist(ownerProfile),
+          importedProfileHasCdnAntiWhitelist:
+            importedProfileHasCdnAntiWhitelist(importedProfile),
+          ownerProfileHasCurrentYandexEdge:
+            ownerProfileHasCurrentYandexEdge(ownerProfile),
+          importedProfileHasCurrentYandexEdge:
+            importedProfileHasCurrentYandexEdge(importedProfile),
+        });
         let tunnelData = localTunnel;
         if (
           isAndroidClient &&

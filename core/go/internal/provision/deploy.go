@@ -500,23 +500,6 @@ func executeEdgeAttach(id string, req Request) error {
 			return err
 		}
 	}
-	var edgeReality x25519KeyPair
-	var edgeShortID string
-	var edgeUUID string
-	if routingMode == EdgeRoutingModeXrayProxy {
-		edgeReality, err = generateX25519KeyPair()
-		if err != nil {
-			return err
-		}
-		edgeShortID, err = generateRealityShortID()
-		if err != nil {
-			return err
-		}
-		edgeUUID, err = generateProtocolUUID()
-		if err != nil {
-			return err
-		}
-	}
 	manifestText, err := renderYandexEdgeManifest(
 		req.Edge.Server.Host,
 		publicPort,
@@ -542,12 +525,13 @@ func executeEdgeAttach(id string, req Request) error {
 			return err
 		}
 	} else if routingMode == EdgeRoutingModeXrayProxy {
+		if _, err := runRemote(edgeClient, renderYandexEdgeXrayProxyCertificateCommand(layout, req.Edge.Server.Host)); err != nil {
+			return err
+		}
 		xrayConfig, err := renderYandexEdgeXrayProxyConfig(
 			publicPort,
-			edgeUUID,
-			edgeReality.Private,
-			edgeShortID,
-			reality.ServerName,
+			layout.xrayCert,
+			layout.xrayKey,
 			req.Server.Host,
 			reality.Port,
 			reality.ServerName,
@@ -621,19 +605,7 @@ func executeEdgeAttach(id string, req Request) error {
 		req.Server.Host,
 		reality,
 		routingMode,
-		func() *realityFallback {
-			if routingMode != EdgeRoutingModeXrayProxy {
-				return nil
-			}
-			return &realityFallback{
-				Port:       publicPort,
-				ServerName: reality.ServerName,
-				PublicKey:  edgeReality.Public,
-				ShortID:    edgeShortID,
-				UUID:       edgeUUID,
-				Flow:       "xtls-rprx-vision",
-			}
-		}(),
+		nil,
 	)
 	if err != nil {
 		return err
@@ -711,7 +683,10 @@ func patchOwnerProfileWithYandexEdge(rawJSON string, edgeHost string, publicPort
 		fallback["source"] = buildYandexEdgeFallbackSource(publicPort, routingMode) + ":proxy"
 		fallback["tag"] = buildYandexEdgeFallbackTag(edgeHost, publicPort, routingMode) + "-proxy"
 		fallback["ownerRealityEgress"] = false
-		if edgeClientReality != nil {
+		if routingMode == EdgeRoutingModeXrayProxy {
+			fallback["transport"] = inviteCdnYandexTransport
+			fallback["description"] = fmt.Sprintf("Edge-terminated Yandex edge bridge mode. The client first connects to the dedicated edge xhttp inbound on %s:%d, then the Yandex VM forwards traffic to the stable REALITY origin %s:%d.", strings.TrimSpace(edgeHost), publicPort, strings.TrimSpace(originHost), reality.Port)
+		} else if edgeClientReality != nil {
 			fallback["connectPort"] = edgeClientReality.Port
 			fallback["serverName"] = edgeClientReality.ServerName
 			fallback["publicKey"] = edgeClientReality.PublicKey
@@ -818,6 +793,12 @@ func runEdgeAttachHealthChecks(client *ssh.Client, layout yandexEdgeRuntimeLayou
 			label:         "Edge xray config",
 			cmd:           remoteRootShell(fmt.Sprintf("%s run -test -config %s", quoteShell(layout.xrayPath), quoteShell(layout.xrayConfig))),
 			successDetail: fmt.Sprintf("Xray config passes syntax validation at %s.", layout.xrayConfig),
+		})
+		checks = append(checks, remoteCheck{
+			key:           "edge-xray-cert",
+			label:         "Edge xray certificate",
+			cmd:           remoteRootShell(fmt.Sprintf("test -s %s && test -s %s", quoteShell(layout.xrayCert), quoteShell(layout.xrayKey))),
+			successDetail: fmt.Sprintf("Xray bridge certificate and key are present at %s and %s.", layout.xrayCert, layout.xrayKey),
 		})
 	default:
 		checks = append(checks, remoteCheck{

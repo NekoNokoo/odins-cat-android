@@ -371,6 +371,20 @@ private data class CdnAntiWhitelistRuntimeOptions(
     val routingPolicy: CdnRoutingPolicyOptions,
     val activationState: String,
 ) {
+    fun selectedFrontLabel(): String =
+        buildString {
+            append(tlsServerName)
+            frontTag?.takeIf { it.isNotBlank() }?.let {
+                append(" [")
+                append(it)
+                append("]")
+            }
+            if (!frontHost.equals(connectHost, ignoreCase = true)) {
+                append(" via ")
+                append(frontHost)
+            }
+        }
+
     fun featureLabels(): List<String> =
         buildList {
             add("family:$RUNTIME_FAMILY_CDN_ANTI_WHITELIST")
@@ -397,6 +411,7 @@ private data class CdnAntiWhitelistRuntimeOptions(
             }
             add("cdn-http-host:$httpHostHeader")
             frontTag?.takeIf { it.isNotBlank() }?.let { add("cdn-front-tag:$it") }
+            add("cdn-front-selected:${selectedFrontLabel()}")
             add("cdn-front-selection:$frontSelection")
             add("cdn-front-pool:$frontPoolSize")
             add("cdn-origin:$originHost")
@@ -1755,6 +1770,8 @@ object VpnRuntimeLibbox {
                 frontPath = options.frontPath,
                 frontProvider = options.provider,
                 frontTag = options.frontTag,
+                selectedSniHint = options.tlsServerName,
+                whitelistHintTag = options.frontTag,
                 cdnRoutingDnsQueryStrategy = options.routingPolicy.dnsQueryStrategy,
                 cdnRoutingDomainStrategy = options.routingPolicy.domainStrategy,
                 cdnRoutingDomainMatcher = options.routingPolicy.domainMatcher,
@@ -1810,6 +1827,8 @@ object VpnRuntimeLibbox {
             frontPath = options.frontPath,
             frontProvider = options.provider,
             frontTag = options.frontTag,
+            selectedSniHint = options.tlsServerName,
+            whitelistHintTag = options.frontTag,
             cdnRoutingDnsQueryStrategy = options.routingPolicy.dnsQueryStrategy,
             cdnRoutingDomainStrategy = options.routingPolicy.domainStrategy,
             cdnRoutingDomainMatcher = options.routingPolicy.domainMatcher,
@@ -2124,7 +2143,14 @@ object VpnRuntimeLibbox {
                         it == RUNTIME_FAMILY_REALITY_WHITELIST_ASSISTED ||
                         it == RUNTIME_FAMILY_VK_RELAY
                 }
-        val runtimeFamily = requestedRuntimeFamily ?: inferredRuntimeFamily
+        var runtimeFamily = requestedRuntimeFamily ?: inferredRuntimeFamily
+        if (
+            runtimeFamily == RUNTIME_FAMILY_REALITY_VPS_LAB &&
+            isCdnAntiWhitelistEnabled(profile) &&
+            !isRealityVpsLabEnabled(profile)
+        ) {
+            runtimeFamily = RUNTIME_FAMILY_CDN_ANTI_WHITELIST
+        }
         normalized.put("runtimeFamily", runtimeFamily)
         if (runtimeFamily == RUNTIME_FAMILY_CDN_ANTI_WHITELIST) {
             clearRealityDerivedArgs(normalized)
@@ -2212,6 +2238,17 @@ object VpnRuntimeLibbox {
             val baseArgs = JSObject(normalized.toString()).apply { remove("configMode") }
             val baseOptions = readRealityRuntimeOptions(baseArgs, profile)
             val vpsOptions = readRealityVpsLabRuntimeOptions(normalized, profile, readRealitySettings(profile, normalized.getString("serverHost", "")?.trim().orEmpty()))
+            val vpsSource = vpsOptions.source.orEmpty()
+            val vpsTag = vpsOptions.tag.orEmpty()
+            val yandexProxyBridgeSource =
+                vpsSource.contains("yandex-edge", ignoreCase = true) &&
+                    (vpsSource.contains("xray-proxy", ignoreCase = true) ||
+                        vpsTag.contains("xray-proxy", ignoreCase = true))
+            if (yandexProxyBridgeSource && isCdnAntiWhitelistEnabled(profile)) {
+                normalized.put("runtimeFamily", RUNTIME_FAMILY_CDN_ANTI_WHITELIST)
+                normalized.remove("configMode")
+                return normalizeRuntimeArgs(normalized)
+            }
             normalized.put("activationState", vpsOptions.activationState)
             normalized.put("configMode", vpsOptions.mode)
             normalized.put("dnsMode", baseOptions.dnsMode)
@@ -4212,7 +4249,7 @@ object VpnRuntimeLibbox {
                     )
                 }
             }
-        val selectedFront = selectCdnFrontCandidate(frontPool, frontSelection)
+        val selectedFront = selectCdnFrontCandidate(frontPool, frontSelection, explicitFrontTag)
         val safeXmuxMaxConcurrency =
             resolveSafeCdnXmuxMaxConcurrency(
                 transport,
@@ -4443,11 +4480,25 @@ object VpnRuntimeLibbox {
     private fun selectCdnFrontCandidate(
         frontPool: List<CdnFrontCandidate>,
         selection: String,
-    ): CdnFrontCandidate =
-        when (selection) {
+        preferredTag: String? = null,
+    ): CdnFrontCandidate {
+        val preferred =
+            preferredTag
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { requested ->
+                    frontPool.firstOrNull { candidate ->
+                        candidate.tag?.trim()?.equals(requested, ignoreCase = true) == true
+                    }
+                }
+        if (preferred != null) {
+            return preferred
+        }
+        return when (selection) {
             CDN_FRONT_SELECTION_ORDERED -> frontPool.first()
             else -> frontPool.first()
         }
+    }
 
     private fun normalizeCdnFrontSelection(raw: String?): String =
         when (raw?.trim()?.lowercase(Locale.ROOT)) {
@@ -4457,6 +4508,54 @@ object VpnRuntimeLibbox {
 
     private fun normalizeCdnFrontTag(raw: String?): String? =
         raw?.trim()?.takeIf { it.isNotEmpty() }
+
+    fun advanceCdnFrontOverrideForRetry(args: JSObject): JSObject {
+        val normalized = normalizeRuntimeArgs(args)
+        if (normalized.getString("runtimeFamily", null)?.trim() != RUNTIME_FAMILY_CDN_ANTI_WHITELIST) {
+            return normalized
+        }
+        val rawProfile = normalized.getString("profileJson", "{}") ?: "{}"
+        val profile = runCatching { JSObject(rawProfile) }.getOrElse { return normalized }
+        val options =
+            readCdnAntiWhitelistRuntimeOptions(
+                normalized,
+                profile,
+                normalized.getString("serverHost", "")?.trim().orEmpty(),
+            )
+        if (options.frontPool.size <= 1) {
+            return normalized
+        }
+        val currentIndex =
+            options.frontPool.indexOfFirst { candidate ->
+                when {
+                    !options.frontTag.isNullOrBlank() && !candidate.tag.isNullOrBlank() ->
+                        candidate.tag.equals(options.frontTag, ignoreCase = true)
+                    else ->
+                        candidate.host.equals(options.frontHost, ignoreCase = true) &&
+                            candidate.port == options.frontPort &&
+                            candidate.tlsServerName.equals(options.tlsServerName, ignoreCase = true)
+                }
+            }
+        val nextIndex = if (currentIndex >= 0) (currentIndex + 1) % options.frontPool.size else 1 % options.frontPool.size
+        val nextFront = options.frontPool[nextIndex]
+        return JSObject(normalized.toString()).apply {
+            put("frontTag", nextFront.tag)
+            put("cdnFrontTag", nextFront.tag)
+            put("frontHost", nextFront.host)
+            put("cdnFrontHost", nextFront.host)
+            put("frontConnectHost", nextFront.connectHost)
+            put("cdnConnectHost", nextFront.connectHost)
+            put("frontConnectPort", nextFront.connectPort)
+            put("cdnConnectPort", nextFront.connectPort)
+            put("frontPath", nextFront.path)
+            put("cdnFrontPath", nextFront.path)
+            put("frontProvider", nextFront.provider)
+            put("cdnProvider", nextFront.provider)
+            put("cdnTlsServerName", nextFront.tlsServerName)
+            put("cdnTlsAllowInsecure", nextFront.tlsAllowInsecure)
+            put("cdnHttpHostHeader", nextFront.httpHostHeader)
+        }
+    }
 
     private fun normalizeRealityWhitelistMode(value: String?): String =
         when (value?.trim()?.lowercase(Locale.ROOT)) {

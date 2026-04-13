@@ -180,12 +180,12 @@ const dictionaries = {
     deployStepEdge: "Шаг 2",
     deployStepEdgeTitle: "Yandex edge attach",
     deployStepEdgeText:
-      "Опциональный additive шаг. Поднимает двуххоповый whitelist-facing вход через Yandex edge для текущего режима YANDEX EDGE без ротации stable REALITY path.",
+      "Опциональный additive шаг. Поднимает двуххоповый whitelist-facing вход через Yandex edge и по умолчанию собирает полноценный bridge path до stable REALITY origin.",
     edgeHost: "Edge host",
     edgePublicPort: "Публичный edge port",
     edgeRoutingMode: "Режим edge",
     edgeRoutingModeHelp:
-      "Для текущего YANDEX EDGE рекомендуем SNI router. Он поднимает новый двуххоповый edge path без ломания stable direct route.",
+      "Для текущего YANDEX EDGE рекомендуем Xray proxy. Он поднимает полноценный двуххоповый bridge path без ломания stable direct route.",
     edgeRoutingTcpForward: "TCP forward",
     edgeRoutingSniRouter: "SNI router",
     edgeRoutingXrayProxy: "Xray proxy",
@@ -696,12 +696,12 @@ const dictionaries = {
     deployStepEdge: "Step 2",
     deployStepEdgeTitle: "Yandex edge attach",
     deployStepEdgeText:
-      "Optional additive step. It raises the newer two-hop whitelist-facing Yandex edge entry for the current YANDEX EDGE mode without rotating the stable REALITY path.",
+      "Optional additive step. It raises the whitelist-facing Yandex edge entry and now defaults to a full bridge path into the stable REALITY origin.",
     edgeHost: "Edge host",
     edgePublicPort: "Public edge port",
     edgeRoutingMode: "Edge mode",
     edgeRoutingModeHelp:
-      "Use SNI router for the current YANDEX EDGE mode. It brings up the newer two-hop edge path without breaking the stable direct route.",
+      "Use Xray proxy for the current YANDEX EDGE mode. It brings up the full two-hop bridge path without breaking the stable direct route.",
     edgeRoutingTcpForward: "TCP forward",
     edgeRoutingSniRouter: "SNI router",
     edgeRoutingXrayProxy: "Xray proxy",

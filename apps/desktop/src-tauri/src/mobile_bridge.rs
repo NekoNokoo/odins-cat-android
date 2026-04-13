@@ -69,6 +69,7 @@ const EDGE_PROVIDER_YANDEX: &str = "yandex-edge";
 const EDGE_ROUTING_MODE_TCP_FORWARD: &str = "tcp-forward";
 const EDGE_ROUTING_MODE_SNI_ROUTER: &str = "sni-router";
 const EDGE_ROUTING_MODE_XRAY_PROXY: &str = "xray-proxy";
+const EDGE_ROUTING_MODE_DEFAULT: &str = EDGE_ROUTING_MODE_XRAY_PROXY;
 const OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_SCAFFOLD: &str = "reality-whitelist-scaffold";
 const OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_LAB: &str = "reality-whitelist-lab";
 const OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD: &str = "reality-vps-scaffold";
@@ -97,6 +98,12 @@ const YANDEX_EDGE_CDN_TRANSPORT: &str = "xhttp";
 const YANDEX_EDGE_CDN_BOOTSTRAP: &str = "direct-reality";
 const YANDEX_EDGE_CDN_FRONT_SELECTION: &str = "ordered";
 const YANDEX_EDGE_CDN_CAMOUFLAGE_HOST: &str = "ya.ru";
+const YANDEX_EDGE_CDN_CAMOUFLAGE_HOST_POOL: &[&str] = &[
+    "ya.ru",
+    "tunnel.vk-apps.com",
+    "5post-gate.x5.ru",
+    "ads.x5.ru",
+];
 const YANDEX_EDGE_CDN_XHTTP_MODE: &str = "packet-up";
 const YANDEX_EDGE_CDN_XMUX_MAX_CONCURRENCY: u64 = 20;
 const YANDEX_EDGE_CDN_XMUX_HMAX_REQUEST_TIMES: u64 = 900;
@@ -334,6 +341,8 @@ struct YandexEdgeRuntimeLayout {
     haproxy_path: String,
     xray_path: String,
     xray_config: String,
+    xray_cert: String,
+    xray_key: String,
     service_name: String,
     service_path: String,
 }
@@ -1333,6 +1342,19 @@ pub async fn mobile_start_local_tunnel(
     app: AppHandle,
     payload: LocalTunnelStartPayload,
 ) -> Result<Value, String> {
+    eprintln!(
+        "[mobile-tunnel] start host={} transport={} protocol={} payload_runtime_family={} payload_activation_state={} owner_runtime_lab_mode={}",
+        payload.server.host.trim(),
+        requested_transport(&payload.server),
+        requested_protocol(&payload.server),
+        payload.runtime_family.trim(),
+        payload.activation_state.trim(),
+        payload
+            .owner_runtime_lab
+            .as_ref()
+            .map(|value| value.mode.trim())
+            .unwrap_or("")
+    );
     let runtime_request = match resolve_android_runtime_request(&app, &payload) {
         Ok(request) => request,
         Err(error) => {
@@ -1345,6 +1367,30 @@ pub async fn mobile_start_local_tunnel(
             ));
         }
     };
+    eprintln!(
+        "[mobile-tunnel] resolved host={} request_runtime_family={} request_activation_state={} profile_source={} front_tag={} cdn_front_tag={}",
+        payload.server.host.trim(),
+        runtime_request
+            .get("runtimeFamily")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        runtime_request
+            .get("activationState")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        runtime_request
+            .get("profileSource")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        runtime_request
+            .get("frontTag")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        runtime_request
+            .get("cdnFrontTag")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    );
 
     match android_vpn::start_tunnel(&app, runtime_request).await {
         Ok(state) => Ok(state),
@@ -1732,7 +1778,7 @@ fn bundled_whitelist_source() -> Result<ParsedWhitelistFiles, String> {
 
 async fn fetch_remote_whitelist_files() -> Result<(String, String, String), String> {
     let client = reqwest::Client::builder()
-        .user_agent("odin-one-mobile-bridge/0.7.0")
+        .user_agent("odin-one-mobile-bridge/0.8.0")
         .build()
         .map_err(|err| format!("build whitelist HTTP client: {err}"))?;
 
@@ -2006,6 +2052,33 @@ fn sync_invite_android_runtime(invite: &mut InviteProfileFile) {
     invite.android_runtime = invite_effective_android_runtime(invite);
 }
 
+fn owner_effective_android_runtime(profile: &OwnerProfileFile) -> Value {
+    let invite = InviteProfileFile {
+        server_host: profile.server_host.clone(),
+        android_runtime: profile.android_runtime.clone(),
+        staged_fallbacks: profile.staged_fallbacks.clone(),
+        ..Default::default()
+    };
+    invite_effective_android_runtime(&invite)
+}
+
+fn sync_owner_android_runtime(profile: &mut OwnerProfileFile) {
+    profile.android_runtime = owner_effective_android_runtime(profile);
+}
+
+fn sync_owner_android_runtime_in_value(profile: &mut Value) -> Result<(), String> {
+    let mut owner: OwnerProfileFile = serde_json::from_value(profile.clone())
+        .map_err(|err| format!("parse owner profile json: {err}"))?;
+    sync_owner_android_runtime(&mut owner);
+    let profile_object = ensure_object_value(profile, "owner profile")?;
+    profile_object.insert("androidRuntime".to_string(), owner.android_runtime);
+    Ok(())
+}
+
+fn yandex_edge_cover_domain_pool() -> Vec<&'static str> {
+    YANDEX_EDGE_CDN_CAMOUFLAGE_HOST_POOL.to_vec()
+}
+
 fn build_invite_cdn_anti_whitelist_runtime(invite: &InviteProfileFile) -> Option<Value> {
     let connect_host = invite_yandex_connect_host(invite)?;
     let front_host = sslip_host_for_invite(&connect_host);
@@ -2013,6 +2086,31 @@ fn build_invite_cdn_anti_whitelist_runtime(invite: &InviteProfileFile) -> Option
     let front_tag = format!("yandex-edge-xhttp-{YANDEX_EDGE_CONNECT_PORT}");
     let tls_server_name = YANDEX_EDGE_CDN_CAMOUFLAGE_HOST;
     let http_host_header = YANDEX_EDGE_CDN_CAMOUFLAGE_HOST;
+    let camouflage_host_pool = yandex_edge_cover_domain_pool();
+    let front_pool: Vec<Value> = camouflage_host_pool
+        .iter()
+        .enumerate()
+        .map(|(index, host)| {
+            let tag = if index == 0 {
+                front_tag.clone()
+            } else {
+                format!("{front_tag}-{}", host.replace('.', "-"))
+            };
+            json!({
+                "host": front_host,
+                "port": YANDEX_EDGE_CONNECT_PORT,
+                "connectHost": connect_host,
+                "connectPort": YANDEX_EDGE_CONNECT_PORT,
+                "path": YANDEX_EDGE_FRONT_PATH,
+                "tlsServerName": host,
+                "hostHeader": host,
+                "tlsAllowInsecure": true,
+                "camouflageHostPool": yandex_edge_cover_domain_pool(),
+                "provider": YANDEX_EDGE_CDN_PROVIDER,
+                "tag": tag
+            })
+        })
+        .collect();
     Some(json!({
         "enabled": true,
         "mode": YANDEX_EDGE_CDN_MODE,
@@ -2028,6 +2126,7 @@ fn build_invite_cdn_anti_whitelist_runtime(invite: &InviteProfileFile) -> Option
         "hostHeader": http_host_header,
         "tlsAllowInsecure": true,
         "camouflageHost": YANDEX_EDGE_CDN_CAMOUFLAGE_HOST,
+        "camouflageHostPool": camouflage_host_pool,
         "xhttpMode": YANDEX_EDGE_CDN_XHTTP_MODE,
         "tlsAlpn": ["h2", "http/1.1"],
         "xmuxMaxConcurrency": YANDEX_EDGE_CDN_XMUX_MAX_CONCURRENCY,
@@ -2042,20 +2141,7 @@ fn build_invite_cdn_anti_whitelist_runtime(invite: &InviteProfileFile) -> Option
             "scheme": "https",
             "path": YANDEX_EDGE_ORIGIN_PATH
         },
-        "frontPool": [
-            {
-                "host": front_host,
-                "port": YANDEX_EDGE_CONNECT_PORT,
-                "connectHost": connect_host,
-                "connectPort": YANDEX_EDGE_CONNECT_PORT,
-                "path": YANDEX_EDGE_FRONT_PATH,
-                "tlsServerName": tls_server_name,
-                "hostHeader": http_host_header,
-                "tlsAllowInsecure": true,
-                "provider": YANDEX_EDGE_CDN_PROVIDER,
-                "tag": front_tag
-            }
-        ]
+        "frontPool": front_pool
     }))
 }
 
@@ -3405,10 +3491,8 @@ fn render_yandex_edge_sni_router_systemd_unit(config_path: &str) -> String {
 
 fn render_yandex_edge_xray_proxy_config(
     public_port: u16,
-    edge_uuid: &str,
-    edge_private_key: &str,
-    edge_short_id: &str,
-    edge_server_name: &str,
+    cert_path: &str,
+    key_path: &str,
     origin_host: &str,
     origin_port: u16,
     origin_server_name: &str,
@@ -3425,32 +3509,29 @@ fn render_yandex_edge_xray_proxy_config(
     serde_json::to_string_pretty(&json!({
         "log": { "loglevel": "warning" },
         "inbounds": [{
-            "tag": "edge-reality-in",
+            "tag": "cdn-xhttp-in",
             "listen": "0.0.0.0",
             "port": public_port,
             "protocol": "vless",
             "settings": {
                 "clients": [{
-                    "id": edge_uuid,
-                    "flow": YANDEX_EDGE_FLOW
+                    "id": origin_uuid
                 }],
                 "decryption": "none"
             },
             "streamSettings": {
-                "network": "tcp",
-                "security": "reality",
-                "realitySettings": {
-                    "show": false,
-                    "dest": reality_destination(),
-                    "xver": 0,
-                    "serverNames": [edge_server_name],
-                    "privateKey": edge_private_key,
-                    "shortIds": [edge_short_id]
+                "network": YANDEX_EDGE_CDN_TRANSPORT,
+                "security": "tls",
+                "tlsSettings": {
+                    "alpn": ["h2", "http/1.1"],
+                    "certificates": [{
+                        "certificateFile": cert_path,
+                        "keyFile": key_path
+                    }]
+                },
+                "xhttpSettings": {
+                    "path": YANDEX_EDGE_FRONT_PATH
                 }
-            },
-            "sniffing": {
-                "enabled": true,
-                "destOverride": ["http", "tls", "quic"]
             }
         }],
         "outbounds": [{
@@ -3487,7 +3568,7 @@ fn render_yandex_edge_xray_proxy_config(
         "routing": {
             "rules": [{
                 "type": "field",
-                "inboundTag": ["edge-reality-in"],
+                "inboundTag": ["cdn-xhttp-in"],
                 "outboundTag": "origin-reality-out"
             }]
         }
@@ -3511,7 +3592,7 @@ fn build_yandex_edge_runtime_layout(
         public_port
     };
     let effective_mode = if routing_mode.trim().is_empty() {
-        EDGE_ROUTING_MODE_TCP_FORWARD
+        EDGE_ROUTING_MODE_DEFAULT
     } else {
         routing_mode.trim()
     };
@@ -3524,6 +3605,8 @@ fn build_yandex_edge_runtime_layout(
             haproxy_path: format!("{LEGACY_WHITELIST_EDGE_ROOT}/config/haproxy.cfg"),
             xray_path: format!("{LEGACY_WHITELIST_EDGE_ROOT}/bin/xray"),
             xray_config: format!("{LEGACY_WHITELIST_EDGE_ROOT}/config/xray-edge-proxy.json"),
+            xray_cert: format!("{LEGACY_WHITELIST_EDGE_ROOT}/config/xhttp-edge.crt"),
+            xray_key: format!("{LEGACY_WHITELIST_EDGE_ROOT}/config/xhttp-edge.key"),
             service_name: LEGACY_WHITELIST_YANDEX_EDGE_SERVICE_NAME.to_string(),
             service_path: format!(
                 "/etc/systemd/system/{LEGACY_WHITELIST_YANDEX_EDGE_SERVICE_NAME}"
@@ -3538,6 +3621,8 @@ fn build_yandex_edge_runtime_layout(
         haproxy_path: format!("{root_dir}/config/haproxy.cfg"),
         xray_path: format!("{root_dir}/bin/xray"),
         xray_config: format!("{root_dir}/config/xray-edge-proxy.json"),
+        xray_cert: format!("{root_dir}/config/xhttp-edge.crt"),
+        xray_key: format!("{root_dir}/config/xhttp-edge.key"),
         service_path: format!("/etc/systemd/system/{service_name}"),
         service_name,
         root_dir,
@@ -3574,6 +3659,22 @@ fn render_yandex_edge_manifest(
     serde_json::to_string_pretty(&json!({
         "provider": EDGE_PROVIDER_YANDEX,
         "routingMode": routing_mode,
+        "bridgeMode": if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY { "cdn-xhttp-in -> origin-reality-out" } else { "passthrough" },
+        "chain": [
+            "client",
+            format!("yandex-edge:{}:{}", edge_host, public_port),
+            if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
+                format!("edge-xhttp:{}:{}{}", edge_host, public_port, YANDEX_EDGE_FRONT_PATH)
+            } else {
+                format!("origin:{}:{}", origin_host, reality.port)
+            },
+            if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
+                format!("origin-reality:{}:{}", origin_host, reality.port)
+            } else {
+                "internet".to_string()
+            },
+            "internet".to_string(),
+        ],
         "edgeHost": edge_host,
         "publicPort": public_port,
         "serviceName": layout.service_name,
@@ -3594,10 +3695,41 @@ fn render_yandex_edge_manifest(
             "serverName": reality.server_name,
             "originHost": origin_host,
             "originPort": reality.port,
+            "routingMode": routing_mode,
         }],
         "generatedAt": now_rfc3339(),
     }))
     .map_err(|err| format!("marshal yandex edge manifest: {err}"))
+}
+
+fn yandex_edge_entry_description(routing_mode: &str) -> String {
+    if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
+        "Visible Yandex edge mode for Android. The client enters through a dedicated Yandex xhttp surface and the edge re-encapsulates traffic into a fresh REALITY hop to the stable origin.".to_string()
+    } else {
+        "Visible Yandex edge mode for Android. The client reaches the current REALITY origin through a dedicated Yandex edge surface.".to_string()
+    }
+}
+
+fn yandex_edge_proxy_description(routing_mode: &str) -> String {
+    if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
+        "Yandex edge bridge mode for Android. The client terminates on the dedicated Yandex xhttp inbound and the edge opens a separate REALITY outbound to the stable origin.".to_string()
+    } else {
+        "Yandex edge proxy mode for Android. The client enters through the dedicated Yandex edge surface and reaches the stable REALITY origin through it.".to_string()
+    }
+}
+
+fn yandex_edge_protocol_note(routing_mode: &str, proxy_mode: bool) -> String {
+    if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
+        if proxy_mode {
+            "Two-hop Yandex edge bridge path for restrictive networks. The client enters through the Yandex xhttp edge and the edge opens a fresh REALITY hop to the stable origin.".to_string()
+        } else {
+            "Visible whitelist-facing Yandex edge entry. In bridge mode the Yandex host terminates the client xhttp hop and re-encapsulates traffic into a fresh REALITY hop to the stable origin.".to_string()
+        }
+    } else if proxy_mode {
+        "Two-hop Yandex edge proxy path for restrictive networks. The client enters through the Yandex edge and keeps egress on the stable REALITY origin.".to_string()
+    } else {
+        "Visible whitelist-facing edge entry that forwards the live REALITY origin through a dedicated Yandex host.".to_string()
+    }
 }
 
 fn patch_owner_profile_with_yandex_edge(
@@ -3607,7 +3739,6 @@ fn patch_owner_profile_with_yandex_edge(
     origin_host: &str,
     reality: &RealityFallback,
     routing_mode: &str,
-    edge_client_reality: Option<&RealityFallback>,
 ) -> Result<(String, Value, Vec<ProtocolPackEntry>), String> {
     let mut profile: OwnerProfileFile =
         serde_json::from_str(raw_json).map_err(|err| format!("parse owner profile: {err}"))?;
@@ -3655,34 +3786,22 @@ fn patch_owner_profile_with_yandex_edge(
             )),
         );
         fallback.insert("ownerRealityEgress".to_string(), Value::Bool(false));
-        if let Some(edge_reality) = edge_client_reality {
-            fallback.insert("connectPort".to_string(), json!(edge_reality.port));
-            fallback.insert(
-                "serverName".to_string(),
-                Value::String(edge_reality.server_name.clone()),
-            );
-            fallback.insert(
-                "publicKey".to_string(),
-                Value::String(edge_reality.public_key.clone()),
-            );
-            fallback.insert(
-                "shortId".to_string(),
-                Value::String(edge_reality.short_id.clone()),
-            );
-            fallback.insert("uuid".to_string(), Value::String(edge_reality.uuid.clone()));
-            fallback.insert("flow".to_string(), Value::String(edge_reality.flow.clone()));
-            fallback.insert(
-                "description".to_string(),
-                Value::String(format!(
-                    "Edge-terminated Yandex edge proxy mode. The client first connects to the dedicated edge REALITY inbound on {}:{}, then the Yandex VM forwards traffic to the stable REALITY origin {}:{}.",
-                    edge_host.trim(),
-                    public_port,
-                    origin_host.trim(),
-                    reality.port,
-                )),
-            );
-        }
+        fallback.insert(
+            "transport".to_string(),
+            Value::String(YANDEX_EDGE_CDN_TRANSPORT.to_string()),
+        );
+        fallback.insert(
+            "description".to_string(),
+            Value::String(format!(
+                "Edge-terminated Yandex edge bridge mode. The client first connects to the dedicated edge xhttp inbound on {}:{}, then the Yandex VM forwards traffic to the stable REALITY origin {}:{}.",
+                edge_host.trim(),
+                public_port,
+                origin_host.trim(),
+                reality.port,
+            )),
+        );
     }
+    sync_owner_android_runtime(&mut profile);
     profile.protocol_pack = build_protocol_pack_for_transport_with_fallbacks(
         &profile.transport,
         nonzero_u16(profile.endpoint_port),
@@ -3711,7 +3830,6 @@ async fn mobile_run_edge_attach(
     let public_port = normalized_edge_public_port(Some(edge));
     let routing_mode = normalized_edge_routing_mode(Some(edge));
     let layout = build_yandex_edge_runtime_layout(public_port, routing_mode);
-    let mut edge_client_reality: Option<RealityFallback> = None;
 
     let mut origin = MobileSshSession::connect(&payload.server, &payload.secret).await?;
     origin.run("whoami && uname -a").await?;
@@ -3757,16 +3875,16 @@ async fn mobile_run_edge_attach(
         _ => ensure_remote_socat_installed(&mut edge_ssh).await?,
     }
     if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
-        let edge_pair = generate_reality_key_pair()?;
-        let edge_short_id = generate_reality_short_id()?;
-        let edge_uuid = generate_protocol_uuid()?;
-        let edge_flow = YANDEX_EDGE_FLOW.to_string();
+        edge_ssh
+            .run(&render_yandex_edge_xray_proxy_certificate_command(
+                &layout,
+                edge.server.host.trim(),
+            ))
+            .await?;
         let edge_config = render_yandex_edge_xray_proxy_config(
             public_port,
-            &edge_uuid,
-            &edge_pair.private_key,
-            &edge_short_id,
-            &reality.server_name,
+            &layout.xray_cert,
+            &layout.xray_key,
             payload.server.host.trim(),
             reality.port,
             &reality.server_name,
@@ -3782,14 +3900,6 @@ async fn mobile_run_edge_attach(
             "0644",
         )
         .await?;
-        edge_client_reality = Some(RealityFallback {
-            port: public_port,
-            server_name: reality.server_name.clone(),
-            public_key: edge_pair.public_key,
-            short_id: edge_short_id,
-            uuid: edge_uuid,
-            flow: edge_flow,
-        });
     }
     let edge_manifest = render_yandex_edge_manifest(
         edge.server.host.trim(),
@@ -3885,7 +3995,7 @@ async fn mobile_run_edge_attach(
         .await?;
     edge_ssh
         .run(&remote_root_shell(&format!(
-            "socat -T 5 - TCP:{}:{},connect-timeout=5 </dev/null >/dev/null",
+            "timeout 8 bash -lc 'cat </dev/null >/dev/tcp/{}/{}'",
             payload.server.host.trim(),
             reality.port
         )))
@@ -3900,7 +4010,6 @@ async fn mobile_run_edge_attach(
             payload.server.host.trim(),
             &reality,
             routing_mode,
-            edge_client_reality.as_ref(),
         )?;
     origin
         .upload(
@@ -4076,19 +4185,35 @@ async fn run_edge_attach_health_checks(
                 layout.haproxy_path
             ),
         )),
-        EDGE_ROUTING_MODE_XRAY_PROXY => checks.push((
-            "edge-xray-config",
-            "Edge xray config",
-            remote_root_shell(&format!(
-                "{} run -test -config {}",
-                quote_shell(&layout.xray_path),
-                quote_shell(&layout.xray_config)
-            )),
-            format!(
-                "Xray config passes syntax validation at {}.",
-                layout.xray_config
-            ),
-        )),
+        EDGE_ROUTING_MODE_XRAY_PROXY => {
+            checks.push((
+                "edge-xray-config",
+                "Edge xray config",
+                remote_root_shell(&format!(
+                    "{} run -test -config {}",
+                    quote_shell(&layout.xray_path),
+                    quote_shell(&layout.xray_config)
+                )),
+                format!(
+                    "Xray config passes syntax validation at {}.",
+                    layout.xray_config
+                ),
+            ));
+            checks.push((
+                "edge-xray-cert",
+                "Edge xray certificate",
+                remote_root_shell(&format!(
+                    "test -s {} && test -s {}",
+                    quote_shell(&layout.xray_cert),
+                    quote_shell(&layout.xray_key)
+                )),
+                format!(
+                    "Xray bridge certificate and key are present at {} and {}.",
+                    layout.xray_cert,
+                    layout.xray_key
+                ),
+            ));
+        }
         _ => checks.push((
             "edge-socat-runtime",
             "Edge socat runtime",
@@ -4614,7 +4739,7 @@ fn preview_staged_fallbacks(edge: Option<&EdgeAttachPayload>) -> Value {
                 "",
                 "",
                 "",
-                EDGE_ROUTING_MODE_TCP_FORWARD,
+                EDGE_ROUTING_MODE_DEFAULT,
             ),
         );
     }
@@ -4705,7 +4830,7 @@ fn render_owner_profile(
     client_public_key: &str,
     staged_fallbacks: Value,
 ) -> Result<String, String> {
-    let profile = OwnerProfileFile {
+    let mut profile = OwnerProfileFile {
         name: "Odin's Cat Owner Node".to_string(),
         transport: "xray".to_string(),
         active_protocol: "vless-reality".to_string(),
@@ -4734,7 +4859,43 @@ fn render_owner_profile(
             mtu: 1280,
         },
     };
+    sync_owner_android_runtime(&mut profile);
     serde_json::to_string_pretty(&profile).map_err(|err| format!("marshal owner profile: {err}"))
+}
+
+fn render_yandex_edge_xray_proxy_certificate_command(
+    layout: &YandexEdgeRuntimeLayout,
+    edge_host: &str,
+) -> String {
+    let mut san_entries = Vec::new();
+    let primary_cn = YANDEX_EDGE_CDN_CAMOUFLAGE_HOST;
+    san_entries.push(format!("DNS:{primary_cn}"));
+    for host in yandex_edge_cover_domain_pool() {
+        let entry = format!("DNS:{host}");
+        if !san_entries.iter().any(|value| value == &entry) {
+            san_entries.push(entry);
+        }
+    }
+    let edge_host = edge_host.trim();
+    let edge_sslip = sslip_host_for_invite(edge_host);
+    if !edge_sslip.trim().is_empty() {
+        san_entries.push(format!("DNS:{edge_sslip}"));
+    }
+    if !edge_host.is_empty() {
+        if edge_host.parse::<std::net::IpAddr>().is_ok() {
+            san_entries.push(format!("IP:{edge_host}"));
+        } else {
+            san_entries.push(format!("DNS:{edge_host}"));
+        }
+    }
+    remote_root_shell(&format!(
+        "mkdir -p {config_dir} && if ! command -v openssl >/dev/null 2>&1; then if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y openssl; else echo 'openssl is required and apt-get was not found' >&2; exit 1; fi; fi && openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 3650 -keyout {key_path} -out {cert_path} -subj {subject} -addext {san} >/dev/null 2>&1 && chmod 0600 {key_path} && chmod 0644 {cert_path}",
+        config_dir = quote_shell(&layout.config_dir),
+        key_path = quote_shell(&layout.xray_key),
+        cert_path = quote_shell(&layout.xray_cert),
+        subject = quote_shell(&format!("/CN={primary_cn}")),
+        san = quote_shell(&format!("subjectAltName={}", san_entries.join(","))),
+    ))
 }
 
 fn render_systemd_unit(name: &str, exec_start: &str) -> String {
@@ -4766,6 +4927,15 @@ fn build_protocol_pack_for_transport_with_fallbacks(
     vk_turn_proxy_port: Option<u16>,
     staged_fallbacks: Option<&Value>,
 ) -> Vec<ProtocolPackEntry> {
+    let current_yandex_edge_proxy_routing_mode = staged_fallbacks
+        .and_then(|value| value.get("realityYandexEdgeProxy"))
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("routingMode"))
+        .and_then(Value::as_str)
+        .unwrap_or(EDGE_ROUTING_MODE_DEFAULT);
+    let expose_legacy_yandex_edge_entry =
+        !staged_fallback_present(staged_fallbacks, "realityYandexEdgeProxy")
+            || current_yandex_edge_proxy_routing_mode != EDGE_ROUTING_MODE_XRAY_PROXY;
     let mut entries = vec![
         ProtocolPackEntry {
             id: "vless-reality".to_string(),
@@ -4819,7 +4989,13 @@ fn build_protocol_pack_for_transport_with_fallbacks(
         });
     }
 
-    if staged_fallback_present(staged_fallbacks, "realityYandexEdge") {
+    if expose_legacy_yandex_edge_entry && staged_fallback_present(staged_fallbacks, "realityYandexEdge") {
+        let routing_mode = staged_fallbacks
+            .and_then(|value| value.get("realityYandexEdge"))
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("routingMode"))
+            .and_then(Value::as_str)
+            .unwrap_or(EDGE_ROUTING_MODE_DEFAULT);
         entries.push(ProtocolPackEntry {
             id: "vless-reality-yandex-edge".to_string(),
             label: "Yandex edge".to_string(),
@@ -4832,14 +5008,24 @@ fn build_protocol_pack_for_transport_with_fallbacks(
                 "connectPort",
                 YANDEX_EDGE_CONNECT_PORT,
             ),
-            notes: "Visible whitelist-facing edge entry that forwards the live REALITY origin through a dedicated Yandex host.".to_string(),
+            notes: yandex_edge_protocol_note(routing_mode, false),
         });
     }
 
     if staged_fallback_present(staged_fallbacks, "realityYandexEdgeProxy") {
+        let routing_mode = staged_fallbacks
+            .and_then(|value| value.get("realityYandexEdgeProxy"))
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("routingMode"))
+            .and_then(Value::as_str)
+            .unwrap_or(EDGE_ROUTING_MODE_DEFAULT);
         entries.push(ProtocolPackEntry {
             id: "vless-reality-yandex-edge-proxy".to_string(),
-            label: "Yandex edge proxy".to_string(),
+            label: if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
+                "Yandex edge".to_string()
+            } else {
+                "Yandex edge proxy".to_string()
+            },
             status: "staged".to_string(),
             engine: "sing-box".to_string(),
             scheme: "vless+reality-edge-proxy".to_string(),
@@ -4849,7 +5035,7 @@ fn build_protocol_pack_for_transport_with_fallbacks(
                 "connectPort",
                 YANDEX_EDGE_CONNECT_PORT,
             ),
-            notes: "Two-hop Yandex edge proxy path for restrictive networks. The client enters through the Yandex edge and keeps egress on the stable REALITY origin.".to_string(),
+            notes: yandex_edge_protocol_note(routing_mode, true),
         });
     }
 
@@ -5059,12 +5245,31 @@ fn requested_owner_runtime_lab(
 }
 
 fn requested_runtime_family(payload: &LocalTunnelStartPayload) -> Option<&str> {
-    match payload.runtime_family.trim() {
-        "direct-reality"
-        | "cdn-anti-whitelist"
-        | "reality-vps-lab"
-        | "reality-whitelist-assisted"
-        | "vk-relay" => Some(payload.runtime_family.trim()),
+    let requested = payload.runtime_family.trim();
+    if !requested.is_empty() {
+        return match requested {
+            "direct-reality"
+            | "cdn-anti-whitelist"
+            | "reality-vps-lab"
+            | "reality-whitelist-assisted"
+            | "vk-relay" => Some(requested),
+            _ => None,
+        };
+    }
+
+    match payload
+        .owner_runtime_lab
+        .as_ref()
+        .map(|runtime_lab| runtime_lab.mode.trim())
+        .unwrap_or_default()
+    {
+        OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY => Some("cdn-anti-whitelist"),
+        OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
+        | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD
+        | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB
+        | OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB => Some("reality-vps-lab"),
+        OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_SCAFFOLD
+        | OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_LAB => Some("reality-whitelist-assisted"),
         _ => None,
     }
 }
@@ -5227,7 +5432,7 @@ fn resolve_yandex_edge_fallback(profile_object: &serde_json::Map<String, Value>)
     let source = yandex_edge_string_field(existing_edge, "source", YANDEX_EDGE_SOURCE);
     let tag = yandex_edge_string_field(existing_edge, "tag", YANDEX_EDGE_TAG);
     let routing_mode =
-        yandex_edge_string_field(existing_edge, "routingMode", EDGE_ROUTING_MODE_TCP_FORWARD);
+        yandex_edge_string_field(existing_edge, "routingMode", EDGE_ROUTING_MODE_DEFAULT);
     let connect_host =
         yandex_edge_string_field(existing_edge, "connectHost", YANDEX_EDGE_CONNECT_HOST);
     let connect_port =
@@ -5270,33 +5475,44 @@ fn apply_owner_runtime_lab_overrides(
 ) -> Result<String, String> {
     let mut profile: Value =
         serde_json::from_str(raw_json).map_err(|err| format!("parse owner profile json: {err}"))?;
-    let profile_object = ensure_object_value(&mut profile, "owner profile")?;
-    let bootstrap_server_host = profile_object
-        .get("serverHost")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_default()
-        .to_string();
-    let bootstrap_reality = profile_object
-        .get("stagedFallbacks")
-        .and_then(Value::as_object)
-        .and_then(|value| value.get("vlessReality"))
-        .and_then(Value::as_object)
-        .cloned()
-        .or_else(|| {
-            profile_object
-                .get("vlessReality")
-                .and_then(Value::as_object)
-                .cloned()
-        });
+    let (bootstrap_server_host, bootstrap_reality) = {
+        let profile_object = ensure_object_value(&mut profile, "owner profile")?;
+        let bootstrap_server_host = profile_object
+            .get("serverHost")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default()
+            .to_string();
+        let bootstrap_reality = profile_object
+            .get("stagedFallbacks")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("vlessReality"))
+            .and_then(Value::as_object)
+            .cloned()
+            .or_else(|| {
+                profile_object
+                    .get("vlessReality")
+                    .and_then(Value::as_object)
+                    .cloned()
+            });
+        if matches!(
+            owner_runtime_lab.mode.trim(),
+            OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
+                | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
+        ) {
+            apply_yandex_edge_reality_preset(profile_object)?;
+        }
+        (bootstrap_server_host, bootstrap_reality)
+    };
     if matches!(
         owner_runtime_lab.mode.trim(),
         OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
             | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
     ) {
-        apply_yandex_edge_reality_preset(profile_object)?;
+        sync_owner_android_runtime_in_value(&mut profile)?;
     }
+    let profile_object = ensure_object_value(&mut profile, "owner profile")?;
     let yandex_edge_reality = profile_object
         .get("stagedFallbacks")
         .and_then(Value::as_object)
@@ -5586,6 +5802,21 @@ fn apply_owner_runtime_lab_overrides(
                     .or_insert_with(|| json!({})),
                 "androidRuntime.realityVpsLab",
             )?;
+            let proxy_mode =
+                owner_runtime_lab.mode.trim() == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY;
+            if proxy_mode {
+                vps_lab.insert("enabled".to_string(), Value::Bool(false));
+                let relay_autoselect = ensure_object_value(
+                    vps_lab
+                        .entry("relayAutoselect")
+                        .or_insert_with(|| json!({})),
+                    "androidRuntime.realityVpsLab.relayAutoselect",
+                )?;
+                relay_autoselect.insert("enabled".to_string(), Value::Bool(false));
+                sync_owner_android_runtime_in_value(&mut profile)?;
+                return serde_json::to_string(&profile)
+                    .map_err(|err| format!("serialize owner profile json: {err}"));
+            }
             vps_lab.insert(
                 "ownerRealityEgress".to_string(),
                 Value::Bool(force_relay_owner_mode || owner_runtime_lab.vps_owner_reality_egress),
@@ -5961,7 +6192,7 @@ fn yandex_edge_fallback_value_for(
         "source": source,
         "tag": tag,
         "routingMode": routing_mode,
-        "description": "Visible Yandex edge mode for Android. The client reaches the current REALITY origin through a dedicated Yandex edge surface."
+        "description": yandex_edge_entry_description(routing_mode)
     })
 }
 
@@ -5993,10 +6224,14 @@ fn yandex_edge_proxy_fallback_value_from_edge(edge: &Value) -> Value {
         "fingerprint": yandex_edge_string_field(edge_object, "fingerprint", YANDEX_EDGE_FINGERPRINT),
         "source": source,
         "tag": tag,
-        "routingMode": yandex_edge_string_field(edge_object, "routingMode", EDGE_ROUTING_MODE_TCP_FORWARD),
-        "transport": "tcp",
+        "routingMode": yandex_edge_string_field(edge_object, "routingMode", EDGE_ROUTING_MODE_DEFAULT),
+        "transport": if yandex_edge_string_field(edge_object, "routingMode", EDGE_ROUTING_MODE_DEFAULT) == EDGE_ROUTING_MODE_XRAY_PROXY {
+            YANDEX_EDGE_CDN_TRANSPORT
+        } else {
+            "tcp"
+        },
         "ownerRealityEgress": false,
-        "description": "Yandex edge proxy mode for Android. The client enters through the dedicated Yandex edge surface and reaches the stable REALITY origin through it."
+        "description": yandex_edge_proxy_description(&yandex_edge_string_field(edge_object, "routingMode", EDGE_ROUTING_MODE_DEFAULT))
     })
 }
 
@@ -6015,7 +6250,7 @@ fn curated_yandex_edge_fallback_value() -> Value {
         YANDEX_EDGE_FINGERPRINT,
         YANDEX_EDGE_SOURCE,
         YANDEX_EDGE_TAG,
-        EDGE_ROUTING_MODE_TCP_FORWARD,
+        EDGE_ROUTING_MODE_DEFAULT,
     )
 }
 
@@ -6261,7 +6496,7 @@ fn build_plan_warnings(server: &ServerDraftPayload, flow: &str) -> Vec<String> {
     ];
 
     if flow == PROVISION_FLOW_EDGE_ATTACH {
-        warnings.push("The Yandex edge step is additive: it only exposes the existing REALITY origin through a second host and does not rotate the origin keys by itself.".to_string());
+        warnings.push("The Yandex edge step is additive: it keeps the stable REALITY origin untouched while attaching a second whitelist-facing bridge host in front of it.".to_string());
         warnings.push("You should re-issue invite keys after the edge is attached so imported profiles receive the extra visible mode.".to_string());
         return warnings;
     }
@@ -6340,10 +6575,10 @@ fn normalized_edge_public_port(edge: Option<&EdgeAttachPayload>) -> u16 {
 fn normalized_edge_routing_mode(edge: Option<&EdgeAttachPayload>) -> &str {
     let mode = edge
         .and_then(|entry| entry.routing_mode.as_deref())
-        .unwrap_or(EDGE_ROUTING_MODE_TCP_FORWARD)
+        .unwrap_or(EDGE_ROUTING_MODE_DEFAULT)
         .trim();
     if mode.is_empty() {
-        EDGE_ROUTING_MODE_TCP_FORWARD
+        EDGE_ROUTING_MODE_DEFAULT
     } else {
         mode
     }
@@ -6415,7 +6650,8 @@ mod tests {
         curated_yandex_edge_fallback_value, ensure_reality_relay_direct_fallback, ipv4_in_cidr,
         parse_ipv4_cidr, parse_whitelist_files, port_candidates_with_seed,
         upsert_yandex_edge_fallback, OwnerRuntimeLabPayload, OwnerRuntimeLabRelayAutoselectPayload,
-        EDGE_ROUTING_MODE_TCP_FORWARD, OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB,
+        EDGE_ROUTING_MODE_DEFAULT, EDGE_ROUTING_MODE_TCP_FORWARD,
+        OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB,
         OWNER_RUNTIME_LAB_MODE_REALITY_VPS_RELAY_LAB, OWNER_RUNTIME_LAB_MODE_REALITY_VPS_SCAFFOLD,
         OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_LAB,
         OWNER_RUNTIME_LAB_MODE_REALITY_WHITELIST_SCAFFOLD,
@@ -6949,7 +7185,7 @@ mod tests {
         );
         assert_eq!(
             payload["stagedFallbacks"]["realityYandexEdge"]["routingMode"].as_str(),
-            Some(EDGE_ROUTING_MODE_TCP_FORWARD)
+            Some(EDGE_ROUTING_MODE_DEFAULT)
         );
         assert_eq!(
             payload["stagedFallbacks"]["vlessReality"]["publicKey"].as_str(),
@@ -6960,7 +7196,7 @@ mod tests {
     #[test]
     fn owner_runtime_lab_patch_supports_yandex_edge_proxy_without_relay_autoselect() {
         let patched = apply_owner_runtime_lab_overrides(
-            r#"{"name":"Owner","serverHost":"95.81.120.226","androidRuntime":{"realityVpsLab":{"relayAutoselect":{"enabled":true,"sourceLabel":"stale"}}},"stagedFallbacks":{"vlessReality":{"port":55555,"uuid":"fe05feb2-c88c-46bc-b809-ba9eefc5e6ee","flow":"xtls-rprx-vision","serverName":"www.cloudflare.com","publicKey":"EwRrvp8PKSyz5Fb2tgXG-4uv1UJfQw65yRTvoH36aw4","shortId":"2d2812af9d8e4cf4"},"realityYandexEdgeProxy":{"connectHost":"62.84.123.148","connectPort":10443,"originHost":"95.81.120.226","originPort":55555,"serverName":"www.cloudflare.com","publicKey":"EwRrvp8PKSyz5Fb2tgXG-4uv1UJfQw65yRTvoH36aw4","shortId":"2d2812af9d8e4cf4","uuid":"fe05feb2-c88c-46bc-b809-ba9eefc5e6ee","flow":"xtls-rprx-vision","source":"owner-attached:yandex-edge:sni-router:10443:proxy","tag":"yandex-edge-62-84-123-148-10443-sni-router-proxy","routingMode":"sni-router","ownerRealityEgress":true}}}"#,
+            r#"{"name":"Owner","serverHost":"95.81.120.226","androidRuntime":{"realityVpsLab":{"relayAutoselect":{"enabled":true,"sourceLabel":"stale"}}},"stagedFallbacks":{"vlessReality":{"port":55555,"uuid":"fe05feb2-c88c-46bc-b809-ba9eefc5e6ee","flow":"xtls-rprx-vision","serverName":"www.cloudflare.com","publicKey":"EwRrvp8PKSyz5Fb2tgXG-4uv1UJfQw65yRTvoH36aw4","shortId":"2d2812af9d8e4cf4"},"realityYandexEdgeProxy":{"connectHost":"62.84.123.148","connectPort":10443,"originHost":"95.81.120.226","originPort":55555,"serverName":"www.cloudflare.com","publicKey":"EwRrvp8PKSyz5Fb2tgXG-4uv1UJfQw65yRTvoH36aw4","shortId":"2d2812af9d8e4cf4","uuid":"fe05feb2-c88c-46bc-b809-ba9eefc5e6ee","flow":"xtls-rprx-vision","source":"owner-attached:yandex-edge:xray-proxy:10443:proxy","tag":"yandex-edge-62-84-123-148-10443-xray-proxy-proxy","routingMode":"xray-proxy","ownerRealityEgress":false}}}"#,
             &OwnerRuntimeLabPayload {
                 mode: OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY.to_string(),
                 hint_server_name: String::new(),
@@ -6987,28 +7223,28 @@ mod tests {
         let payload: Value =
             serde_json::from_str(&patched).expect("patched profile should stay valid json");
         assert_eq!(
-            payload["androidRuntime"]["realityVpsLab"]["connectHost"].as_str(),
+            payload["androidRuntime"]["cdnAntiWhitelist"]["connectHost"].as_str(),
             Some("62.84.123.148")
         );
         assert_eq!(
-            payload["androidRuntime"]["realityVpsLab"]["connectPort"].as_u64(),
-            Some(10443)
+            payload["androidRuntime"]["cdnAntiWhitelist"]["connectPort"].as_u64(),
+            Some(443)
         );
         assert_eq!(
-            payload["androidRuntime"]["realityVpsLab"]["ownerRealityEgress"].as_bool(),
-            Some(true)
+            payload["androidRuntime"]["cdnAntiWhitelist"]["transport"].as_str(),
+            Some("xhttp")
         );
         assert_eq!(
             payload["androidRuntime"]["realityVpsLab"]["relayAutoselect"]["enabled"].as_bool(),
             Some(false)
         );
         assert_eq!(
-            payload["androidRuntime"]["realityVpsLab"]["source"].as_str(),
-            Some("owner-attached:yandex-edge:sni-router:10443:proxy")
+            payload["androidRuntime"]["realityVpsLab"]["enabled"].as_bool(),
+            Some(false)
         );
         assert_eq!(
-            payload["androidRuntime"]["realityVpsLab"]["tag"].as_str(),
-            Some("yandex-edge-62-84-123-148-10443-sni-router-proxy")
+            payload["androidRuntime"]["cdnAntiWhitelist"]["tlsServerName"].as_str(),
+            Some("ya.ru")
         );
     }
 
@@ -7049,9 +7285,11 @@ mod tests {
     }
 
     #[test]
-    fn protocol_pack_includes_yandex_edge_entry() {
+    fn protocol_pack_prefers_current_yandex_edge_proxy_entry() {
         let mut staged = serde_json::json!({});
         upsert_yandex_edge_fallback(&mut staged, curated_yandex_edge_fallback_value());
+        staged["realityYandexEdgeProxy"]["routingMode"] =
+            Value::String(super::EDGE_ROUTING_MODE_XRAY_PROXY.to_string());
         let entries = build_protocol_pack_for_transport_with_fallbacks(
             "xray",
             Some(51820),
@@ -7061,11 +7299,58 @@ mod tests {
         );
         assert!(
             entries.iter().any(|entry| {
-                entry.id == "vless-reality-yandex-edge"
+                entry.id == "vless-reality-yandex-edge-proxy"
                     && entry.label == "Yandex edge"
                     && entry.port == YANDEX_EDGE_CONNECT_PORT
             }),
-            "protocol pack should expose the Yandex edge mode for invite flows",
+            "protocol pack should expose the bridge-first Yandex edge mode for invite flows",
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.id == "vless-reality-yandex-edge"),
+            "protocol pack should hide the legacy passthrough entry when the bridge entry is available",
+        );
+    }
+
+    #[test]
+    fn render_yandex_edge_xray_proxy_config_avoids_inbound_sniffing() {
+        let raw = super::render_yandex_edge_xray_proxy_config(
+            443,
+            "/etc/odin-edge/xhttp-edge.crt",
+            "/etc/odin-edge/xhttp-edge.key",
+            "2.26.62.246",
+            52444,
+            "www.cloudflare.com",
+            "PUBLIC_KEY",
+            "deadbeef",
+            "22222222-2222-2222-2222-222222222222",
+            "xtls-rprx-vision",
+        )
+        .expect("config should render");
+        let parsed: Value = serde_json::from_str(&raw).expect("config should parse");
+        let inbound = parsed["inbounds"][0]
+            .as_object()
+            .expect("inbound should be object");
+        assert!(
+            !inbound.contains_key("sniffing"),
+            "bridge edge inbound should avoid unnecessary protocol sniffing",
+        );
+        assert_eq!(
+            inbound["tag"].as_str(),
+            Some("cdn-xhttp-in")
+        );
+        assert_eq!(
+            inbound["streamSettings"]["network"].as_str(),
+            Some(super::YANDEX_EDGE_CDN_TRANSPORT)
+        );
+        assert_eq!(
+            inbound["streamSettings"]["security"].as_str(),
+            Some("tls")
+        );
+        assert_eq!(
+            parsed["routing"]["rules"][0]["outboundTag"].as_str(),
+            Some("origin-reality-out")
         );
     }
 
@@ -7354,6 +7639,26 @@ mod tests {
         assert_eq!(
             invite.android_runtime["cdnAntiWhitelist"]["camouflageHost"].as_str(),
             Some("ya.ru")
+        );
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["camouflageHostPool"][0].as_str(),
+            Some("ya.ru")
+        );
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["camouflageHostPool"][1].as_str(),
+            Some("tunnel.vk-apps.com")
+        );
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["frontPool"].as_array().map(Vec::len),
+            Some(4)
+        );
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["frontPool"][0]["tlsServerName"].as_str(),
+            Some("ya.ru")
+        );
+        assert_eq!(
+            invite.android_runtime["cdnAntiWhitelist"]["frontPool"][1]["tlsServerName"].as_str(),
+            Some("tunnel.vk-apps.com")
         );
         assert_eq!(
             invite.android_runtime["cdnAntiWhitelist"]["connectPort"].as_u64(),

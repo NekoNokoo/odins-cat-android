@@ -448,6 +448,11 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                 appendDiagnostic(
                     "Prepared Android VPN runtime. source=${args.getString("startSource", "unknown")} family=${prepared.runtimeFamily} activation=${prepared.activationState} mode=${prepared.configMode} profileHash=${prepared.profileHash ?: "n/a"} features=${prepared.activeFeatures.joinToString(",")}",
                 )
+                if (prepared.runtimeFamily == "cdn-anti-whitelist") {
+                    appendDiagnostic(
+                        "Selected CDN front for this start. tag=${prepared.frontTag ?: "n/a"} sni=${prepared.selectedSniHint ?: "n/a"} host=${prepared.frontHost ?: "n/a"} connect=${prepared.frontConnectHost ?: "n/a"}:${prepared.frontConnectPort ?: 0} path=${prepared.frontPath ?: "/"}",
+                    )
+                }
                 prepared.remotePeer?.let { appendLog("VK relay remote peer: $it") }
                 val vkWarmupOnly = !prepared.vkBinaryPath.isNullOrBlank()
                 if (vkWarmupOnly) {
@@ -567,6 +572,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
     ) {
         synchronized(lifecycleLock) {
             appendDiagnostic("handleFailure entered. message=$message")
+            prepareNextCdnFrontRetryIfAvailable()
             closeRuntimeResources("handleFailure")
             val current = VpnRuntimeStore.snapshot(this)
             val failureBase =
@@ -588,6 +594,30 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                 .onFailure { appendDiagnostic("stopForeground failed during handleFailure: ${it.message}") }
             runOnMainSync { stopSelf() }
         }
+    }
+
+    private fun prepareNextCdnFrontRetryIfAvailable() {
+        val attempted = VpnRuntimeRestoreStore.readAttemptedStartRequest(this) ?: return
+        val runtimeFamily = attempted.getString("runtimeFamily", null)?.trim().orEmpty()
+        if (runtimeFamily != "cdn-anti-whitelist") {
+            return
+        }
+        val advanced = VpnRuntimeLibbox.advanceCdnFrontOverrideForRetry(attempted)
+        val previousTag = attempted.getString("frontTag", attempted.getString("cdnFrontTag", null))?.trim().orEmpty()
+        val nextTag = advanced.getString("frontTag", advanced.getString("cdnFrontTag", null))?.trim().orEmpty()
+        if (nextTag.isBlank() || nextTag == previousTag) {
+            return
+        }
+        val previousSni = attempted.getString("cdnTlsServerName", attempted.getString("tlsServerName", null))?.trim().orEmpty()
+        val nextSni = advanced.getString("cdnTlsServerName", advanced.getString("tlsServerName", null))?.trim().orEmpty()
+        val previousHost = attempted.getString("frontHost", attempted.getString("cdnFrontHost", null))?.trim().orEmpty()
+        val nextHost = advanced.getString("frontHost", advanced.getString("cdnFrontHost", null))?.trim().orEmpty()
+        VpnRuntimeRestoreStore.persistAttemptedStartRequest(this, advanced)
+        VpnRuntimeRestoreStore.persistStartRequest(this, advanced)
+        VpnRuntimeRestoreStore.markResumeEligible(this, false)
+        appendDiagnostic(
+            "Prepared next CDN front candidate for the next manual retry. previousTag=$previousTag previousSni=${previousSni.ifBlank { "n/a" }} previousHost=${previousHost.ifBlank { "n/a" }} nextTag=$nextTag nextSni=${nextSni.ifBlank { "n/a" }} nextHost=${nextHost.ifBlank { "n/a" }}",
+        )
     }
 
     private fun startPreparedRuntimeTunnel(

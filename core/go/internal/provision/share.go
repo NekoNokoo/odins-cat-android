@@ -31,6 +31,12 @@ const inviteCdnYandexMode = "lab"
 const inviteCdnYandexBootstrap = "direct-reality"
 const inviteCdnYandexFrontSelection = "ordered"
 const inviteCdnYandexCamouflageHost = "ya.ru"
+var inviteCdnYandexCamouflageHostPool = []string{
+	"ya.ru",
+	"tunnel.vk-apps.com",
+	"5post-gate.x5.ru",
+	"ads.x5.ru",
+}
 const inviteCdnYandexXhttpMode = "packet-up"
 const inviteCdnYandexXmuxMaxConcurrency = 20
 const inviteCdnYandexXmuxHMaxRequestTimes = 900
@@ -1164,6 +1170,26 @@ func buildInviteCdnAntiWhitelistRuntime(invite inviteProfile) map[string]any {
 	tlsServerName := inviteCdnYandexCamouflageHost
 	httpHostHeader := inviteCdnYandexCamouflageHost
 	tlsAlpn := []string{"h2", "http/1.1"}
+	frontPool := make([]map[string]any, 0, len(inviteCdnYandexCamouflageHostPool))
+	for index, host := range inviteCdnYandexCamouflageHostPool {
+		tag := frontTag
+		if index > 0 {
+			tag = fmt.Sprintf("%s-%s", frontTag, strings.NewReplacer(".", "-").Replace(host))
+		}
+		frontPool = append(frontPool, map[string]any{
+			"host":               frontHost,
+			"port":               inviteCdnYandexFrontPort,
+			"connectHost":        connectHost,
+			"connectPort":        inviteCdnYandexFrontPort,
+			"path":               inviteCdnYandexFrontPath,
+			"tlsServerName":      host,
+			"hostHeader":         host,
+			"tlsAllowInsecure":   true,
+			"camouflageHostPool": inviteCdnYandexCamouflageHostPool,
+			"provider":           inviteCdnYandexProvider,
+			"tag":                tag,
+		})
+	}
 	return map[string]any{
 		"enabled":              true,
 		"mode":                 inviteCdnYandexMode,
@@ -1179,6 +1205,7 @@ func buildInviteCdnAntiWhitelistRuntime(invite inviteProfile) map[string]any {
 		"hostHeader":           httpHostHeader,
 		"tlsAllowInsecure":     true,
 		"camouflageHost":       inviteCdnYandexCamouflageHost,
+		"camouflageHostPool":   inviteCdnYandexCamouflageHostPool,
 		"xhttpMode":            inviteCdnYandexXhttpMode,
 		"tlsAlpn":              tlsAlpn,
 		"xmuxMaxConcurrency":   inviteCdnYandexXmuxMaxConcurrency,
@@ -1203,20 +1230,7 @@ func buildInviteCdnAntiWhitelistRuntime(invite inviteProfile) map[string]any {
 			"scheme": "https",
 			"path":   inviteCdnYandexOriginPath,
 		},
-		"frontPool": []map[string]any{
-			{
-				"host":             frontHost,
-				"port":             inviteCdnYandexFrontPort,
-				"connectHost":      connectHost,
-				"connectPort":      inviteCdnYandexFrontPort,
-				"path":             inviteCdnYandexFrontPath,
-				"tlsServerName":    tlsServerName,
-				"hostHeader":       httpHostHeader,
-				"tlsAllowInsecure": true,
-				"provider":         inviteCdnYandexProvider,
-				"tag":              frontTag,
-			},
-		},
+		"frontPool": frontPool,
 	}
 }
 

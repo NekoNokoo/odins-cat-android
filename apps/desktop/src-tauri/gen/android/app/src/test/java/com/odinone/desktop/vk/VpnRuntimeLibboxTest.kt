@@ -1383,6 +1383,197 @@ class VpnRuntimeLibboxTest {
     }
 
     @Test
+    fun cdnAntiWhitelistSelectsTaggedFrontCandidateWhenFrontTagIsPinned() {
+        val normalized =
+            VpnRuntimeLibbox.normalizeRuntimeArgs(
+                JSObject().apply {
+                    put("serverHost", "example.com")
+                    put("transport", "xray")
+                    put("engine", "xray-native")
+                    put("protocol", "vless-reality")
+                    put("frontTag", "edge-x5")
+                    put(
+                        "profileJson",
+                        """
+                        {
+                          "stagedFallbacks": {
+                            "vlessReality": {
+                              "port": 443,
+                              "uuid": "9425da86-1560-4f77-ac53-076a2fa7eecd",
+                              "serverName": "www.cloudflare.com",
+                              "publicKey": "HR2qUZNinSLuJx2-dvQNMpjEyqZ6spD-8TNzGEwuyW8",
+                              "shortId": "9a3d8b86a93616a7"
+                            }
+                          },
+                          "androidRuntime": {
+                            "cdnAntiWhitelist": {
+                              "enabled": true,
+                              "mode": "lab",
+                              "engine": "xray-native",
+                              "transport": "xhttp",
+                              "frontSelection": "ordered",
+                              "frontPool": [
+                                {
+                                  "host": "edge.example.com",
+                                  "connectHost": "158.160.182.217",
+                                  "connectPort": 443,
+                                  "path": "/odin-ws",
+                                  "tlsServerName": "ya.ru",
+                                  "hostHeader": "ya.ru",
+                                  "tag": "edge-ya"
+                                },
+                                {
+                                  "host": "edge.example.com",
+                                  "connectHost": "158.160.182.217",
+                                  "connectPort": 443,
+                                  "path": "/odin-ws",
+                                  "tlsServerName": "ads.x5.ru",
+                                  "hostHeader": "ads.x5.ru",
+                                  "tag": "edge-x5"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                        """.trimIndent(),
+                    )
+                },
+            )
+
+        assertEquals("edge-x5", normalized.getString("frontTag", null))
+        assertEquals("ads.x5.ru", normalized.getString("cdnTlsServerName", null))
+        assertEquals("ads.x5.ru", normalized.getString("cdnHttpHostHeader", null))
+    }
+
+    @Test
+    fun advanceCdnFrontOverrideForRetryMovesToNextTaggedCandidate() {
+        val advanced =
+            VpnRuntimeLibbox.advanceCdnFrontOverrideForRetry(
+                JSObject().apply {
+                    put("serverHost", "example.com")
+                    put("transport", "xray")
+                    put("engine", "xray-native")
+                    put("protocol", "vless-reality")
+                    put("runtimeFamily", "cdn-anti-whitelist")
+                    put("frontTag", "edge-ya")
+                    put(
+                        "profileJson",
+                        """
+                        {
+                          "stagedFallbacks": {
+                            "vlessReality": {
+                              "port": 443,
+                              "uuid": "9425da86-1560-4f77-ac53-076a2fa7eecd",
+                              "serverName": "www.cloudflare.com",
+                              "publicKey": "HR2qUZNinSLuJx2-dvQNMpjEyqZ6spD-8TNzGEwuyW8",
+                              "shortId": "9a3d8b86a93616a7"
+                            }
+                          },
+                          "androidRuntime": {
+                            "cdnAntiWhitelist": {
+                              "enabled": true,
+                              "mode": "lab",
+                              "engine": "xray-native",
+                              "transport": "xhttp",
+                              "frontSelection": "ordered",
+                              "frontPool": [
+                                {
+                                  "host": "edge.example.com",
+                                  "connectHost": "158.160.182.217",
+                                  "connectPort": 443,
+                                  "path": "/odin-ws",
+                                  "tlsServerName": "ya.ru",
+                                  "hostHeader": "ya.ru",
+                                  "tag": "edge-ya"
+                                },
+                                {
+                                  "host": "edge.example.com",
+                                  "connectHost": "158.160.182.217",
+                                  "connectPort": 443,
+                                  "path": "/odin-ws",
+                                  "tlsServerName": "tunnel.vk-apps.com",
+                                  "hostHeader": "tunnel.vk-apps.com",
+                                  "tag": "edge-vk"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                        """.trimIndent(),
+                    )
+                },
+            )
+
+        assertEquals("edge-vk", advanced.getString("frontTag", null))
+        assertEquals("edge-vk", advanced.getString("cdnFrontTag", null))
+        assertEquals("tunnel.vk-apps.com", advanced.getString("cdnTlsServerName", null))
+        assertEquals("tunnel.vk-apps.com", advanced.getString("cdnHttpHostHeader", null))
+    }
+
+    @Test
+    fun cdnAntiWhitelistFeatureLabelsExposeSelectedFrontMetadata() {
+        val normalized =
+            VpnRuntimeLibbox.normalizeRuntimeArgs(
+                JSObject().apply {
+                    put("serverHost", "example.com")
+                    put("transport", "xray")
+                    put("engine", "xray-native")
+                    put("protocol", "vless-reality")
+                    put("frontTag", "edge-x5")
+                    put(
+                        "profileJson",
+                        """
+                        {
+                          "stagedFallbacks": {
+                            "vlessReality": {
+                              "port": 443,
+                              "uuid": "9425da86-1560-4f77-ac53-076a2fa7eecd",
+                              "serverName": "www.cloudflare.com",
+                              "publicKey": "HR2qUZNinSLuJx2-dvQNMpjEyqZ6spD-8TNzGEwuyW8",
+                              "shortId": "9a3d8b86a93616a7"
+                            }
+                          },
+                          "androidRuntime": {
+                            "cdnAntiWhitelist": {
+                              "enabled": true,
+                              "mode": "lab",
+                              "engine": "xray-native",
+                              "transport": "xhttp",
+                              "frontSelection": "ordered",
+                              "frontPool": [
+                                {
+                                  "host": "edge.example.com",
+                                  "connectHost": "158.160.182.217",
+                                  "connectPort": 443,
+                                  "path": "/odin-ws",
+                                  "tlsServerName": "ya.ru",
+                                  "hostHeader": "ya.ru",
+                                  "tag": "edge-ya"
+                                },
+                                {
+                                  "host": "edge.example.com",
+                                  "connectHost": "158.160.182.217",
+                                  "connectPort": 443,
+                                  "path": "/odin-ws",
+                                  "tlsServerName": "ads.x5.ru",
+                                  "hostHeader": "ads.x5.ru",
+                                  "tag": "edge-x5"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                        """.trimIndent(),
+                    )
+                },
+            )
+
+        assertFeature(normalized, "cdn-front-tag:edge-x5")
+        assertFeature(normalized, "cdn-front-sni:ads.x5.ru")
+        assertFeature(normalized, "cdn-front-selected:ads.x5.ru [edge-x5] via edge.example.com")
+    }
+
+    @Test
     fun cdnAntiWhitelistHttpupgradeLabModeActivatesHiddenFamily() {
         val normalized =
             VpnRuntimeLibbox.normalizeRuntimeArgs(

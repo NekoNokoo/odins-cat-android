@@ -785,6 +785,8 @@ fun mergePersistedHiddenRuntimeOverrides(
     when (requestedRuntimeFamily) {
         "cdn-anti-whitelist" -> {
             mergeMissingAndroidRuntimeBlock(androidRuntime, previousAndroidRuntime, "cdnAntiWhitelist")
+            mergeMissingStringField(merged, previous, "frontTag")
+            mergeMissingStringField(merged, previous, "cdnFrontTag")
         }
         "reality-vps-lab" -> {
             mergeMissingAndroidRuntimeBlock(androidRuntime, previousAndroidRuntime, "realityVpsLab")
@@ -800,6 +802,21 @@ fun mergePersistedHiddenRuntimeOverrides(
         ?.takeIf { it.isNotEmpty() }
         ?.let { merged.put(DEBUG_REALITY_PRESET_KEY, it) }
     return merged
+}
+
+private fun mergeMissingStringField(
+    target: JSObject,
+    source: JSObject,
+    key: String,
+) {
+    val current = target.getString(key, null)?.trim().orEmpty()
+    if (current.isNotEmpty()) {
+        return
+    }
+    source.getString(key, null)
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?.let { target.put(key, it) }
 }
 
 fun withBootRestoreEnabled(
