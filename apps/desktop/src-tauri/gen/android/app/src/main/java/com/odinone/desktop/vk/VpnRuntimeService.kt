@@ -70,6 +70,8 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
 
     @Volatile
     private var shuttingDown = false
+    @Volatile
+    private var recordCurrentSessionLog = false
     private val lifecycleLock = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var pendingNetworkReload: Runnable? = null
@@ -177,17 +179,19 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         closeRuntimeResources("onDestroy")
         val latest = VpnRuntimeStore.snapshot(this)
         if (current.status == "starting" || current.status == "running") {
-            VpnRuntimeStore.write(
-                this,
-                latest.copy(
-                    status = "stopped",
-                    socksAddress = null,
-                    bridgeAddress = null,
-                    error = null,
-                    logTail = trimLogTail(latest.logTail + "Android VpnService was destroyed."),
-                ),
-                sync = true,
-            )
+            val stopped =
+                VpnRuntimeStore.write(
+                    this,
+                    latest.copy(
+                        status = "stopped",
+                        socksAddress = null,
+                        bridgeAddress = null,
+                        error = null,
+                        logTail = trimLogTail(latest.logTail + "Android VpnService was destroyed."),
+                    ),
+                    sync = true,
+                )
+            finalizeSessionLogIfNeeded(stopped, "onDestroy")
         }
         super.onDestroy()
     }
@@ -517,10 +521,14 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                 activeRuntime = prepared
                 pendingVkCaptchaUrl = null
                 lastOpenedVkCaptchaUrl = null
+                recordCurrentSessionLog = VpnSessionLogStore.isArmed(this)
                 appendLog("Validated Android runtime config: ${prepared.configPath}")
                 appendDiagnostic(
                     "Prepared Android VPN runtime. source=${args.getString("startSource", "unknown")} family=${prepared.runtimeFamily} activation=${prepared.activationState} mode=${prepared.configMode} profileHash=${prepared.profileHash ?: "n/a"} features=${prepared.activeFeatures.joinToString(",")}",
                 )
+                if (recordCurrentSessionLog) {
+                    appendDiagnostic("Recording this VPN session to Downloads/Odin's log after the tunnel stops.")
+                }
                 if (prepared.runtimeFamily == "cdn-anti-whitelist") {
                     appendDiagnostic(
                         "Selected CDN front for this start. tag=${prepared.frontTag ?: "n/a"} sni=${prepared.selectedSniHint ?: "n/a"} host=${prepared.frontHost ?: "n/a"} connect=${prepared.frontConnectHost ?: "n/a"}:${prepared.frontConnectPort ?: 0} path=${prepared.frontPath ?: "/"}",
@@ -605,26 +613,28 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             }
             closeRuntimeResources("handleStop:$reason")
             val current = VpnRuntimeStore.snapshot(this)
-            persistTerminalState(
-                current.copy(
-                    status = "stopped",
-                    error = null,
-                    lastTest = current.lastTest,
-                    lastNetworkEvent = "stop:$reason",
-                    lastStartupStage = "stopped",
-                    lastFailureStage = null,
-                    lastFailureCode = null,
-                    logTail =
-                        trimLogTail(
-                            current.logTail +
-                                if (requestedByUser) {
-                                    "Android VPN runtime stop requested. reason=$reason"
-                                } else {
-                                    "Android VPN runtime stopped. reason=$reason"
-                                },
-                        ),
-                ),
-            )
+            val stopped =
+                persistTerminalState(
+                    current.copy(
+                        status = "stopped",
+                        error = null,
+                        lastTest = current.lastTest,
+                        lastNetworkEvent = "stop:$reason",
+                        lastStartupStage = "stopped",
+                        lastFailureStage = null,
+                        lastFailureCode = null,
+                        logTail =
+                            trimLogTail(
+                                current.logTail +
+                                    if (requestedByUser) {
+                                        "Android VPN runtime stop requested. reason=$reason"
+                                    } else {
+                                        "Android VPN runtime stopped. reason=$reason"
+                                    },
+                            ),
+                    ),
+                )
+            finalizeSessionLogIfNeeded(stopped, "handleStop:$reason")
             runCatching { runOnMainSync { stopForeground(STOP_FOREGROUND_REMOVE) } }
                 .onFailure { appendDiagnostic("stopForeground failed during handleStop: ${it.message}") }
             runCatching {
@@ -662,6 +672,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                         ),
                     ),
                 )
+            finalizeSessionLogIfNeeded(next, "handleFailure")
             runOnMainSync { updateNotification(next) }
             runCatching { runOnMainSync { stopForeground(STOP_FOREGROUND_REMOVE) } }
                 .onFailure { appendDiagnostic("stopForeground failed during handleFailure: ${it.message}") }
@@ -1202,6 +1213,51 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             ),
             sync = true,
         )
+
+    private fun finalizeSessionLogIfNeeded(
+        snapshot: TunnelSnapshot,
+        origin: String,
+    ) {
+        if (!recordCurrentSessionLog) {
+            return
+        }
+
+        recordCurrentSessionLog = false
+        VpnSessionLogStore.setArmed(this, false)
+
+        val contents =
+            buildString {
+                appendLine("timestamp=${currentTimestamp()}")
+                appendLine("origin=$origin")
+                appendLine("status=${snapshot.status}")
+                appendLine("serverHost=${snapshot.serverHost ?: ""}")
+                appendLine("transport=${snapshot.transport ?: ""}")
+                appendLine("engine=${snapshot.engine ?: ""}")
+                appendLine("protocol=${snapshot.protocol ?: ""}")
+                appendLine("runtimeFamily=${snapshot.runtimeFamily ?: ""}")
+                appendLine("activationState=${snapshot.activationState ?: ""}")
+                appendLine("sessionId=${snapshot.sessionId ?: ""}")
+                appendLine("sessionStartedAt=${snapshot.sessionStartedAt ?: ""}")
+                appendLine("frontHost=${snapshot.frontHost ?: ""}")
+                appendLine("frontTag=${snapshot.frontTag ?: ""}")
+                appendLine("selectedSniHint=${snapshot.selectedSniHint ?: ""}")
+                appendLine()
+                append(snapshot.logTail.joinToString(separator = "\n"))
+                appendLine()
+            }
+
+        runCatching {
+            val saved =
+                VpnSessionLogStore.saveSessionLog(
+                    context = this,
+                    contents = contents,
+                    timestampMs = System.currentTimeMillis(),
+                )
+            Log.i(TAG, "Saved VPN session log to ${saved.exportPath}")
+        }.onFailure { error ->
+            Log.e(TAG, "Failed to save VPN session log", error)
+        }
+    }
 
     private fun updateStartupStage(stage: String) {
         captureRuntimeState { current ->

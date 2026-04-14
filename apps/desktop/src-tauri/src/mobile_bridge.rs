@@ -1549,6 +1549,25 @@ pub async fn mobile_set_split_tunnel_selection(
 }
 
 #[tauri::command]
+pub async fn mobile_get_next_vpn_session_log_state(app: AppHandle) -> Result<Value, String> {
+    android_vpn::get_next_vpn_session_log_state(&app).await
+}
+
+#[tauri::command]
+pub async fn mobile_set_next_vpn_session_log_state(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<Value, String> {
+    android_vpn::set_next_vpn_session_log_state(
+        &app,
+        json!({
+            "enabled": enabled,
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
 pub fn mobile_get_owner_profile(app: AppHandle, host: String) -> Result<Value, String> {
     if host.trim().is_empty() {
         return Ok(json!({
@@ -1786,6 +1805,8 @@ pub fn register_mobile_commands(builder: tauri::Builder<tauri::Wry>) -> tauri::B
             mobile_list_installed_apps,
             mobile_get_split_tunnel_selection,
             mobile_set_split_tunnel_selection,
+            mobile_get_next_vpn_session_log_state,
+            mobile_set_next_vpn_session_log_state,
             mobile_get_owner_profile,
             mobile_get_imported_profile,
             mobile_import_profile,

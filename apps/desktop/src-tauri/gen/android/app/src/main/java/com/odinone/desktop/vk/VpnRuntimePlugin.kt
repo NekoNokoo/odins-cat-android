@@ -57,6 +57,11 @@ class SplitTunnelSelectionArgs {
 }
 
 @InvokeArg
+class NextSessionLogArgs {
+    var enabled: Boolean = false
+}
+
+@InvokeArg
 class ShareInviteFileArgs {
     var fileName: String = "odin-one-access.odinone-access.json"
     var contents: String = ""
@@ -285,6 +290,26 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
         val args = invoke.parseArgs(SplitTunnelSelectionArgs::class.java)
         val stored = SplitTunnelSelectionStore.write(activity, args.excludePackages.toList())
         invoke.resolve(stored.toJsObject())
+    }
+
+    @Command
+    fun getNextVpnSessionLogState(invoke: Invoke) {
+        invoke.resolve(
+            JSObject().apply {
+                put("enabled", VpnSessionLogStore.isArmed(activity))
+            },
+        )
+    }
+
+    @Command
+    fun setNextVpnSessionLogState(invoke: Invoke) {
+        val args = invoke.parseArgs(NextSessionLogArgs::class.java)
+        VpnSessionLogStore.setArmed(activity, args.enabled)
+        invoke.resolve(
+            JSObject().apply {
+                put("enabled", args.enabled)
+            },
+        )
     }
 
     @Command

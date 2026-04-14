@@ -437,6 +437,32 @@ export const coreApi = {
     );
   },
 
+  async getNextVpnSessionLogState() {
+    if (await prefersAndroidNativeBridge()) {
+      return invokeNative<{ enabled: boolean }>("mobile_get_next_vpn_session_log_state");
+    }
+    return unsupportedResult(
+      501,
+      {
+        enabled: false,
+        error: "Next VPN session log state is currently available only through the Android native bridge."
+      } as { enabled: boolean; error: string }
+    );
+  },
+
+  async setNextVpnSessionLogState(enabled: boolean) {
+    if (await prefersAndroidNativeBridge()) {
+      return invokeNative<{ enabled: boolean }>("mobile_set_next_vpn_session_log_state", { enabled });
+    }
+    return unsupportedResult(
+      501,
+      {
+        enabled,
+        error: "Next VPN session log state is currently available only through the Android native bridge."
+      } as { enabled: boolean; error: string }
+    );
+  },
+
   async exportInviteFile(contents: string) {
     if (await hasTauriBridge()) {
       return invokeNative<InviteFileExportResult>("mobile_export_invite_file", { contents });

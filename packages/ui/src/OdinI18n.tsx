@@ -66,6 +66,13 @@ const dictionaries = {
     splitTunnelClear: "Очистить список",
     splitTunnelReconnectNotice:
       "Чтобы применить обновлённый список обхода, переподключите VPN.",
+    nextVpnSessionLogTitle: "Лог следующей VPN-сессии",
+    nextVpnSessionLogText:
+      "Запишет только следующую сессию VPN и после отключения автоматически сохранит лог в Download/Odin's log.",
+    nextVpnSessionLogArm: "Записать следующую VPN-сессию",
+    nextVpnSessionLogDisarm: "Не записывать следующую VPN-сессию",
+    nextVpnSessionLogArmed:
+      "Следующая VPN-сессия будет записана и после отключения сохранится в Download/Odin's log.",
     splitTunnelLoadingApps: "Загружаем установленные приложения...",
     splitTunnelEmpty: "На этом устройстве не найдено установленных приложений.",
     splitTunnelNoResults: "По этому запросу приложения не найдены.",
@@ -581,6 +588,13 @@ const dictionaries = {
     splitTunnelClear: "Clear list",
     splitTunnelReconnectNotice:
       "Reconnect the VPN to apply the updated bypass app list.",
+    nextVpnSessionLogTitle: "Next VPN session log",
+    nextVpnSessionLogText:
+      "Records only the next VPN session and automatically saves the log to Download/Odin's log after disconnect.",
+    nextVpnSessionLogArm: "Record next VPN session",
+    nextVpnSessionLogDisarm: "Don't record next VPN session",
+    nextVpnSessionLogArmed:
+      "The next VPN session will be recorded and saved to Download/Odin's log after disconnect.",
     splitTunnelLoadingApps: "Loading installed apps...",
     splitTunnelEmpty: "No installed apps were found on this device.",
     splitTunnelNoResults: "No apps match this search.",

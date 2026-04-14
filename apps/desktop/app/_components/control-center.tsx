@@ -64,6 +64,7 @@ type DeployPortMode = "auto" | "manual";
 type PendingAction =
   | "enableVpn"
   | "disableVpn"
+  | "toggleNextVpnLog"
   | "validate"
   | "deploy"
   | "exportInviteFile"
@@ -805,6 +806,10 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const [splitTunnelSaving, setSplitTunnelSaving] = useState(false);
   const [splitTunnelError, setSplitTunnelError] = useState<string | null>(null);
   const [splitTunnelSearch, setSplitTunnelSearch] = useState("");
+  const [recordNextVpnSessionLog, setRecordNextVpnSessionLog] =
+    useState(false);
+  const [nextVpnSessionLogError, setNextVpnSessionLogError] =
+    useState<string | null>(null);
   const [ownerProfile, setOwnerProfile] = useState<OwnerAccessProfile | null>(
     null,
   );
@@ -1653,11 +1658,70 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     }
     void persistSplitTunnelSelection([]);
   };
+
+  const loadNextVpnSessionLogState = async () => {
+    if (!isAndroidClient) {
+      return;
+    }
+
+    try {
+      const res = await coreApi.getNextVpnSessionLogState();
+      const data = res.data;
+      setRecordNextVpnSessionLog(Boolean(data.enabled));
+      if (!res.ok) {
+        const nextError =
+          (data as { error?: string }).error ?? t("unknownError");
+        setNextVpnSessionLogError(nextError);
+      } else {
+        setNextVpnSessionLogError(null);
+      }
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error
+          ? requestError.message
+          : t("unknownError");
+      setNextVpnSessionLogError(message);
+    }
+  };
+
+  const handleToggleNextVpnSessionLog = () => {
+    if (!isAndroidClient || isBusy("toggleNextVpnLog")) {
+      return;
+    }
+
+    const nextEnabled = !recordNextVpnSessionLog;
+    setPendingAction("toggleNextVpnLog");
+    setNextVpnSessionLogError(null);
+    startTransition(async () => {
+      try {
+        const res = await coreApi.setNextVpnSessionLogState(nextEnabled);
+        const data = res.data;
+        setRecordNextVpnSessionLog(Boolean(data.enabled));
+        if (!res.ok) {
+          throw new Error(
+            (data as { error?: string }).error ?? t("unknownError"),
+          );
+        }
+      } catch (requestError) {
+        const message =
+          requestError instanceof Error
+            ? requestError.message
+            : t("unknownError");
+        setNextVpnSessionLogError(message);
+      } finally {
+        setPendingAction(null);
+      }
+    });
+  };
+
   const loadSplitTunnelSelectionEffect = useEffectEvent(() => {
     void loadSplitTunnelSelection();
   });
   const loadInstalledAppsEffect = useEffectEvent(() => {
     void loadInstalledApps();
+  });
+  const loadNextVpnSessionLogStateEffect = useEffectEvent(() => {
+    void loadNextVpnSessionLogState();
   });
 
   useEffect(() => {
@@ -1893,6 +1957,13 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     splitTunnelAppsLoaded,
     splitTunnelAppsLoading,
   ]);
+
+  useEffect(() => {
+    if (!isAndroidClient || activeSheet !== "apps") {
+      return;
+    }
+    loadNextVpnSessionLogStateEffect();
+  }, [activeSheet, isAndroidClient]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !isAndroidClient) {
@@ -5264,6 +5335,46 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                   {isBusy("runTest") ? t("testing") : t("runTest")}
                 </button>
               </div>
+
+              <section className="sheet-card">
+                <div className="sheet-card__head">
+                  <div>
+                    <span className="section-eyebrow">{t("navLogs")}</span>
+                    <strong>{t("nextVpnSessionLogTitle")}</strong>
+                  </div>
+                  <span className="sheet-card__badge">
+                    {recordNextVpnSessionLog
+                      ? t("stateEnabled")
+                      : t("stateDisabled")}
+                  </span>
+                </div>
+                <p className="compact-note">{t("nextVpnSessionLogText")}</p>
+
+                {recordNextVpnSessionLog ? (
+                  <p className="status-banner">
+                    {t("nextVpnSessionLogArmed")}
+                  </p>
+                ) : null}
+
+                {nextVpnSessionLogError ? (
+                  <p className="status-banner status-error">
+                    {nextVpnSessionLogError}
+                  </p>
+                ) : null}
+
+                <div className="sheet-actions">
+                  <button
+                    className="ghost"
+                    type="button"
+                    onClick={handleToggleNextVpnSessionLog}
+                    disabled={isBusy("toggleNextVpnLog")}
+                  >
+                    {recordNextVpnSessionLog
+                      ? t("nextVpnSessionLogDisarm")
+                      : t("nextVpnSessionLogArm")}
+                  </button>
+                </div>
+              </section>
 
               {ownerRuntimeLabPanelVisible ? (
                 <div className="command-card">
