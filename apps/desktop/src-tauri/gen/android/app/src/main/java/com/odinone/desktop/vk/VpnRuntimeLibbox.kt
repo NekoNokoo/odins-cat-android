@@ -1710,6 +1710,43 @@ object VpnRuntimeLibbox {
         )
     }
 
+    private fun readCdnAntiWhitelistRealitySettings(
+        profile: JSObject,
+        fallback: RealitySettings,
+        options: CdnAntiWhitelistRuntimeOptions,
+    ): RealitySettings {
+        val stagedFallbacks = profile.optJSONObject("stagedFallbacks")
+        val edge =
+            stagedFallbacks?.optJSONObject("realityYandexEdgeProxy")
+                ?: stagedFallbacks?.optJSONObject("realityYandexEdge")
+                ?: return fallback
+        val connectHost = edge.optString("connectHost", "").trim()
+        val connectPort = edge.optInt("connectPort", 0)
+        if (
+            connectHost.isBlank() ||
+                connectPort <= 0 ||
+                !connectHost.equals(options.connectHost, ignoreCase = true) ||
+                connectPort != options.connectPort
+        ) {
+            return fallback
+        }
+
+        val uuid = edge.optString("uuid", "").trim()
+        if (uuid.isBlank()) {
+            return fallback
+        }
+
+        return fallback.copy(
+            serverHost = options.connectHost,
+            serverPort = options.connectPort,
+            uuid = uuid,
+            flow = edge.optString("flow", fallback.flow).trim().ifBlank { fallback.flow },
+            serverName = edge.optString("serverName", "").trim().ifBlank { fallback.serverName },
+            publicKey = edge.optString("publicKey", "").trim().ifBlank { fallback.publicKey },
+            shortId = edge.optString("shortId", "").trim().ifBlank { fallback.shortId },
+        )
+    }
+
     private fun readWireGuardSettings(profile: JSObject): WireGuardSettings {
         val wireGuard =
             profile.optJSONObject("wireguard")
@@ -1753,8 +1790,13 @@ object VpnRuntimeLibbox {
         socksPort: Int,
         socksAddress: String,
     ): PreparedRuntime {
-        val reality = readRealitySettings(profile, serverHost)
         val options = readCdnAntiWhitelistRuntimeOptions(args, profile, serverHost)
+        val reality =
+            readCdnAntiWhitelistRealitySettings(
+                profile = profile,
+                fallback = readRealitySettings(profile, serverHost),
+                options = options,
+            )
         val scaffoldPath = File(runtimeDir, "cdn-anti-whitelist-scaffold.json")
         scaffoldPath.writeText(buildCdnAntiWhitelistScaffoldDocument(serverHost, reality, options))
         if (options.activationState == ACTIVATION_STATE_ACTIVE) {
@@ -1798,8 +1840,13 @@ object VpnRuntimeLibbox {
         socksPort: Int,
         socksAddress: String,
     ): PreparedRuntime {
-        val reality = readRealitySettings(profile, serverHost)
         val options = readCdnAntiWhitelistRuntimeOptions(args, profile, serverHost)
+        val reality =
+            readCdnAntiWhitelistRealitySettings(
+                profile = profile,
+                fallback = readRealitySettings(profile, serverHost),
+                options = options,
+            )
         if (options.activationState != ACTIVATION_STATE_ACTIVE) {
             throw IllegalArgumentException("Android CDN Xray-native runtime requires an active owner-lab CDN configuration")
         }
@@ -2850,8 +2897,13 @@ object VpnRuntimeLibbox {
         }
         require(serverHost.isNotBlank()) { "serverHost is required for CDN config rendering" }
         val normalized = normalizeRuntimeArgs(args)
-        val reality = readRealitySettings(profile, serverHost)
         val options = readCdnAntiWhitelistRuntimeOptions(normalized, profile, serverHost)
+        val reality =
+            readCdnAntiWhitelistRealitySettings(
+                profile = profile,
+                fallback = readRealitySettings(profile, serverHost),
+                options = options,
+            )
         return buildCdnAntiWhitelistConfig(DEFAULT_SOCKS_PORT, reality, options)
     }
 
@@ -2863,8 +2915,13 @@ object VpnRuntimeLibbox {
         }
         require(serverHost.isNotBlank()) { "serverHost is required for CDN config rendering" }
         val normalized = normalizeRuntimeArgs(args)
-        val reality = readRealitySettings(profile, serverHost)
         val options = readCdnAntiWhitelistRuntimeOptions(normalized, profile, serverHost)
+        val reality =
+            readCdnAntiWhitelistRealitySettings(
+                profile = profile,
+                fallback = readRealitySettings(profile, serverHost),
+                options = options,
+            )
         return buildXrayNativeCdnAntiWhitelistConfig(DEFAULT_SOCKS_PORT, reality, options)
     }
 

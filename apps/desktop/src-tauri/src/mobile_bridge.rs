@@ -2329,11 +2329,13 @@ fn sync_invite_reality_staged_fallbacks(invite: &mut InviteProfileFile) {
         .and_then(Value::as_object_mut)
     {
         edge.insert("originPort".to_string(), json!(port));
-        edge.insert("serverName".to_string(), json!(server_name));
-        edge.insert("publicKey".to_string(), json!(public_key));
-        edge.insert("shortId".to_string(), json!(short_id));
-        edge.insert("uuid".to_string(), json!(uuid));
-        edge.insert("flow".to_string(), json!(flow));
+        if !yandex_edge_keeps_existing_client_identity(edge) {
+            edge.insert("serverName".to_string(), json!(server_name));
+            edge.insert("publicKey".to_string(), json!(public_key));
+            edge.insert("shortId".to_string(), json!(short_id));
+            edge.insert("uuid".to_string(), json!(uuid));
+            edge.insert("flow".to_string(), json!(flow));
+        }
         if !invite.server_host.trim().is_empty() {
             edge.insert("originHost".to_string(), json!(invite.server_host.trim()));
         }
@@ -2344,17 +2346,38 @@ fn sync_invite_reality_staged_fallbacks(invite: &mut InviteProfileFile) {
         .and_then(Value::as_object_mut)
     {
         edge_proxy.insert("originPort".to_string(), json!(port));
-        edge_proxy.insert("serverName".to_string(), json!(server_name));
-        edge_proxy.insert("publicKey".to_string(), json!(public_key));
-        edge_proxy.insert("shortId".to_string(), json!(short_id));
-        edge_proxy.insert("uuid".to_string(), json!(uuid));
-        edge_proxy.insert("flow".to_string(), json!(flow));
+        if !yandex_edge_keeps_existing_client_identity(edge_proxy) {
+            edge_proxy.insert("serverName".to_string(), json!(server_name));
+            edge_proxy.insert("publicKey".to_string(), json!(public_key));
+            edge_proxy.insert("shortId".to_string(), json!(short_id));
+            edge_proxy.insert("uuid".to_string(), json!(uuid));
+            edge_proxy.insert("flow".to_string(), json!(flow));
+        }
         edge_proxy.insert("ownerRealityEgress".to_string(), Value::Bool(false));
-        edge_proxy.insert("transport".to_string(), json!("tcp"));
+        if yandex_edge_keeps_existing_client_identity(edge_proxy) {
+            edge_proxy.insert("transport".to_string(), json!(YANDEX_EDGE_CDN_TRANSPORT));
+        } else {
+            edge_proxy.insert("transport".to_string(), json!("tcp"));
+        }
         if !invite.server_host.trim().is_empty() {
             edge_proxy.insert("originHost".to_string(), json!(invite.server_host.trim()));
         }
     }
+}
+
+fn yandex_edge_keeps_existing_client_identity(
+    fallback: &serde_json::Map<String, Value>,
+) -> bool {
+    fallback
+        .get("routingMode")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|value| value == EDGE_ROUTING_MODE_XRAY_PROXY)
+        && fallback
+            .get("uuid")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
 }
 
 fn invite_effective_reality_port(invite: &InviteProfileFile) -> Option<u16> {
@@ -7575,6 +7598,67 @@ mod tests {
         assert_eq!(
             invite.staged_fallbacks["realityRelayOwnerEgress"]["ownerEgressPort"].as_u64(),
             Some(55555)
+        );
+    }
+
+    #[test]
+    fn decode_invite_preserves_xray_proxy_edge_uuid_for_cdn_runtime() {
+        let raw = serde_json::json!({
+            "id": "guest-010",
+            "role": "guest",
+            "name": "Odin's Cat Owner Node",
+            "protocol": "vless-reality",
+            "transport": "xray",
+            "serverHost": "95.81.120.226",
+            "endpointPort": 55555,
+            "endpoint": "95.81.120.226:55555",
+            "fingerprint": "482471d931882080",
+            "status": "active",
+            "vlessReality": {
+                "port": 55555,
+                "serverName": "www.cloudflare.com",
+                "publicKey": "guest-public-key",
+                "shortId": "guest-short-id",
+                "uuid": "guest-uuid-1111-2222-3333-444444444444",
+                "flow": "xtls-rprx-vision"
+            },
+            "stagedFallbacks": {
+                "vlessReality": {
+                    "port": 55555,
+                    "serverName": "www.cloudflare.com",
+                    "publicKey": "guest-public-key",
+                    "shortId": "guest-short-id",
+                    "uuid": "stale-guest-uuid",
+                    "flow": "xtls-rprx-vision"
+                },
+                "realityYandexEdgeProxy": {
+                    "connectHost": "62.84.123.148",
+                    "connectPort": 443,
+                    "originHost": "95.81.120.226",
+                    "originPort": 55555,
+                    "serverName": "www.cloudflare.com",
+                    "publicKey": "owner-edge-public-key",
+                    "shortId": "owner-edge-short-id",
+                    "uuid": "owner-edge-uuid-aaaa-bbbb-cccc-dddddddddddd",
+                    "flow": "xtls-rprx-vision",
+                    "routingMode": "xray-proxy"
+                }
+            }
+        })
+        .to_string();
+
+        let invite = super::decode_invite(&raw).expect("invite should decode");
+        assert_eq!(
+            invite.vless_reality.uuid.as_str(),
+            "guest-uuid-1111-2222-3333-444444444444"
+        );
+        assert_eq!(
+            invite.staged_fallbacks["realityYandexEdgeProxy"]["uuid"].as_str(),
+            Some("owner-edge-uuid-aaaa-bbbb-cccc-dddddddddddd")
+        );
+        assert_eq!(
+            invite.staged_fallbacks["realityYandexEdgeProxy"]["transport"].as_str(),
+            Some("xhttp")
         );
     }
 

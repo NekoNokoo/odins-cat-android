@@ -1119,7 +1119,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       localTunnel?.status === "running" &&
       (localTunnel?.socksAddress || localTunnel?.runtimeFamily === "vk-relay"),
   );
-  const exportableInviteProfile = guestProfile ?? importedProfile;
+  const exportableInviteProfile = ownerProfile?.exists
+    ? guestProfile
+    : guestProfile ?? importedProfile;
   const exportableInviteFileName = exportableInviteProfile
     ? buildInviteFileName(exportableInviteProfile)
     : "";
@@ -2193,6 +2195,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             window.clearInterval(timer);
             setShowDeploymentOverlay(false);
             if (statusData.status === "done") {
+              setGuestProfile(null);
               setSuccessNotice(
                 flow === "edge-attach"
                   ? t("edgeAttachSuccess")
@@ -2331,6 +2334,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const applyImportedProfile = (profile: InviteProfile) => {
     const importedTransport = normalizeTransport(profile.transport);
     const importedProtocol = normalizeInviteProtocol(profile.protocol);
+    setGuestProfile(null);
     setImportedProfile(profile);
     setSelectedAccessMode(
       importedProfilePrefersCdnYandexMode(profile)
@@ -3876,6 +3880,21 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           return;
         }
         androidShareOpened = true;
+        const shareData = shareRes.data as {
+          exportPath?: string;
+          fileName?: string;
+        };
+        if (shareData.exportPath) {
+          setInviteFileNotice(
+            formatInviteExportNotice(
+              t,
+              shareData.fileName || exportableInviteFileName,
+              shareData.exportPath,
+            ),
+          );
+          setPendingAction(null);
+          return;
+        }
       }
 
       try {

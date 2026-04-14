@@ -1,8 +1,12 @@
 package com.odinone.desktop.vk
 
 import android.app.Activity
+import android.content.ContentValues
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.net.VpnService
 import android.util.Log
 import androidx.activity.result.ActivityResult
@@ -16,6 +20,7 @@ import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import java.io.File
+import java.io.IOException
 import kotlin.concurrent.thread
 import org.json.JSONArray
 
@@ -291,27 +296,16 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
         }
 
         runCatching {
-            val exportsDir = File(activity.cacheDir, "invite-share").apply {
-                mkdirs()
-            }
             val sanitizedName =
                 args.fileName
                     .ifBlank { "odin-one-access.odinone-access.json" }
                     .replace(Regex("[^A-Za-z0-9._-]"), "_")
-            val inviteFile = File(exportsDir, sanitizedName)
-            inviteFile.writeText(args.contents, Charsets.UTF_8)
-
-            val uri =
-                FileProvider.getUriForFile(
-                    activity,
-                    "${activity.packageName}.fileprovider",
-                    inviteFile,
-                )
+            val savedInvite = saveInviteToPublicDownloads(sanitizedName, args.contents)
 
             val shareIntent =
                 Intent(Intent.ACTION_SEND).apply {
                     type = args.mimeType.ifBlank { "application/json" }
-                    putExtra(Intent.EXTRA_STREAM, uri)
+                    putExtra(Intent.EXTRA_STREAM, savedInvite.uri)
                     putExtra(Intent.EXTRA_SUBJECT, sanitizedName)
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
@@ -323,14 +317,73 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
             JSObject().apply {
                 put("ok", true)
                 put("fileName", sanitizedName)
-                put("cachePath", inviteFile.absolutePath)
-                put("contentUri", uri.toString())
+                put("exportPath", savedInvite.exportPath)
+                put("contentUri", savedInvite.uri.toString())
             }
         }.onSuccess { payload ->
             invoke.resolve(payload)
         }.onFailure { error ->
             invoke.reject(error.message ?: "Failed to open Android share sheet.")
         }
+    }
+
+    private data class SavedInviteFile(
+        val uri: Uri,
+        val exportPath: String,
+    )
+
+    private fun saveInviteToPublicDownloads(fileName: String, contents: String): SavedInviteFile {
+        val folderName = "Odin's Cat"
+        val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/$folderName"
+        val mimeType = "application/json"
+        val bytes = contents.toByteArray(Charsets.UTF_8)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = activity.contentResolver
+            val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            val values =
+                ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                    put(MediaStore.Downloads.MIME_TYPE, mimeType)
+                    put(MediaStore.Downloads.RELATIVE_PATH, relativePath)
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+            val uri =
+                resolver.insert(collection, values)
+                    ?: throw IOException("Failed to create invite file in public Downloads.")
+            try {
+                resolver.openOutputStream(uri, "wt")?.use { output ->
+                    output.write(bytes)
+                    output.flush()
+                } ?: throw IOException("Failed to open invite file output stream.")
+                values.clear()
+                values.put(MediaStore.Downloads.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            } catch (error: Exception) {
+                resolver.delete(uri, null, null)
+                throw error
+            }
+            return SavedInviteFile(
+                uri = uri,
+                exportPath = "${Environment.DIRECTORY_DOWNLOADS}/$folderName/$fileName",
+            )
+        }
+
+        val downloadsDir =
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val exportsDir = File(downloadsDir, folderName).apply { mkdirs() }
+        val inviteFile = File(exportsDir, fileName)
+        inviteFile.writeText(contents, Charsets.UTF_8)
+        val uri =
+            FileProvider.getUriForFile(
+                activity,
+                "${activity.packageName}.fileprovider",
+                inviteFile,
+            )
+        return SavedInviteFile(
+            uri = uri,
+            exportPath = inviteFile.absolutePath,
+        )
     }
 
     @Command

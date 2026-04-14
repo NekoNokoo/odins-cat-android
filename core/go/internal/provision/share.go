@@ -1012,11 +1012,13 @@ func syncInviteRealityStagedFallbacks(invite *inviteProfile) {
 	if raw, ok := invite.StagedFallbacks["realityYandexEdge"]; ok {
 		if fallback, ok := raw.(map[string]any); ok {
 			fallback["originPort"] = port
-			fallback["serverName"] = serverName
-			fallback["publicKey"] = publicKey
-			fallback["shortId"] = shortID
-			fallback["uuid"] = uuid
-			fallback["flow"] = flow
+			if !yandexEdgeKeepsExistingClientIdentity(fallback) {
+				fallback["serverName"] = serverName
+				fallback["publicKey"] = publicKey
+				fallback["shortId"] = shortID
+				fallback["uuid"] = uuid
+				fallback["flow"] = flow
+			}
 			if strings.TrimSpace(invite.ServerHost) != "" {
 				fallback["originHost"] = strings.TrimSpace(invite.ServerHost)
 			}
@@ -1026,18 +1028,32 @@ func syncInviteRealityStagedFallbacks(invite *inviteProfile) {
 	if raw, ok := invite.StagedFallbacks["realityYandexEdgeProxy"]; ok {
 		if fallback, ok := raw.(map[string]any); ok {
 			fallback["originPort"] = port
-			fallback["serverName"] = serverName
-			fallback["publicKey"] = publicKey
-			fallback["shortId"] = shortID
-			fallback["uuid"] = uuid
-			fallback["flow"] = flow
+			if !yandexEdgeKeepsExistingClientIdentity(fallback) {
+				fallback["serverName"] = serverName
+				fallback["publicKey"] = publicKey
+				fallback["shortId"] = shortID
+				fallback["uuid"] = uuid
+				fallback["flow"] = flow
+			}
 			fallback["ownerRealityEgress"] = false
-			fallback["transport"] = "tcp"
+			if yandexEdgeKeepsExistingClientIdentity(fallback) {
+				fallback["transport"] = inviteCdnYandexTransport
+			} else {
+				fallback["transport"] = "tcp"
+			}
 			if strings.TrimSpace(invite.ServerHost) != "" {
 				fallback["originHost"] = strings.TrimSpace(invite.ServerHost)
 			}
 		}
 	}
+}
+
+func yandexEdgeKeepsExistingClientIdentity(fallback map[string]any) bool {
+	routingMode, _ := fallback["routingMode"].(string)
+	uuid, _ := fallback["uuid"].(string)
+	return routingMode != "" &&
+		strings.TrimSpace(routingMode) == string(EdgeRoutingModeXrayProxy) &&
+		strings.TrimSpace(uuid) != ""
 }
 
 func enrichInviteProfile(invite *inviteProfile, owner inviteProfile, xrayState remoteXrayState) {
