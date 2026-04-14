@@ -13,6 +13,48 @@ import org.json.JSONArray
 private const val SPLIT_TUNNEL_PREFS_NAME = "odin_one_split_tunnel"
 private const val SPLIT_TUNNEL_SELECTION_KEY = "selection"
 
+private val DEFAULT_SPLIT_TUNNEL_EXCLUDE_PACKAGES =
+    normalizeSplitTunnelPackages(
+        listOf(
+            // Confirmed in the current VPN-detection research or already high-risk.
+            "com.yandex.browser",
+            "ru.yandex.searchplugin",
+            "ru.yandex.yandexmaps",
+            "com.vkontakte.android",
+            "ru.mts",
+            "ru.sberbankmobile",
+            "com.idamob.tinkoff.android",
+            "com.vk.vkvideo",
+            "com.wildberries.ru",
+            "ru.kinopoisk",
+            "ru.ozon.app.android",
+            "ru.samokat.app",
+            "ru.vk.store",
+            "ru.vtb24.mobilebanking.android",
+            "ru.yandex.music",
+            "com.avito.android",
+            "ru.alfabank.mobile.android",
+            "ru.dublgis.dgismobile",
+            "ru.sbermegamarket",
+            "ru.megafon.mlk",
+            "ru.megafon.lk",
+            "ru.ok.android",
+            "ru.oneme.app",
+            "com.vk.music",
+            "rtb.mobile.android",
+            // Best-effort aliases and adjacent apps we also want outside the VPN by default.
+            "ru.beru.android",
+            "ru.yandex.market",
+            "ru.foodfox.client",
+            "ru.mail.mailapp",
+            "ru.nspk.mirpay",
+            "ru.rostel",
+            "ru.yandex.taxi",
+            "com.dzen",
+            "ru.zen.android",
+        ),
+    )
+
 data class InstalledAppInfoSnapshot(
     val packageName: String,
     val appName: String,
@@ -49,10 +91,10 @@ object SplitTunnelSelectionStore {
     fun read(context: Context): SplitTunnelSelectionState {
         val raw = prefs(context).getString(SPLIT_TUNNEL_SELECTION_KEY, null)
         if (raw.isNullOrBlank()) {
-            return SplitTunnelSelectionState()
+            return defaultSelectionState()
         }
         return runCatching { SplitTunnelSelectionState.fromObject(JSObject(raw)) }
-            .getOrElse { SplitTunnelSelectionState() }
+            .getOrElse { defaultSelectionState() }
     }
 
     fun write(
@@ -73,6 +115,9 @@ object SplitTunnelSelectionStore {
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(SPLIT_TUNNEL_PREFS_NAME, Context.MODE_PRIVATE)
+
+    private fun defaultSelectionState() =
+        SplitTunnelSelectionState(excludePackages = DEFAULT_SPLIT_TUNNEL_EXCLUDE_PACKAGES)
 }
 
 fun normalizeSplitTunnelPackages(packages: Collection<String>): List<String> =
