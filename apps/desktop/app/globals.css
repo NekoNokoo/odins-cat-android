@@ -340,6 +340,83 @@ textarea {
   object-fit: contain;
 }
 
+.launch-intro {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: #fff;
+  isolation: isolate;
+}
+
+.launch-intro__backdrop {
+  position: absolute;
+  inset: 0;
+  background: #fff;
+}
+
+.launch-intro__cat-stage {
+  position: relative;
+  width: min(100vw, 560px);
+  height: 100vh;
+  display: grid;
+  place-items: center;
+}
+
+.launch-intro__cat-motion {
+  position: relative;
+  width: min(100vw, 560px);
+  height: 100vh;
+  display: grid;
+  place-items: center;
+}
+
+.launch-intro__video {
+  width: min(100vw, 560px);
+  max-height: 100vh;
+  display: block;
+  object-fit: contain;
+  grid-area: 1 / 1;
+}
+
+.launch-intro__video {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.launch-intro__video.is-ready {
+  opacity: 1;
+}
+
+.launch-intro.is-animating {
+  animation: launch-intro-overlay-exit 2200ms linear forwards;
+}
+
+@keyframes launch-intro-overlay-exit {
+  0% {
+    opacity: 1;
+  }
+
+  88% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .launch-intro,
+  .launch-intro * {
+    animation-duration: 120ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 120ms !important;
+  }
+}
+
 .mobile-shell {
   display: flex;
   flex-direction: column;
@@ -1781,6 +1858,11 @@ body > main.shell > section.workspace > .mobile-shell > .home-scroll {
   border: 1px solid var(--line);
   border-radius: 18px;
   background: linear-gradient(180deg, #fff 0%, #f8f7f1 100%);
+}
+
+.sheet-card--inset {
+  margin-top: 4px;
+  background: linear-gradient(180deg, #fbfbf8 0%, #f3f2ea 100%);
 }
 
 .sheet-card p {

@@ -24,23 +24,24 @@ const (
 )
 
 type Deployment struct {
-	DeploymentID  string              `json:"deploymentId"`
-	ServerHost    string              `json:"serverHost"`
-	DeployFlow    string              `json:"deployFlow,omitempty"`
-	Transport     string              `json:"transport"`
-	Engine        string              `json:"engine,omitempty"`
-	Protocol      string              `json:"protocol,omitempty"`
-	Status        string              `json:"status"`
-	Steps         []Step              `json:"steps"`
-	TurnPort      int                 `json:"turnPort,omitempty"`
-	WireGuardPort int                 `json:"wireGuardPort,omitempty"`
-	RealityPort   int                 `json:"realityPort,omitempty"`
-	EdgeEnabled   bool                `json:"edgeEnabled,omitempty"`
-	EdgeHost      string              `json:"edgeHost,omitempty"`
-	EdgePort      int                 `json:"edgePort,omitempty"`
-	HealthChecks  []Check             `json:"healthChecks,omitempty"`
-	ProtocolPack  []ProtocolPackEntry `json:"protocolPack,omitempty"`
-	Error         string              `json:"error,omitempty"`
+	DeploymentID    string              `json:"deploymentId"`
+	ServerHost      string              `json:"serverHost"`
+	DeployFlow      string              `json:"deployFlow,omitempty"`
+	Transport       string              `json:"transport"`
+	Engine          string              `json:"engine,omitempty"`
+	Protocol        string              `json:"protocol,omitempty"`
+	Status          string              `json:"status"`
+	Steps           []Step              `json:"steps"`
+	TurnPort        int                 `json:"turnPort,omitempty"`
+	WireGuardPort   int                 `json:"wireGuardPort,omitempty"`
+	RealityPort     int                 `json:"realityPort,omitempty"`
+	EdgeEnabled     bool                `json:"edgeEnabled,omitempty"`
+	EdgeHost        string              `json:"edgeHost,omitempty"`
+	EdgePort        int                 `json:"edgePort,omitempty"`
+	EdgeRoutingMode string              `json:"edgeRoutingMode,omitempty"`
+	HealthChecks    []Check             `json:"healthChecks,omitempty"`
+	ProtocolPack    []ProtocolPackEntry `json:"protocolPack,omitempty"`
+	Error           string              `json:"error,omitempty"`
 }
 
 type deploymentStore struct {
@@ -88,6 +89,7 @@ func StartDeployment(req Request) Deployment {
 		deployment.EdgeEnabled = true
 		deployment.EdgeHost = req.Edge.Server.Host
 		deployment.EdgePort = normalizedEdgePublicPort(req.Edge)
+		deployment.EdgeRoutingMode = string(normalizedEdgeRoutingMode(req.Edge))
 	}
 
 	store.mu.Lock()
@@ -128,11 +130,11 @@ func BuildPlan(req Request) Response {
 	warnings = append(warnings, "Protocol pack staging is enabled: Odin One keeps the current active data path, while preparing Russia-friendly fallback protocols for later rollout without Apple Network Extension entitlements.")
 
 	return Response{
-		ServerHost:   req.Server.Host,
-		DeployFlow:   string(flow),
-		Transport:    string(TransportXray),
-		Steps:        steps,
-		Warnings:     warnings,
+		ServerHost: req.Server.Host,
+		DeployFlow: string(flow),
+		Transport:  string(TransportXray),
+		Steps:      steps,
+		Warnings:   warnings,
 		ProtocolPack: buildProtocolPackWithFallbacks(
 			TransportXray,
 			0,
@@ -162,19 +164,19 @@ func buildPlanSteps(flow ProvisionFlow) []Step {
 				ID:          "edge-runtime-prep",
 				Label:       "Edge preparation",
 				Status:      StatusQueued,
-				Description: "Install socat on the edge host and write the passthrough manifest.",
+				Description: "Prepare the selected edge runtime and write the manifest for the new Yandex edge surface.",
 			},
 			{
 				ID:          "edge-configure",
 				Label:       "Edge wiring",
 				Status:      StatusQueued,
-				Description: "Install the systemd forwarder that exposes the origin REALITY port through the Yandex edge.",
+				Description: "Install the edge systemd service that exposes the current REALITY origin through the Yandex edge.",
 			},
 			{
 				ID:          "edge-service-start",
 				Label:       "Edge startup",
 				Status:      StatusQueued,
-				Description: "Start the edge passthrough service and verify that it can reach the current origin REALITY port.",
+				Description: "Start the selected edge service and verify that it can reach the current origin REALITY port.",
 			},
 			{
 				ID:          "profile-refresh",
@@ -482,8 +484,21 @@ func executeEdgeAttach(id string, req Request) error {
 	completeStep(id, 1)
 
 	publicPort := normalizedEdgePublicPort(req.Edge)
-	if err := ensureRemoteSocatInstalled(edgeClient); err != nil {
-		return err
+	routingMode := normalizedEdgeRoutingMode(req.Edge)
+	layout := buildYandexEdgeRuntimeLayout(publicPort, routingMode)
+	switch routingMode {
+	case EdgeRoutingModeSNIRouter:
+		if err := ensureRemoteHAProxyInstalled(edgeClient); err != nil {
+			return err
+		}
+	case EdgeRoutingModeXrayProxy:
+		if err := ensureRemoteEdgeXrayInstalled(edgeClient, layout.xrayPath); err != nil {
+			return err
+		}
+	default:
+		if err := ensureRemoteSocatInstalled(edgeClient); err != nil {
+			return err
+		}
 	}
 	manifestText, err := renderYandexEdgeManifest(
 		req.Edge.Server.Host,
@@ -495,36 +510,105 @@ func executeEdgeAttach(id string, req Request) error {
 		reality.ShortID,
 		reality.UUID,
 		reality.Flow,
+		routingMode,
+		layout,
 	)
 	if err != nil {
 		return err
 	}
-	if err := uploadFileWithSudo(edgeClient, whitelistEdgeManifestPath, []byte(manifestText), "0644"); err != nil {
+	if err := uploadFileWithSudo(edgeClient, layout.manifestPath, []byte(manifestText), "0644"); err != nil {
 		return err
+	}
+	if routingMode == EdgeRoutingModeSNIRouter {
+		haproxyConfig := renderYandexEdgeHAProxyConfig("0.0.0.0", publicPort, reality.ServerName, req.Server.Host, reality.Port)
+		if err := uploadFileWithSudo(edgeClient, layout.haproxyPath, []byte(haproxyConfig), "0644"); err != nil {
+			return err
+		}
+	} else if routingMode == EdgeRoutingModeXrayProxy {
+		if _, err := runRemote(edgeClient, renderYandexEdgeXrayProxyCertificateCommand(layout, req.Edge.Server.Host)); err != nil {
+			return err
+		}
+		xrayConfig, err := renderYandexEdgeXrayProxyConfig(
+			publicPort,
+			layout.xrayCert,
+			layout.xrayKey,
+			req.Server.Host,
+			reality.Port,
+			reality.ServerName,
+			reality.PublicKey,
+			reality.ShortID,
+			reality.UUID,
+			reality.Flow,
+		)
+		if err != nil {
+			return err
+		}
+		if err := uploadFileWithSudo(edgeClient, layout.xrayConfig, []byte(xrayConfig), "0644"); err != nil {
+			return err
+		}
 	}
 	completeStep(id, 2)
 
-	unitText := renderYandexEdgeSystemdUnit(req.Server.Host, reality.Port, publicPort)
-	if err := uploadFileWithSudo(edgeClient, whitelistEdgeServicePath, []byte(unitText), "0644"); err != nil {
+	unitText := renderYandexEdgeTCPForwardSystemdUnit(req.Server.Host, reality.Port, publicPort)
+	if routingMode == EdgeRoutingModeSNIRouter {
+		unitText = renderYandexEdgeSNIRouterSystemdUnit(layout.haproxyPath)
+	} else if routingMode == EdgeRoutingModeXrayProxy {
+		unitText = renderYandexEdgeXrayProxySystemdUnit(layout.xrayPath, layout.xrayConfig)
+	}
+	if err := uploadFileWithSudo(edgeClient, layout.servicePath, []byte(unitText), "0644"); err != nil {
 		return err
 	}
 	completeStep(id, 3)
 
-	if _, err := runRemote(edgeClient, remoteRootShell("systemctl daemon-reload && systemctl enable whitelist-yandex-edge.service && systemctl restart whitelist-yandex-edge.service && sleep 2")); err != nil {
+	if routingMode == EdgeRoutingModeSNIRouter {
+		if _, err := runRemote(edgeClient, remoteRootShell(fmt.Sprintf("haproxy -c -f %s", quoteShell(layout.haproxyPath)))); err != nil {
+			return err
+		}
+	} else if routingMode == EdgeRoutingModeXrayProxy {
+		if _, err := runRemote(edgeClient, remoteRootShell(fmt.Sprintf("%s version >/dev/null", quoteShell(layout.xrayPath)))); err != nil {
+			return err
+		}
+	}
+	if _, err := runRemote(
+		edgeClient,
+		remoteRootShell(
+			fmt.Sprintf(
+				"systemctl daemon-reload && systemctl enable %s && systemctl restart %s && sleep 2",
+				quoteShell(layout.serviceName),
+				quoteShell(layout.serviceName),
+			),
+		),
+	); err != nil {
 		return err
 	}
-	healthCommand := remoteRootShell(fmt.Sprintf(
-		"systemctl is-active whitelist-yandex-edge.service && ss -H -ltn | awk '{print $4}' | grep -Eq '(^|\\]|:)%d$' && timeout 8 bash -lc 'cat </dev/null >/dev/tcp/%s/%d'",
-		publicPort,
-		req.Server.Host,
-		reality.Port,
-	))
+	healthCommand := fmt.Sprintf(
+		"%s && %s",
+		renderEdgeServiceReadyCommand(layout.serviceName, publicPort),
+		remoteRootShell(fmt.Sprintf(
+			"timeout 8 bash -lc 'cat </dev/null >/dev/tcp/%s/%d'",
+			req.Server.Host,
+			reality.Port,
+		)),
+	)
 	if _, err := runRemote(edgeClient, healthCommand); err != nil {
 		return err
 	}
+	healthChecks, healthOK := runEdgeAttachHealthChecks(edgeClient, layout, routingMode, publicPort, req.Server.Host, reality.Port)
+	setDeploymentHealthChecks(id, healthChecks)
+	if !healthOK {
+		return fmt.Errorf("edge attach health checks failed")
+	}
 	completeStep(id, 4)
 
-	patchedOwnerProfile, protocolPack, err := patchOwnerProfileWithYandexEdge(ownerText, req.Edge.Server.Host, publicPort, req.Server.Host, reality)
+	patchedOwnerProfile, protocolPack, err := patchOwnerProfileWithYandexEdge(
+		ownerText,
+		req.Edge.Server.Host,
+		publicPort,
+		req.Server.Host,
+		reality,
+		routingMode,
+		nil,
+	)
 	if err != nil {
 		return err
 	}
@@ -561,6 +645,7 @@ func executeEdgeAttach(id string, req Request) error {
 	deployment.EdgeEnabled = true
 	deployment.EdgeHost = req.Edge.Server.Host
 	deployment.EdgePort = publicPort
+	deployment.EdgeRoutingMode = string(routingMode)
 	store.items[id] = deployment
 	store.mu.Unlock()
 	completeStep(id, 5)
@@ -568,7 +653,7 @@ func executeEdgeAttach(id string, req Request) error {
 	return nil
 }
 
-func patchOwnerProfileWithYandexEdge(rawJSON string, edgeHost string, publicPort int, originHost string, reality realityFallback) (string, []ProtocolPackEntry, error) {
+func patchOwnerProfileWithYandexEdge(rawJSON string, edgeHost string, publicPort int, originHost string, reality realityFallback, routingMode EdgeRoutingMode, edgeClientReality *realityFallback) (string, []ProtocolPackEntry, error) {
 	var profile ownerProfile
 	if err := json.Unmarshal([]byte(rawJSON), &profile); err != nil {
 		return "", nil, fmt.Errorf("parse owner profile: %w", err)
@@ -589,6 +674,34 @@ func patchOwnerProfileWithYandexEdge(rawJSON string, edgeHost string, publicPort
 		reality.ShortID,
 		reality.UUID,
 		reality.Flow,
+	)
+	if fallback, ok := profile.StagedFallbacks["realityYandexEdge"].(map[string]any); ok {
+		fallback["routingMode"] = routingMode
+		fallback["source"] = buildYandexEdgeFallbackSource(publicPort, routingMode)
+		fallback["tag"] = buildYandexEdgeFallbackTag(edgeHost, publicPort, routingMode)
+	}
+	if fallback, ok := profile.StagedFallbacks["realityYandexEdgeProxy"].(map[string]any); ok {
+		fallback["routingMode"] = routingMode
+		fallback["source"] = buildYandexEdgeFallbackSource(publicPort, routingMode) + ":proxy"
+		fallback["tag"] = buildYandexEdgeFallbackTag(edgeHost, publicPort, routingMode) + "-proxy"
+		fallback["ownerRealityEgress"] = false
+		if routingMode == EdgeRoutingModeXrayProxy {
+			fallback["transport"] = inviteCdnYandexTransport
+			fallback["description"] = fmt.Sprintf("Edge-terminated Yandex edge bridge mode. The client first connects to the dedicated edge xhttp inbound on %s:%d, then the Yandex VM forwards traffic to the stable REALITY origin %s:%d.", strings.TrimSpace(edgeHost), publicPort, strings.TrimSpace(originHost), reality.Port)
+		} else if edgeClientReality != nil {
+			fallback["connectPort"] = edgeClientReality.Port
+			fallback["serverName"] = edgeClientReality.ServerName
+			fallback["publicKey"] = edgeClientReality.PublicKey
+			fallback["shortId"] = edgeClientReality.ShortID
+			fallback["uuid"] = edgeClientReality.UUID
+			fallback["flow"] = edgeClientReality.Flow
+			fallback["description"] = fmt.Sprintf("Edge-terminated Yandex edge proxy mode. The client first connects to the dedicated edge REALITY inbound on %s:%d, then the Yandex VM forwards traffic to the stable REALITY origin %s:%d.", strings.TrimSpace(edgeHost), publicPort, strings.TrimSpace(originHost), reality.Port)
+		}
+	}
+	profile.AndroidRuntime = effectiveOwnerAndroidRuntime(
+		profile.ServerHost,
+		profile.StagedFallbacks,
+		profile.AndroidRuntime,
 	)
 	protocolPack := buildProtocolPackWithFallbacks(
 		Transport(profile.Transport),
@@ -611,6 +724,8 @@ func protocolPackFallbacks(protocolPack []ProtocolPackEntry) map[string]any {
 		switch entry.ID {
 		case "vless-reality-yandex-edge":
 			fallbacks["realityYandexEdge"] = map[string]any{"connectPort": entry.Port}
+		case "vless-reality-yandex-edge-proxy":
+			fallbacks["realityYandexEdgeProxy"] = map[string]any{"connectPort": entry.Port}
 		case "vless-reality-relay-owner":
 			fallbacks["realityRelayOwnerEgress"] = map[string]any{}
 		case "vless-reality-relay-direct":
@@ -629,6 +744,94 @@ func saveLocalOwnerProfile(host string, data []byte) error {
 		return fmt.Errorf("save local owner profile: %w", err)
 	}
 	return nil
+}
+
+func runEdgeAttachHealthChecks(client *ssh.Client, layout yandexEdgeRuntimeLayout, routingMode EdgeRoutingMode, publicPort int, originHost string, originPort int) ([]Check, bool) {
+	type remoteCheck struct {
+		key           string
+		label         string
+		cmd           string
+		successDetail string
+	}
+
+	checks := []remoteCheck{
+		{
+			key:           "edge-service-active",
+			label:         "Edge service active",
+			cmd:           remoteRootShell(fmt.Sprintf("systemctl is-active %s", quoteShell(layout.serviceName))),
+			successDetail: fmt.Sprintf("%s is active.", layout.serviceName),
+		},
+		{
+			key:           "edge-public-listener",
+			label:         "Edge public listener",
+			cmd:           remoteRootShell(fmt.Sprintf("ss -H -ltn | awk '{print $4}' | grep -Eq '(^|\\]|:)%d$'", publicPort)),
+			successDetail: fmt.Sprintf("%d/tcp is listening on the edge host.", publicPort),
+		},
+		{
+			key:           "edge-origin-reachability",
+			label:         "Edge to origin reachability",
+			cmd:           remoteRootShell(fmt.Sprintf("timeout 8 bash -lc 'cat </dev/null >/dev/tcp/%s/%d'", originHost, originPort)),
+			successDetail: fmt.Sprintf("Edge can reach the REALITY origin on %s:%d.", originHost, originPort),
+		},
+		{
+			key:           "edge-manifest",
+			label:         "Edge manifest",
+			cmd:           remoteRootShell(fmt.Sprintf("test -s %s", quoteShell(layout.manifestPath))),
+			successDetail: fmt.Sprintf("Edge manifest is present at %s.", layout.manifestPath),
+		},
+	}
+
+	switch routingMode {
+	case EdgeRoutingModeSNIRouter:
+		checks = append(checks, remoteCheck{
+			key:           "edge-haproxy-config",
+			label:         "Edge HAProxy config",
+			cmd:           remoteRootShell(fmt.Sprintf("haproxy -c -f %s", quoteShell(layout.haproxyPath))),
+			successDetail: fmt.Sprintf("HAProxy config passes syntax validation at %s.", layout.haproxyPath),
+		})
+	case EdgeRoutingModeXrayProxy:
+		checks = append(checks, remoteCheck{
+			key:           "edge-xray-config",
+			label:         "Edge xray config",
+			cmd:           remoteRootShell(fmt.Sprintf("%s run -test -config %s", quoteShell(layout.xrayPath), quoteShell(layout.xrayConfig))),
+			successDetail: fmt.Sprintf("Xray config passes syntax validation at %s.", layout.xrayConfig),
+		})
+		checks = append(checks, remoteCheck{
+			key:           "edge-xray-cert",
+			label:         "Edge xray certificate",
+			cmd:           remoteRootShell(fmt.Sprintf("test -s %s && test -s %s", quoteShell(layout.xrayCert), quoteShell(layout.xrayKey))),
+			successDetail: fmt.Sprintf("Xray bridge certificate and key are present at %s and %s.", layout.xrayCert, layout.xrayKey),
+		})
+	default:
+		checks = append(checks, remoteCheck{
+			key:           "edge-socat-runtime",
+			label:         "Edge socat runtime",
+			cmd:           remoteRootShell("command -v socat >/dev/null"),
+			successDetail: "socat is installed for tcp-forward mode.",
+		})
+	}
+
+	results := make([]Check, 0, len(checks))
+	allOK := true
+	for _, item := range checks {
+		output, err := runRemote(client, item.cmd)
+		ok := err == nil
+		detail := strings.TrimSpace(output)
+		if ok && detail == "" {
+			detail = item.successDetail
+		}
+		if err != nil {
+			detail = err.Error()
+		}
+		results = append(results, Check{
+			Key:    item.key,
+			Label:  item.label,
+			OK:     ok,
+			Detail: detail,
+		})
+		allOK = allOK && ok
+	}
+	return results, allOK
 }
 
 func renderRemoteXrayInstallCommand(downloadURL, targetPath string) string {

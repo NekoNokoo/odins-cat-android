@@ -100,6 +100,17 @@ pub(crate) async fn set_split_tunnel_selection<T: Serialize>(
     run_mobile_command(app, "setSplitTunnelSelection", payload).await
 }
 
+pub(crate) async fn get_next_vpn_session_log_state(app: &AppHandle) -> Result<Value, String> {
+    run_mobile_command(app, "getNextVpnSessionLogState", ()).await
+}
+
+pub(crate) async fn set_next_vpn_session_log_state<T: Serialize>(
+    app: &AppHandle,
+    payload: T,
+) -> Result<Value, String> {
+    run_mobile_command(app, "setNextVpnSessionLogState", payload).await
+}
+
 pub(crate) async fn share_invite_file<T: Serialize>(
     app: &AppHandle,
     payload: T,

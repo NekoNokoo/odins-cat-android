@@ -21,6 +21,12 @@ Right now the family has two hidden states:
   - activates only the narrow `VLESS + WS + TLS` lab path
   - stays owner-only
   - stays out of boot restore / system restore rollout
+- `cdn-xhttp-lab`
+  - keeps the additive `xhttp` owner lane as an Xray-native target package
+- `cdn-xhttp-native-lab`
+  - activates the owner-only Android native `xray` sidecar lane for true handset `xhttp` validation
+- `cdn-httpupgrade-lab`
+  - activates the additive `httpupgrade` owner lane when `xhttp` is not accepted by the Android runtime
 
 That means this runbook has two phases:
 
@@ -105,11 +111,13 @@ ODIN_ONE_CDN_ORIGIN_PATH=/odin-origin \
 
 That wrapper runs preflight, captures the stable control lane, applies the hidden candidate preset, builds compare/report/checklist artifacts, and restores the handset to baseline unless `--skip-restore` is used.
 
+The current recommended preset is `cdn-httpupgrade-lab`, because it is the first CDN lane on this branch that now survives a real Android handset start and connectivity check.
+
 When the next goal is server-confirmed handset traffic rather than just candidate surfacing, use:
 
 ```bash
 apps/desktop/scripts/android-cdn-front-hit-check.sh \
-  --preset cdn-ws-lab \
+  --preset cdn-httpupgrade-lab \
   --plan-file /tmp/odin-one-cdn-plan.json \
   --plan-tag edge-primary
 ```
@@ -140,10 +148,54 @@ apps/desktop/scripts/android-reality-profile-preset.sh cdn-scaffold
 To exercise the first runnable transport path, use:
 
 ```bash
-apps/desktop/scripts/android-reality-profile-preset.sh cdn-ws-lab
+apps/desktop/scripts/android-reality-profile-preset.sh cdn-httpupgrade-lab
 ```
 
-Both presets are intentionally owner-only and keep the family hidden.
+For reference and compare-runs, the other hidden lanes are still available:
+
+```bash
+apps/desktop/scripts/android-reality-profile-preset.sh cdn-ws-lab
+apps/desktop/scripts/android-reality-profile-preset.sh cdn-xhttp-lab
+apps/desktop/scripts/android-reality-profile-preset.sh cdn-xhttp-yandex-camouflage-lab
+```
+
+These presets are intentionally owner-only and keep the family hidden.
+
+At this stage, `cdn-xhttp-lab` remains useful as a deploy/config reference and as the source for owner-only Xray-native lab artifacts, but the current Android libbox runtime on this branch still rejects `xhttp` during config decode. Prefer `cdn-httpupgrade-lab` for handset validation until a native Android Xray lane lands.
+
+To prepare an owner-only Xray client config for the future native `xhttp` lane, use:
+
+```bash
+apps/desktop/scripts/android-cdn-xray-client-lab.sh \
+  --preset cdn-xhttp-lab \
+  --plan-file /tmp/odin-one-cdn-plan.json \
+  --owner-profile-json /path/to/owner.odinone-access.json
+```
+
+That helper emits:
+
+- a normalized owner-lab plan
+- an Xray client config with `streamSettings.network = "xhttp"` or `httpupgrade`
+- a short summary describing the visible front, dial target, and REALITY bootstrap material
+
+It does not switch the handset by itself. Its role is to make the next Android native Xray step additive and reproducible instead of rebuilding `xhttp` schema by hand.
+
+For the new `ya.ru`-ish first-hop camouflage variant, prepare a patched Yandex edge package with:
+
+```bash
+apps/desktop/scripts/android-cdn-yandex-edge-rollout.sh \
+  --preset cdn-xhttp-yandex-camouflage-lab \
+  --edge-host 62.84.123.148 \
+  --edge-ssh-key ~/.ssh/yandex_edge_test \
+  --prepare-only
+```
+
+That preset keeps the same additive `xhttp` lane, but rewrites the first hop to:
+
+- dial the Yandex edge IP directly
+- present `tlsServerName = ya.ru`
+- present `hostHeader = ya.ru`
+- allow insecure TLS verification only for this owner-lab camouflage path
 
 To override the hidden owner-lab front/origin without editing code, export:
 
@@ -209,6 +261,42 @@ That helper writes:
 - `plan.json`
 
 Use it as a reverse-proxy and loopback-core checklist for the owner-only lab pass.
+
+When the next step is patching the origin xray config additively for the same hidden lane, use:
+
+```bash
+apps/desktop/scripts/android-cdn-origin-lab-rollout.sh \
+  --preset cdn-xhttp-lab \
+  --host 95.81.120.226 \
+  --ssh-key ~/.ssh/afina_bot
+```
+
+That helper:
+
+- rebuilds the same normalized owner-lab package under `package/`
+- fetches the live `/opt/whitelist/config/xray-server.json` and owner profile
+- adds or updates one loopback-only `vless` inbound for `websocket` or `xhttp`
+- runs `xray run -test -config` before restart
+- writes `rollback.sh`, `summary.md`, and the patched config beside the package
+
+Keep the visible HTTPS front additive as well. The helper only patches the loopback origin inbound inside `whitelist-xray.service`; it does not replace the stable direct REALITY listener and it does not install a public reverse proxy automatically.
+
+If the host already uses a separate dedicated CDN lab service, patch that config in place instead of touching the main xray service:
+
+```bash
+ODIN_ONE_CDN_PLAN_FILE=tmp/android-cdn-owner-node-sslip-plan.json \
+ODIN_ONE_CDN_TRANSPORT=xhttp \
+ODIN_ONE_CDN_ORIGIN_PORT=8443 \
+  apps/desktop/scripts/android-cdn-origin-lab-rollout.sh \
+    --preset cdn-xhttp-lab \
+    --host 95.81.120.226 \
+    --ssh-key ~/.ssh/afina_bot \
+    --remote-config-path /opt/whitelist/config/xray-cdn-origin-lab.json \
+    --remote-service-name whitelist-cdn-origin-lab.service \
+    --lab-tag cdn-origin-in
+```
+
+That dedicated-service form is useful when a live owner-only front already reverse-proxies to `127.0.0.1:8443` and the next goal is converting the backend from `ws` to `xhttp` without changing the stable REALITY service.
 
 ## Server profile schema checklist
 

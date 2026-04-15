@@ -7,9 +7,9 @@ PACKAGE_NAME="${ODIN_ONE_ANDROID_PACKAGE:-com.odinone.desktop.vk}"
 ANDROID_SERIAL="${ODIN_ONE_ANDROID_SERIAL:-}"
 WAKE_MAIN_ACTIVITY="${ODIN_ONE_ANDROID_WAKE_MAIN_ACTIVITY:-false}"
 
-SERVICE_COMPONENT="${PACKAGE_NAME}/.VpnRuntimeService"
-DEBUG_RECEIVER_COMPONENT="${PACKAGE_NAME}/.VpnRuntimeDebugReceiver"
-MAIN_ACTIVITY_COMPONENT="${PACKAGE_NAME}/.MainActivity"
+SERVICE_COMPONENT="${ODIN_ONE_ANDROID_SERVICE_COMPONENT:-${PACKAGE_NAME}/com.odinone.desktop.vk.VpnRuntimeService}"
+DEBUG_RECEIVER_COMPONENT="${ODIN_ONE_ANDROID_DEBUG_RECEIVER_COMPONENT:-${PACKAGE_NAME}/com.odinone.desktop.vk.VpnRuntimeDebugReceiver}"
+MAIN_ACTIVITY_COMPONENT="${ODIN_ONE_ANDROID_MAIN_ACTIVITY_COMPONENT:-${PACKAGE_NAME}/com.odinone.desktop.vk.MainActivity}"
 ACTION_START="com.odinone.desktop.vk.action.START_VPN_RUNTIME"
 ACTION_STOP="com.odinone.desktop.vk.action.STOP_VPN_RUNTIME"
 ACTION_DEBUG_START="com.odinone.desktop.vk.action.DEBUG_START_VPN_RUNTIME"
@@ -65,6 +65,12 @@ Commands:
   stop-direct       Send ACTION_STOP directly to VpnRuntimeService.
 
 Environment:
+  ODIN_ONE_ANDROID_SERVICE_COMPONENT
+                    Optional fully qualified component override for the runtime service.
+  ODIN_ONE_ANDROID_DEBUG_RECEIVER_COMPONENT
+                    Optional fully qualified component override for the debug receiver.
+  ODIN_ONE_ANDROID_MAIN_ACTIVITY_COMPONENT
+                    Optional fully qualified component override for the launcher activity.
   ODIN_ONE_ANDROID_WAKE_MAIN_ACTIVITY
                     Optional boolean. When true, front the app's MainActivity
                     before debug start. Default: false.

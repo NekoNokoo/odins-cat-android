@@ -37,7 +37,7 @@ const dictionaries = {
     sheetMoreTitle: "ПОДЕЛИТЬСЯ",
     whitelistEyebrow: "Whitelist check",
     whitelistInputLabel: "Проверка IPv4",
-    whitelistCardTitle: "Проверить IP сервера",
+    whitelistCardTitle: "Проверить IPv4",
     sheetWhitelistText: "",
     whitelistIpv4: "IPv4",
     whitelistCheck: "Проверить IP",
@@ -66,6 +66,13 @@ const dictionaries = {
     splitTunnelClear: "Очистить список",
     splitTunnelReconnectNotice:
       "Чтобы применить обновлённый список обхода, переподключите VPN.",
+    nextVpnSessionLogTitle: "Лог следующей VPN-сессии",
+    nextVpnSessionLogText:
+      "Запишет только следующую сессию VPN и после отключения автоматически сохранит лог в Download/Odin's log.",
+    nextVpnSessionLogArm: "Записать следующую VPN-сессию",
+    nextVpnSessionLogDisarm: "Не записывать следующую VPN-сессию",
+    nextVpnSessionLogArmed:
+      "Следующая VPN-сессия будет записана и после отключения сохранится в Download/Odin's log.",
     splitTunnelLoadingApps: "Загружаем установленные приложения...",
     splitTunnelEmpty: "На этом устройстве не найдено установленных приложений.",
     splitTunnelNoResults: "По этому запросу приложения не найдены.",
@@ -112,6 +119,7 @@ const dictionaries = {
     runtimeMode: "Режим доступа",
     runtimeModeReality: "VLESS + REALITY",
     runtimeModeYandexEdge: "YANDEX EDGE",
+    runtimeModeYandexEdgeProxy: "YANDEX EDGE",
     runtimeModeVk: "VK RELAY",
     runtimeModeRelayOwner: "WHITE TUNEL",
     runtimeModeRelayDirect: "WHITE RELAY",
@@ -125,28 +133,33 @@ const dictionaries = {
     sheetModePickerText:
       "Нажмите на нужный режим. Выбрать можно только те варианты, которые уже есть в текущем профиле.",
     runtimeModeRealityHint:
-      "Основной режим. Клиент поднимает прямой VLESS + REALITY path без нового server-side deploy.",
+      "Прямой VLESS + REALITY. Самый простой и быстрый режим, но в сетях с белыми списками может не проходить.",
     runtimeModeYandexEdgeHint:
-      "Новый visible mode. Клиент идёт в стабильный REALITY path через российский edge, не меняя основной прямой маршрут.",
+      "Двуххоповый HTTPS front + xHTTP. Трафик сначала входит через разрешённую российскую поверхность, поэтому шанс пройти белые списки выше.",
+    runtimeModeYandexEdgeProxyHint:
+      "Двуххоповый HTTPS front + xHTTP. Трафик сначала входит через разрешённую российскую поверхность, поэтому шанс пройти белые списки выше.",
     runtimeModeVkHint:
-      "Использует уже развернутый VK relay на том же сервере. Нужна только свежая ссылка звонка VK.",
+      "Маршрут через уже развернутый VK relay. Полезен как запасной путь, но не является основным способом обхода белых списков.",
     runtimeModeRelayOwnerHint:
-      "white tunel. Клиент сначала поднимает внешний REALITY relay, а затем выпускает трафик уже через ваш сервер.",
+      "REALITY relay с возвратом egress на ваш сервер. Экспериментальный режим для сложных сетей, когда прямой путь нестабилен.",
     runtimeModeRelayDirectHint:
-      "white relay. Клиент берёт рабочий REALITY relay из hourly igareck feed и ходит через него без второго hop на ваш сервер.",
+      "REALITY relay без второго hop на ваш сервер. Экспериментальный режим, который иногда помогает там, где обычный вход режется.",
     portSetup: "Публичные порты",
     portSetupAuto: "Авто",
     portSetupManual: "Вручную",
     portSetupAutoHint:
-      "Сервер сам подберёт свободные публичные порты для VK relay и REALITY при следующем deploy.",
+      "Сервер сам подберёт свободные порты для VK relay, REALITY и Yandex edge origin xHTTP при следующем deploy/attach.",
     portSetupManualHint:
-      "Зафиксируйте два публичных порта: VK relay по UDP и VLESS + REALITY по TCP.",
+      "Зафиксируйте порты вручную. Для origin нужны VK relay по UDP и VLESS + REALITY по TCP; Yandex edge origin xHTTP можно тоже зафиксировать или оставить пустым для авто-выбора.",
     vkRelayPort: "VK relay порт (UDP)",
     realityPort: "REALITY порт (TCP)",
+    yandexEdgeOriginPort: "Yandex edge origin xHTTP порт (TCP)",
     manualPortsRequired:
       "Для ручного режима нужно указать оба публичных порта: VK relay и REALITY.",
     manualPortsDistinct:
       "VK relay и REALITY должны использовать разные номера портов.",
+    yandexEdgeOriginPortDistinct:
+      "Yandex edge origin xHTTP должен использовать отдельный TCP порт, отличный от VK relay и REALITY.",
     protocolMode: "Direct protocol",
     protocolWireGuard: "WireGuard over xray",
     protocolReality: "VLESS + REALITY",
@@ -177,9 +190,31 @@ const dictionaries = {
     deployStepEdge: "Шаг 2",
     deployStepEdgeTitle: "Yandex edge attach",
     deployStepEdgeText:
-      "Опциональный additive шаг. Поднимает whitelist-facing вход через Yandex edge и добавляет пятый visible режим без ротации stable REALITY path.",
+      "Опциональный additive шаг. Поднимает двуххоповый whitelist-facing вход через Yandex edge и по умолчанию собирает полноценный bridge path до stable REALITY origin.",
     edgeHost: "Edge host",
     edgePublicPort: "Публичный edge port",
+    edgeRoutingMode: "Режим edge",
+    edgeRoutingModeHelp:
+      "Для текущего YANDEX EDGE рекомендуем Xray proxy. Он поднимает полноценный двуххоповый bridge path без ломания stable direct route.",
+    edgeRoutingTcpForward: "TCP forward",
+    edgeRoutingSniRouter: "SNI router",
+    edgeRoutingXrayProxy: "Xray proxy",
+    edgeDiagTitle: "Edge diagnostics",
+    edgeDiagText:
+      "Короткая сводка по новому edge path: доступность edge, связь с origin и свежесть invite key.",
+    edgeDiagEdgePath: "Edge path",
+    edgeDiagOriginPath: "Origin path",
+    edgeDiagInvite: "Invite key",
+    edgeDiagReady: "ready",
+    edgeDiagRunValidate: "Сначала нажмите «Проверить edge», чтобы увидеть актуальное состояние.",
+    edgeDiagInviteFresh: "fresh",
+    edgeDiagInviteStale: "stale",
+    edgeDiagInviteStaleDetail:
+      "На owner уже есть новый YANDEX EDGE path, а импортированный invite key ещё старый. Перевыпустите и импортируйте ключ заново.",
+    edgeDiagOwnerDevice: "owner device",
+    edgeDiagOwnerDeviceDetail:
+      "Это owner-устройство. После edge attach перевыпусти invite key для гостевых устройств.",
+    edgeDiagNoInvite: "Импортированного invite key для этого host пока нет.",
     deploymentPrefix: "Развёртывание",
     deploymentDetails: "Ход развёртывания",
     validationDetails: "Результат проверки",
@@ -527,7 +562,7 @@ const dictionaries = {
     sheetMoreTitle: "SHARE",
     whitelistEyebrow: "Whitelist check",
     whitelistInputLabel: "IPv4 lookup",
-    whitelistCardTitle: "Check server IP",
+    whitelistCardTitle: "Check IPv4",
     sheetWhitelistText: "",
     whitelistIpv4: "IPv4",
     whitelistCheck: "Check IP",
@@ -556,6 +591,13 @@ const dictionaries = {
     splitTunnelClear: "Clear list",
     splitTunnelReconnectNotice:
       "Reconnect the VPN to apply the updated bypass app list.",
+    nextVpnSessionLogTitle: "Next VPN session log",
+    nextVpnSessionLogText:
+      "Records only the next VPN session and automatically saves the log to Download/Odin's log after disconnect.",
+    nextVpnSessionLogArm: "Record next VPN session",
+    nextVpnSessionLogDisarm: "Don't record next VPN session",
+    nextVpnSessionLogArmed:
+      "The next VPN session will be recorded and saved to Download/Odin's log after disconnect.",
     splitTunnelLoadingApps: "Loading installed apps...",
     splitTunnelEmpty: "No installed apps were found on this device.",
     splitTunnelNoResults: "No apps match this search.",
@@ -603,6 +645,7 @@ const dictionaries = {
     runtimeMode: "Access mode",
     runtimeModeReality: "VLESS + REALITY",
     runtimeModeYandexEdge: "YANDEX EDGE",
+    runtimeModeYandexEdgeProxy: "YANDEX EDGE",
     runtimeModeVk: "VK RELAY",
     runtimeModeRelayOwner: "WHITE TUNEL",
     runtimeModeRelayDirect: "WHITE RELAY",
@@ -616,28 +659,33 @@ const dictionaries = {
     sheetModePickerText:
       "Tap a mode to switch right away. Only the modes already present in the current profile can be selected.",
     runtimeModeRealityHint:
-      "Recommended default. The client starts the direct VLESS + REALITY path without another server rollout.",
+      "Direct VLESS + REALITY. Usually the fastest path, but it may fail on strict whitelist networks.",
     runtimeModeYandexEdgeHint:
-      "New visible mode. The client reaches the stable REALITY path through a Russian edge without changing the main direct route.",
+      "Two-hop HTTPS front + xHTTP. Traffic enters through a Russian-reachable surface first, so the chance of passing a whitelist is higher.",
+    runtimeModeYandexEdgeProxyHint:
+      "Two-hop HTTPS front + xHTTP. Traffic enters through a Russian-reachable surface first, so the chance of passing a whitelist is higher.",
     runtimeModeVkHint:
-      "Uses the already deployed VK relay on the same server. You only need a fresh VK call link.",
+      "Uses the already deployed VK relay path. Useful as a fallback, but not the main whitelist-bypass route.",
     runtimeModeRelayOwnerHint:
-      "white tunel. The client first brings up an external REALITY relay and then sends traffic out through your server.",
+      "REALITY relay with egress returned to your server. Experimental mode for harder networks when the direct path is unstable.",
     runtimeModeRelayDirectHint:
-      "white relay. The client takes a working REALITY relay from the hourly igareck feed and uses it directly without a second hop through your server.",
+      "REALITY relay without a second hop through your server. Experimental mode that sometimes helps when a standard entry is blocked.",
     portSetup: "Public ports",
     portSetupAuto: "Auto",
     portSetupManual: "Manual",
     portSetupAutoHint:
-      "The server will pick free public ports for the VK relay and REALITY on the next deploy.",
+      "The server will pick free ports for the VK relay, REALITY, and the Yandex edge origin xHTTP hop on the next deploy/attach.",
     portSetupManualHint:
-      "Pin both public ports yourself: VK relay over UDP and VLESS + REALITY over TCP.",
+      "Pin ports manually. Origin requires VK relay over UDP and VLESS + REALITY over TCP; the Yandex edge origin xHTTP port can also be pinned or left blank for auto-selection.",
     vkRelayPort: "VK relay port (UDP)",
     realityPort: "REALITY port (TCP)",
+    yandexEdgeOriginPort: "Yandex edge origin xHTTP port (TCP)",
     manualPortsRequired:
       "Manual mode requires both public ports: VK relay and REALITY.",
     manualPortsDistinct:
       "VK relay and REALITY must use different port numbers.",
+    yandexEdgeOriginPortDistinct:
+      "The Yandex edge origin xHTTP hop must use its own TCP port, different from VK relay and REALITY.",
     protocolMode: "Direct protocol",
     protocolWireGuard: "WireGuard over xray",
     protocolReality: "VLESS + REALITY",
@@ -668,9 +716,32 @@ const dictionaries = {
     deployStepEdge: "Step 2",
     deployStepEdgeTitle: "Yandex edge attach",
     deployStepEdgeText:
-      "Optional additive step. It raises a whitelist-facing Yandex edge entry and adds the fifth visible mode without rotating the stable REALITY path.",
+      "Optional additive step. It raises the whitelist-facing Yandex edge entry and now defaults to a full bridge path into the stable REALITY origin.",
     edgeHost: "Edge host",
     edgePublicPort: "Public edge port",
+    edgeRoutingMode: "Edge mode",
+    edgeRoutingModeHelp:
+      "Use Xray proxy for the current YANDEX EDGE mode. It brings up the full two-hop bridge path without breaking the stable direct route.",
+    edgeRoutingTcpForward: "TCP forward",
+    edgeRoutingSniRouter: "SNI router",
+    edgeRoutingXrayProxy: "Xray proxy",
+    edgeDiagTitle: "Edge diagnostics",
+    edgeDiagText:
+      "A short summary for the newer edge path: edge reachability, origin link, and whether the invite key is fresh.",
+    edgeDiagEdgePath: "Edge path",
+    edgeDiagOriginPath: "Origin path",
+    edgeDiagInvite: "Invite key",
+    edgeDiagReady: "ready",
+    edgeDiagRunValidate:
+      "Run Validate edge first to see the current state here.",
+    edgeDiagInviteFresh: "fresh",
+    edgeDiagInviteStale: "stale",
+    edgeDiagInviteStaleDetail:
+      "The owner profile already has the new YANDEX EDGE path, but the imported invite key is still old. Re-issue and import the key again.",
+    edgeDiagOwnerDevice: "owner device",
+    edgeDiagOwnerDeviceDetail:
+      "This is the owner device. Re-issue invite keys for guest devices after edge attach.",
+    edgeDiagNoInvite: "There is no imported invite key for this host yet.",
     deploymentPrefix: "Deployment",
     deploymentDetails: "Deployment progress",
     validationDetails: "Validation result",

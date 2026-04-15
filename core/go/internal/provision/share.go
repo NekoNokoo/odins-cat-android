@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,24 +21,122 @@ const shareCodePrefix = "odin1:"
 const defaultVKTurnStreamCount = 1
 const minVKTurnStreamCount = 1
 const maxVKTurnStreamCount = 16
+const inviteCdnYandexFrontPath = "/odin-ws"
+const inviteCdnYandexOriginPath = "/odin-origin"
+const inviteCdnYandexFrontPort = 443
+const inviteCdnYandexTransport = "xhttp"
+const inviteCdnYandexEngine = "xray-native"
+const inviteCdnYandexProvider = "generic"
+const inviteCdnYandexMode = "lab"
+const inviteCdnYandexBootstrap = "direct-reality"
+const inviteCdnYandexFrontSelection = "ordered"
+const inviteCdnYandexCamouflageHost = "ya.ru"
+var inviteCdnYandexCamouflageHostPool = []string{
+	"ya.ru",
+	"tunnel.vk-apps.com",
+	"5post-gate.x5.ru",
+	"ads.x5.ru",
+}
+const inviteCdnYandexXhttpMode = "packet-up"
+const inviteCdnYandexXmuxMaxConcurrency = 20
+const inviteCdnYandexXmuxHMaxRequestTimes = 900
+const inviteCdnYandexXmuxHMaxReusableSecs = 1800
+
+var inviteCdnYandexDirectDomainKeywords = []string{
+	"vk",
+	"ok.ru",
+	"mail.ru",
+	"gosuslugi",
+	"mos.ru",
+	"yandex",
+	"ya.ru",
+	"ozon",
+	"wildberries",
+	"avito",
+	"kinopoisk",
+	"dzen",
+	"hh",
+	"2gis",
+	"rutube",
+	"magnit",
+	"5ka",
+	"perekrestok",
+	"alfabank",
+	"alfaonline",
+	"tbank",
+	"t-bank",
+	"tinkoff",
+	"vtb",
+	"sber",
+	"sberbank",
+	"gazprombank",
+	"gpb",
+	"pochta",
+}
+
+var inviteCdnYandexDirectDomains = []string{
+	"1018213540.rsc.cdn77.org",
+	"avtodor-tr.ru",
+	"b2c-ticket-sentry.onelya.ru",
+	"bitrix.info",
+	"bkvet.ru",
+	"cdn1.ozonusercontent.com",
+	"cms1.dzvr.ru",
+	"counter.yadro.ru",
+	"dzvr.ru",
+	"emex.ru",
+	"fairplay-proxy.ott.yandex.ru",
+	"fssp.gov.ru",
+	"gorzdrav.spb.ru",
+	"gosuslugi.ru",
+	"gov.ru",
+	"graphql.kinopoisk.ru",
+	"gu-st.ru",
+	"lemanapro.ru",
+	"leroymerlin.ru",
+	"mobileapp.russianpost.ru",
+	"esia.gosuslugi.ru",
+	"lk.gosuslugi.ru",
+	"pos.gosuslugi.ru",
+	"mos.ru",
+	"mosenergosbyt.ru",
+	"mosreg.ru",
+	"nalog.ru",
+	"ozon.ru",
+	"pgu.mos.ru",
+	"pesc.ru",
+	"pochta.ru",
+	"reso.ru",
+	"rosreestr.gov.ru",
+	"rzd-bonus.ru",
+	"rzd.ru",
+	"showip.net",
+	"sys.refocus.ru",
+	"vshark.ttk.ru",
+	"widevine-proxy.ott.yandex.ru",
+	"xn--90aijkdmaud0d.xn--p1ai",
+	"yandex.net",
+	"yandex.ru",
+	"ya.ru",
+}
 
 type inviteProfile struct {
-	ID              string `json:"id,omitempty"`
-	Role            string `json:"role"`
-	Name            string `json:"name"`
-	Protocol        string `json:"protocol"`
-	Transport       string `json:"transport"`
-	ServerHost      string `json:"serverHost"`
-	VKTurnStreamCount int  `json:"vkTurnStreamCount,omitempty"`
-	VKTurnProxyPort int    `json:"vkTurnProxyPort"`
-	WireGuardPort   int    `json:"wireGuardPort,omitempty"`
-	EndpointPort    int    `json:"endpointPort,omitempty"`
-	Endpoint        string `json:"endpoint"`
-	Fingerprint     string `json:"fingerprint"`
-	CreatedAt       string `json:"createdAt,omitempty"`
-	RevokedAt       string `json:"revokedAt,omitempty"`
-	Status          string `json:"status,omitempty"`
-	WireGuard       struct {
+	ID                string `json:"id,omitempty"`
+	Role              string `json:"role"`
+	Name              string `json:"name"`
+	Protocol          string `json:"protocol"`
+	Transport         string `json:"transport"`
+	ServerHost        string `json:"serverHost"`
+	VKTurnStreamCount int    `json:"vkTurnStreamCount,omitempty"`
+	VKTurnProxyPort   int    `json:"vkTurnProxyPort"`
+	WireGuardPort     int    `json:"wireGuardPort,omitempty"`
+	EndpointPort      int    `json:"endpointPort,omitempty"`
+	Endpoint          string `json:"endpoint"`
+	Fingerprint       string `json:"fingerprint"`
+	CreatedAt         string `json:"createdAt,omitempty"`
+	RevokedAt         string `json:"revokedAt,omitempty"`
+	Status            string `json:"status,omitempty"`
+	WireGuard         struct {
 		ServerPublicKey  string `json:"serverPublicKey"`
 		ClientPrivateKey string `json:"clientPrivateKey"`
 		ClientPublicKey  string `json:"clientPublicKey"`
@@ -52,23 +151,24 @@ type inviteProfile struct {
 		UUID       string `json:"uuid"`
 		Flow       string `json:"flow"`
 	} `json:"vlessReality,omitempty"`
+	AndroidRuntime  map[string]any `json:"androidRuntime,omitempty"`
 	StagedFallbacks map[string]any `json:"stagedFallbacks,omitempty"`
 }
 
 type InviteProfileResponse struct {
-	ID              string `json:"id,omitempty"`
-	Role            string `json:"role"`
-	Name            string `json:"name"`
-	Protocol        string `json:"protocol"`
-	Transport       string `json:"transport"`
-	ServerHost      string `json:"serverHost"`
-	VKTurnStreamCount int  `json:"vkTurnStreamCount,omitempty"`
-	VKTurnProxyPort int    `json:"vkTurnProxyPort"`
-	WireGuardPort   int    `json:"wireGuardPort,omitempty"`
-	EndpointPort    int    `json:"endpointPort,omitempty"`
-	Endpoint        string `json:"endpoint"`
-	Fingerprint     string `json:"fingerprint"`
-	VLESSReality    struct {
+	ID                string `json:"id,omitempty"`
+	Role              string `json:"role"`
+	Name              string `json:"name"`
+	Protocol          string `json:"protocol"`
+	Transport         string `json:"transport"`
+	ServerHost        string `json:"serverHost"`
+	VKTurnStreamCount int    `json:"vkTurnStreamCount,omitempty"`
+	VKTurnProxyPort   int    `json:"vkTurnProxyPort"`
+	WireGuardPort     int    `json:"wireGuardPort,omitempty"`
+	EndpointPort      int    `json:"endpointPort,omitempty"`
+	Endpoint          string `json:"endpoint"`
+	Fingerprint       string `json:"fingerprint"`
+	VLESSReality      struct {
 		Port       int    `json:"port"`
 		ServerName string `json:"serverName"`
 		PublicKey  string `json:"publicKey"`
@@ -80,6 +180,7 @@ type InviteProfileResponse struct {
 	SupportsVKRelay      bool                `json:"supportsVKRelay,omitempty"`
 	SupportsRealityRelay bool                `json:"supportsRealityRelay,omitempty"`
 	ProtocolPack         []ProtocolPackEntry `json:"protocolPack,omitempty"`
+	AndroidRuntime       map[string]any      `json:"androidRuntime,omitempty"`
 	StagedFallbacks      map[string]any      `json:"stagedFallbacks,omitempty"`
 	ShareCode            string              `json:"shareCode"`
 	RawJSON              string              `json:"rawJson"`
@@ -129,6 +230,9 @@ func GetImportedInvite(host string) InviteProfileResponse {
 func buildInviteResponse(invite inviteProfile, localPath string) InviteProfileResponse {
 	invite.VKTurnStreamCount = effectiveVKTurnStreamCount(invite.VKTurnStreamCount)
 	stagedFallbacks := effectiveInviteStagedFallbacks(invite)
+	invite.StagedFallbacks = stagedFallbacks
+	androidRuntime := effectiveInviteAndroidRuntime(invite)
+	invite.AndroidRuntime = androidRuntime
 	raw, _ := json.MarshalIndent(invite, "", "  ")
 	return InviteProfileResponse{
 		ID:                   invite.ID,
@@ -154,6 +258,7 @@ func buildInviteResponse(invite inviteProfile, localPath string) InviteProfileRe
 			invite.VKTurnProxyPort,
 			stagedFallbacks,
 		),
+		AndroidRuntime:  androidRuntime,
 		StagedFallbacks: stagedFallbacks,
 		ShareCode:       shareCodePrefix + base64.RawURLEncoding.EncodeToString(raw),
 		RawJSON:         string(raw),
@@ -191,6 +296,7 @@ func decodeInvite(shareCode string) (inviteProfile, string, error) {
 		invite.VLESSReality.Flow = "xtls-rprx-vision"
 	}
 	syncInviteRealityStagedFallbacks(&invite)
+	syncInviteAndroidRuntime(&invite)
 	if err := validateInvite(invite); err != nil {
 		return invite, "", err
 	}
@@ -372,19 +478,19 @@ func IssueRemoteGuestProfile(req Request, name string) (InviteProfileResponse, e
 
 	guestID := nextGuestID(guestProfiles)
 	guest := inviteProfile{
-		ID:              guestID,
-		Role:            "guest",
-		Name:            defaultInviteName(name),
-		Protocol:        string(ProtocolVLESSReality),
-		Transport:       owner.Transport,
-		ServerHost:      owner.ServerHost,
+		ID:                guestID,
+		Role:              "guest",
+		Name:              defaultInviteName(name),
+		Protocol:          string(ProtocolVLESSReality),
+		Transport:         owner.Transport,
+		ServerHost:        owner.ServerHost,
 		VKTurnStreamCount: effectiveVKTurnStreamCount(owner.VKTurnStreamCount),
-		VKTurnProxyPort: owner.VKTurnProxyPort,
-		WireGuardPort:   xrayState.WireGuardPort,
-		EndpointPort:    xrayState.Reality.Port,
-		Endpoint:        fmt.Sprintf("%s:%d", owner.ServerHost, xrayState.Reality.Port),
-		CreatedAt:       nowRFC3339(),
-		Status:          "active",
+		VKTurnProxyPort:   owner.VKTurnProxyPort,
+		WireGuardPort:     xrayState.WireGuardPort,
+		EndpointPort:      xrayState.Reality.Port,
+		Endpoint:          fmt.Sprintf("%s:%d", owner.ServerHost, xrayState.Reality.Port),
+		CreatedAt:         nowRFC3339(),
+		Status:            "active",
 	}
 	guest.WireGuard.ClientPrivateKey = guestKeys.Private
 	guest.WireGuard.ClientPublicKey = guestKeys.Public
@@ -906,16 +1012,48 @@ func syncInviteRealityStagedFallbacks(invite *inviteProfile) {
 	if raw, ok := invite.StagedFallbacks["realityYandexEdge"]; ok {
 		if fallback, ok := raw.(map[string]any); ok {
 			fallback["originPort"] = port
-			fallback["serverName"] = serverName
-			fallback["publicKey"] = publicKey
-			fallback["shortId"] = shortID
-			fallback["uuid"] = uuid
-			fallback["flow"] = flow
+			if !yandexEdgeKeepsExistingClientIdentity(fallback) {
+				fallback["serverName"] = serverName
+				fallback["publicKey"] = publicKey
+				fallback["shortId"] = shortID
+				fallback["uuid"] = uuid
+				fallback["flow"] = flow
+			}
 			if strings.TrimSpace(invite.ServerHost) != "" {
 				fallback["originHost"] = strings.TrimSpace(invite.ServerHost)
 			}
 		}
 	}
+
+	if raw, ok := invite.StagedFallbacks["realityYandexEdgeProxy"]; ok {
+		if fallback, ok := raw.(map[string]any); ok {
+			fallback["originPort"] = port
+			if !yandexEdgeKeepsExistingClientIdentity(fallback) {
+				fallback["serverName"] = serverName
+				fallback["publicKey"] = publicKey
+				fallback["shortId"] = shortID
+				fallback["uuid"] = uuid
+				fallback["flow"] = flow
+			}
+			fallback["ownerRealityEgress"] = false
+			if yandexEdgeKeepsExistingClientIdentity(fallback) {
+				fallback["transport"] = inviteCdnYandexTransport
+			} else {
+				fallback["transport"] = "tcp"
+			}
+			if strings.TrimSpace(invite.ServerHost) != "" {
+				fallback["originHost"] = strings.TrimSpace(invite.ServerHost)
+			}
+		}
+	}
+}
+
+func yandexEdgeKeepsExistingClientIdentity(fallback map[string]any) bool {
+	routingMode, _ := fallback["routingMode"].(string)
+	uuid, _ := fallback["uuid"].(string)
+	return routingMode != "" &&
+		strings.TrimSpace(routingMode) == string(EdgeRoutingModeXrayProxy) &&
+		strings.TrimSpace(uuid) != ""
 }
 
 func enrichInviteProfile(invite *inviteProfile, owner inviteProfile, xrayState remoteXrayState) {
@@ -980,6 +1118,7 @@ func enrichInviteProfile(invite *inviteProfile, owner inviteProfile, xrayState r
 		}
 	}
 	syncInviteRealityStagedFallbacks(invite)
+	syncInviteAndroidRuntime(invite)
 	if invite.EndpointPort == 0 {
 		if invite.Protocol == string(ProtocolVLESSReality) {
 			invite.EndpointPort = effectiveRealityPort(owner, xrayState)
@@ -999,6 +1138,187 @@ func enrichInviteProfile(invite *inviteProfile, owner inviteProfile, xrayState r
 	if invite.WireGuard.MTU == 0 {
 		invite.WireGuard.MTU = owner.WireGuard.MTU
 	}
+}
+
+func effectiveInviteAndroidRuntime(invite inviteProfile) map[string]any {
+	runtime := cloneInviteMap(invite.AndroidRuntime)
+	if runtime == nil {
+		runtime = map[string]any{}
+	}
+	cdn := buildInviteCdnAntiWhitelistRuntime(invite)
+	if cdn == nil {
+		if len(runtime) == 0 {
+			return nil
+		}
+		return runtime
+	}
+	if existing, ok := runtime["cdnAntiWhitelist"].(map[string]any); ok && len(existing) > 0 {
+		runtime["cdnAntiWhitelist"] = mergeInviteMaps(cdn, existing)
+		return runtime
+	}
+	runtime["cdnAntiWhitelist"] = cdn
+	return runtime
+}
+
+func syncInviteAndroidRuntime(invite *inviteProfile) {
+	if invite == nil {
+		return
+	}
+	invite.AndroidRuntime = effectiveInviteAndroidRuntime(*invite)
+}
+
+func buildInviteCdnAntiWhitelistRuntime(invite inviteProfile) map[string]any {
+	connectHost := inviteYandexConnectHost(invite)
+	if connectHost == "" {
+		return nil
+	}
+	frontHost := sslipHostForInvite(connectHost)
+	if frontHost == "" {
+		frontHost = connectHost
+	}
+	originHost := sslipHostForInvite(strings.TrimSpace(invite.ServerHost))
+	if originHost == "" {
+		originHost = strings.TrimSpace(invite.ServerHost)
+	}
+	if originHost == "" {
+		originHost = frontHost
+	}
+	frontTag := fmt.Sprintf("yandex-edge-xhttp-%d", inviteCdnYandexFrontPort)
+	tlsServerName := inviteCdnYandexCamouflageHost
+	httpHostHeader := inviteCdnYandexCamouflageHost
+	tlsAlpn := []string{"h2", "http/1.1"}
+	frontPool := make([]map[string]any, 0, len(inviteCdnYandexCamouflageHostPool))
+	for index, host := range inviteCdnYandexCamouflageHostPool {
+		tag := frontTag
+		if index > 0 {
+			tag = fmt.Sprintf("%s-%s", frontTag, strings.NewReplacer(".", "-").Replace(host))
+		}
+		frontPool = append(frontPool, map[string]any{
+			"host":               frontHost,
+			"port":               inviteCdnYandexFrontPort,
+			"connectHost":        connectHost,
+			"connectPort":        inviteCdnYandexFrontPort,
+			"path":               inviteCdnYandexFrontPath,
+			"tlsServerName":      host,
+			"hostHeader":         host,
+			"tlsAllowInsecure":   true,
+			"camouflageHostPool": inviteCdnYandexCamouflageHostPool,
+			"provider":           inviteCdnYandexProvider,
+			"tag":                tag,
+		})
+	}
+	return map[string]any{
+		"enabled":              true,
+		"mode":                 inviteCdnYandexMode,
+		"engine":               inviteCdnYandexEngine,
+		"provider":             inviteCdnYandexProvider,
+		"transport":            inviteCdnYandexTransport,
+		"frontHost":            frontHost,
+		"frontPort":            inviteCdnYandexFrontPort,
+		"connectHost":          connectHost,
+		"connectPort":          inviteCdnYandexFrontPort,
+		"frontPath":            inviteCdnYandexFrontPath,
+		"tlsServerName":        tlsServerName,
+		"hostHeader":           httpHostHeader,
+		"tlsAllowInsecure":     true,
+		"camouflageHost":       inviteCdnYandexCamouflageHost,
+		"camouflageHostPool":   inviteCdnYandexCamouflageHostPool,
+		"xhttpMode":            inviteCdnYandexXhttpMode,
+		"tlsAlpn":              tlsAlpn,
+		"xmuxMaxConcurrency":   inviteCdnYandexXmuxMaxConcurrency,
+		"xmuxHMaxRequestTimes": inviteCdnYandexXmuxHMaxRequestTimes,
+		"xmuxHMaxReusableSecs": inviteCdnYandexXmuxHMaxReusableSecs,
+		"frontTag":             frontTag,
+		"frontSelection":       inviteCdnYandexFrontSelection,
+		"bootstrap":            inviteCdnYandexBootstrap,
+		"routingPolicy": map[string]any{
+			"dnsQueryStrategy":      "use_ip",
+			"domainStrategy":        "ip_if_non_match",
+			"domainMatcher":         "hybrid",
+			"directDomainKeywords":  inviteCdnYandexDirectDomainKeywords,
+			"directDomains":         inviteCdnYandexDirectDomains,
+			"blockedDomainKeywords": []string{},
+			"blockedDomains":        []string{},
+			"blockSelectedFrontHost": true,
+		},
+		"origin": map[string]any{
+			"host":   originHost,
+			"port":   inviteCdnYandexFrontPort,
+			"scheme": "https",
+			"path":   inviteCdnYandexOriginPath,
+		},
+		"frontPool": frontPool,
+	}
+}
+
+func inviteYandexConnectHost(invite inviteProfile) string {
+	for _, key := range []string{"realityYandexEdgeProxy", "realityYandexEdge"} {
+		raw, ok := invite.StagedFallbacks[key]
+		if !ok {
+			continue
+		}
+		fallback, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if host, ok := fallback["connectHost"].(string); ok {
+			host = strings.TrimSpace(host)
+			if host != "" {
+				return host
+			}
+		}
+	}
+	return ""
+}
+
+func sslipHostForInvite(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return ""
+	}
+	if parsed := net.ParseIP(host); parsed != nil {
+		return strings.ReplaceAll(host, ".", "-") + ".sslip.io"
+	}
+	return host
+}
+
+func cloneInviteMap(source map[string]any) map[string]any {
+	if len(source) == 0 {
+		return nil
+	}
+	raw, err := json.Marshal(source)
+	if err != nil {
+		cloned := map[string]any{}
+		for key, value := range source {
+			cloned[key] = value
+		}
+		return cloned
+	}
+	var cloned map[string]any
+	if err := json.Unmarshal(raw, &cloned); err != nil {
+		cloned = map[string]any{}
+		for key, value := range source {
+			cloned[key] = value
+		}
+	}
+	return cloned
+}
+
+func mergeInviteMaps(defaults map[string]any, overrides map[string]any) map[string]any {
+	merged := cloneInviteMap(defaults)
+	if merged == nil {
+		merged = map[string]any{}
+	}
+	for key, value := range overrides {
+		if overrideMap, ok := value.(map[string]any); ok {
+			if defaultMap, ok := merged[key].(map[string]any); ok {
+				merged[key] = mergeInviteMaps(defaultMap, overrideMap)
+				continue
+			}
+		}
+		merged[key] = value
+	}
+	return merged
 }
 
 func remoteGuestProfilePath(guestID string) string {

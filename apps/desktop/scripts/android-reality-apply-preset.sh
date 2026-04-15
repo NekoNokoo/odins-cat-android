@@ -19,10 +19,12 @@ usage() {
   cat <<'EOF'
 Usage:
   apps/desktop/scripts/android-reality-apply-preset.sh <preset>
+  apps/desktop/scripts/android-reality-apply-preset.sh --profile-json <file>
 
 Examples:
   apps/desktop/scripts/android-reality-apply-preset.sh dot-google
   apps/desktop/scripts/android-reality-apply-preset.sh doh-cloudflare
+  apps/desktop/scripts/android-reality-apply-preset.sh --profile-json /tmp/owner-profile.yandex-edge.json
 
 This helper patches the debug app's persisted Android REALITY request on the
 connected handset using one of the documented preset blocks. It force-stops the
@@ -77,7 +79,14 @@ upload_run_as_file() {
   adb_cmd shell rm -f "$remote_tmp" >/dev/null
 }
 
+input_mode="preset"
 preset="${1:-}"
+profile_json=""
+if [[ "$preset" == "--profile-json" ]]; then
+  input_mode="profile-json"
+  profile_json="${2:-}"
+fi
+
 if [[ -z "$preset" || "$preset" == "-h" || "$preset" == "--help" ]]; then
   usage
   exit 0
@@ -86,12 +95,20 @@ fi
 require_bin "$ADB_BIN" "adb"
 require_bin "$PYTHON_BIN" "python3"
 
-if [[ ! -x "$PRESET_HELPER" ]]; then
-  echo "Preset helper not found: ${PRESET_HELPER}" >&2
-  exit 1
+if [[ "$input_mode" == "profile-json" ]]; then
+  if [[ -z "$profile_json" || ! -f "$profile_json" ]]; then
+    echo "Profile JSON not found: ${profile_json}" >&2
+    exit 1
+  fi
+  cp "$profile_json" "$PRESET_FILE"
+  preset="profile-json:${profile_json:t}"
+else
+  if [[ ! -x "$PRESET_HELPER" ]]; then
+    echo "Preset helper not found: ${PRESET_HELPER}" >&2
+    exit 1
+  fi
+  zsh "$PRESET_HELPER" "$preset" >"$PRESET_FILE"
 fi
-
-zsh "$PRESET_HELPER" "$preset" >"$PRESET_FILE"
 
 # Stop the package before touching prefs so a live runtime cannot flush
 # stale stable state over the newly patched hidden preset during shutdown.
@@ -264,7 +281,27 @@ def patch_request(raw_request: str, preset_raw: str):
     if not isinstance(whitelist_runtime, dict):
         whitelist_runtime = {}
         android_runtime["realityWhitelistHints"] = whitelist_runtime
-    if preset_name.startswith("cdn-"):
+    if preset_name.startswith("profile-json:"):
+        cdn_enabled = bool(cdn_runtime.get("enabled", False))
+        whitelist_enabled = bool(whitelist_runtime.get("enabled", False))
+        if cdn_enabled:
+            whitelist_runtime["enabled"] = False
+            reality_runtime = android_runtime.setdefault("reality", {})
+            if not isinstance(reality_runtime, dict):
+                reality_runtime = {}
+                android_runtime["reality"] = reality_runtime
+            reality_runtime["autoRestoreOnBoot"] = False
+        elif whitelist_enabled:
+            cdn_runtime["enabled"] = False
+            reality_runtime = android_runtime.setdefault("reality", {})
+            if not isinstance(reality_runtime, dict):
+                reality_runtime = {}
+                android_runtime["reality"] = reality_runtime
+            reality_runtime["autoRestoreOnBoot"] = False
+        else:
+            cdn_runtime["enabled"] = False
+            whitelist_runtime["enabled"] = False
+    elif preset_name.startswith("cdn-"):
         cdn_runtime["enabled"] = True
         whitelist_runtime["enabled"] = False
         reality_runtime = android_runtime.setdefault("reality", {})

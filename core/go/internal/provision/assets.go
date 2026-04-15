@@ -183,6 +183,9 @@ func renderAccessProfile(role, id, name, host string, transport Transport, endpo
 	if len(stagedFallbacks) > 0 {
 		profile["stagedFallbacks"] = stagedFallbacks
 	}
+	if androidRuntime := effectiveOwnerAndroidRuntime(host, stagedFallbacks, nil); len(androidRuntime) > 0 {
+		profile["androidRuntime"] = androidRuntime
+	}
 	if vkTurnProxyPort > 0 {
 		profile["vkTurnProxyPort"] = vkTurnProxyPort
 	}
@@ -192,6 +195,15 @@ func renderAccessProfile(role, id, name, host string, transport Transport, endpo
 		return "", err
 	}
 	return string(raw), nil
+}
+
+func effectiveOwnerAndroidRuntime(host string, stagedFallbacks map[string]any, existing map[string]any) map[string]any {
+	invite := inviteProfile{
+		ServerHost:        host,
+		AndroidRuntime:    cloneInviteMap(existing),
+		StagedFallbacks:   cloneInviteMap(stagedFallbacks),
+	}
+	return effectiveInviteAndroidRuntime(invite)
 }
 
 func renderSystemdUnit(name, execStart string) string {

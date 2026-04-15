@@ -13,7 +13,7 @@ COMPARE_SCRIPT="${SCRIPT_DIR}/android-runtime-compare-captures.sh"
 REPORT_SCRIPT="${SCRIPT_DIR}/android-runtime-report-draft.sh"
 CHECKLIST_SCRIPT="${SCRIPT_DIR}/android-blocked-direct-checklist.sh"
 
-PRESET="cdn-ws-lab"
+PRESET="cdn-httpupgrade-lab"
 CONTROL_CAPTURE=""
 SETTLE_SECONDS="8"
 WAIT_TIMEOUT_SECONDS="${ODIN_ONE_RUNTIME_WAIT_TIMEOUT_SECONDS:-25}"
@@ -45,7 +45,7 @@ Usage:
   apps/desktop/scripts/android-cdn-lab-session.sh [options]
 
 Options:
-  --preset <preset>            Hidden preset to run. Default: cdn-ws-lab
+  --preset <preset>            Hidden preset to run. Default: cdn-httpupgrade-lab
   --plan-file <file>           Reusable CDN plan JSON passed through the preset helper.
   --plan-tag <tag>             Select one front by tag from the plan file.
   --plan-index <n>             Select one front by 1-based index from the plan file.
@@ -310,7 +310,7 @@ fi
 
 SESSION_LABEL="$(normalize_label "$PRESET")"
 if [[ -z "$SESSION_LABEL" ]]; then
-  SESSION_LABEL="cdn-ws-lab"
+  SESSION_LABEL="cdn-httpupgrade-lab"
 fi
 if [[ -z "$OUTPUT_DIR" ]]; then
   OUTPUT_DIR="/tmp/odin-one-android-cdn-lab-runs/${SESSION_STAMP}-${SESSION_LABEL}"

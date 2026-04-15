@@ -8,5 +8,4 @@ coverage
 bin
 *.log
 target
-releases
 tmp

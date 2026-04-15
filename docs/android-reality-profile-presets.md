@@ -132,6 +132,43 @@ Available presets:
     - `apps/desktop/scripts/android-cdn-origin-lab.sh --preset cdn-ws-lab --output-dir /tmp/odin-one-android-cdn-origin-lab`
     - `apps/desktop/scripts/android-cdn-lab-preflight.sh --preset cdn-ws-lab --strict`
     - `apps/desktop/scripts/android-cdn-lab-session.sh`
+- `cdn-xhttp-lab`
+  - hidden owner-only activation preset for the additive `cdn-anti-whitelist` `xhttp` lane
+  - enables `mode = lab` plus `transport = xhttp`
+  - keeps the same front/origin plan-file flow and `ODIN_ONE_CDN_*` env overrides as `cdn-ws-lab`
+  - stays owner-only and must not replace the stable direct `VLESS + REALITY` control sample
+  - pairs well with:
+    - `apps/desktop/scripts/android-reality-profile-preset.sh cdn-xhttp-lab`
+    - `apps/desktop/scripts/android-cdn-origin-lab.sh --preset cdn-xhttp-lab --output-dir /tmp/odin-one-android-cdn-origin-lab`
+    - `apps/desktop/scripts/android-cdn-lab-preflight.sh --preset cdn-xhttp-lab --strict`
+    - `apps/desktop/scripts/android-cdn-origin-lab-rollout.sh --preset cdn-xhttp-lab --host 95.81.120.226 --ssh-key ~/.ssh/afina_bot`
+    - when replacing an already-running dedicated lab inbound on the same loopback port, add `--lab-tag <existing-tag>`
+- `cdn-xhttp-native-lab`
+  - hidden owner-only activation preset for the Android native `xray` sidecar lane
+  - enables `mode = lab`, `transport = xhttp`, and `engine = xray-native`
+  - targets true handset `xhttp` execution instead of the temporary `httpupgrade` substitute
+  - stays owner-only and must not replace the stable direct `VLESS + REALITY` control sample
+  - pairs well with:
+    - `apps/desktop/scripts/android-reality-profile-preset.sh cdn-xhttp-native-lab`
+    - `apps/desktop/scripts/android-cdn-lab-preflight.sh --preset cdn-xhttp-native-lab --strict`
+- `cdn-xhttp-yandex-camouflage-lab`
+  - hidden owner-only activation preset for the `ya.ru`-ish first-hop camouflage path
+  - enables `transport = xhttp`, `engine = xray-native`, `xhttpMode = packet-up`
+  - also sets `tlsAlpn = h2,http/1.1`, `tlsAllowInsecure = true`, and `camouflageHost = ya.ru`
+  - intended for Yandex-edge lab runs where the handset dials the Yandex IP directly but presents `ya.ru` as first-hop TLS SNI / Host
+  - stays owner-only and must not replace the stable direct `VLESS + REALITY` control sample
+  - pairs well with:
+    - `apps/desktop/scripts/android-reality-profile-preset.sh cdn-xhttp-yandex-camouflage-lab`
+    - `apps/desktop/scripts/android-cdn-lab-preflight.sh --preset cdn-xhttp-yandex-camouflage-lab --strict`
+    - `apps/desktop/scripts/android-cdn-yandex-edge-rollout.sh --preset cdn-xhttp-yandex-camouflage-lab --edge-host 62.84.123.148 --edge-ssh-key ~/.ssh/yandex_edge_test --prepare-only`
+- `cdn-httpupgrade-lab`
+  - hidden owner-only activation preset for the additive `cdn-anti-whitelist` `httpupgrade` lane
+  - enables `mode = lab` plus `transport = httpupgrade`
+  - useful when the Android runtime rejects `xhttp`, but a browser-shaped upgrade transport is still acceptable for owner-lab validation
+  - pairs well with:
+    - `apps/desktop/scripts/android-reality-profile-preset.sh cdn-httpupgrade-lab`
+    - `apps/desktop/scripts/android-cdn-origin-lab.sh --preset cdn-httpupgrade-lab --output-dir /tmp/odin-one-android-cdn-origin-lab`
+    - `apps/desktop/scripts/android-cdn-lab-preflight.sh --preset cdn-httpupgrade-lab --strict`
 
 Suggested workflow:
 

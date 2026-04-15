@@ -39,6 +39,12 @@ import io.nekohasekai.libbox.StringIterator
 import io.nekohasekai.libbox.SystemProxyStatus
 import io.nekohasekai.libbox.TunOptions
 import io.nekohasekai.libbox.WIFIState
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.EOFException
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.net.Socket
 import java.net.NetworkInterface
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -48,9 +54,11 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
     private var commandServer: CommandServer? = null
     private var tunDescriptor: ParcelFileDescriptor? = null
     private var vkProcess: Process? = null
+    private var nativeProcess: Process? = null
     private var activeRuntime: PreparedRuntime? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var lastVkProcessLogLine: String? = null
+    private var lastNativeProcessLogLine: String? = null
     private var pendingVkCaptchaUrl: String? = null
     private var lastOpenedVkCaptchaUrl: String? = null
     @Volatile
@@ -62,6 +70,8 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
 
     @Volatile
     private var shuttingDown = false
+    @Volatile
+    private var recordCurrentSessionLog = false
     private val lifecycleLock = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var pendingNetworkReload: Runnable? = null
@@ -169,17 +179,19 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         closeRuntimeResources("onDestroy")
         val latest = VpnRuntimeStore.snapshot(this)
         if (current.status == "starting" || current.status == "running") {
-            VpnRuntimeStore.write(
-                this,
-                latest.copy(
-                    status = "stopped",
-                    socksAddress = null,
-                    bridgeAddress = null,
-                    error = null,
-                    logTail = trimLogTail(latest.logTail + "Android VpnService was destroyed."),
-                ),
-                sync = true,
-            )
+            val stopped =
+                VpnRuntimeStore.write(
+                    this,
+                    latest.copy(
+                        status = "stopped",
+                        socksAddress = null,
+                        bridgeAddress = null,
+                        error = null,
+                        logTail = trimLogTail(latest.logTail + "Android VpnService was destroyed."),
+                    ),
+                    sync = true,
+                )
+            finalizeSessionLogIfNeeded(stopped, "onDestroy")
         }
         super.onDestroy()
     }
@@ -225,7 +237,69 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
 
     override fun includeAllNetworks(): Boolean = false
 
-    override fun localDNSTransport(): LocalDNSTransport? = null
+    override fun localDNSTransport(): LocalDNSTransport? {
+        val prepared = activeRuntime ?: return null
+        if (prepared.runtimeFamily != "cdn-anti-whitelist") {
+            return null
+        }
+        val (proxyHost, proxyPort) = parseSocksAddress(prepared.socksAddress)
+        return object : LocalDNSTransport {
+            override fun exchange(
+                context: io.nekohasekai.libbox.ExchangeContext,
+                payload: ByteArray,
+            ) {
+                try {
+                    context.rawSuccess(queryDnsOverSocks(payload, proxyHost, proxyPort))
+                } catch (error: Exception) {
+                    appendDiagnostic("LocalDNSTransport exchange failed: ${error.message}")
+                    throw error
+                }
+            }
+
+            override fun lookup(
+                context: io.nekohasekai.libbox.ExchangeContext,
+                network: String,
+                domain: String,
+            ) {
+                val error = UnsupportedOperationException("lookup() is unsupported for raw LocalDNSTransport")
+                appendDiagnostic("LocalDNSTransport lookup fallback hit for $domain on $network.")
+                throw error
+            }
+
+            override fun raw(): Boolean = true
+        }
+    }
+
+    private fun parseSocksAddress(socksAddress: String): Pair<String, Int> {
+        val pieces = socksAddress.trim().split(':')
+        require(pieces.size == 2) { "Invalid SOCKS address: $socksAddress" }
+        val port = pieces[1].toIntOrNull() ?: error("Invalid SOCKS port: $socksAddress")
+        return pieces[0] to port
+    }
+
+    private fun queryDnsOverSocks(
+        payload: ByteArray,
+        proxyHost: String,
+        proxyPort: Int,
+    ): ByteArray =
+        Socket(Proxy(Proxy.Type.SOCKS, InetSocketAddress(proxyHost, proxyPort))).use { socket ->
+            socket.soTimeout = 10_000
+            socket.connect(InetSocketAddress("1.1.1.1", 53), 10_000)
+            DataOutputStream(socket.getOutputStream()).use { output ->
+                output.writeShort(payload.size)
+                output.write(payload)
+                output.flush()
+            }
+            DataInputStream(socket.getInputStream()).use { input ->
+                val responseSize = input.readUnsignedShort()
+                if (responseSize <= 0) {
+                    throw EOFException("DNS-over-TCP response was empty")
+                }
+                val response = ByteArray(responseSize)
+                input.readFully(response)
+                response
+            }
+        }
 
     override fun openTun(options: TunOptions): Int {
         if (prepare(this) != null) {
@@ -245,7 +319,12 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         addAddresses(builder, options.inet6Address)
 
         if (options.autoRoute) {
-            options.dnsServerAddress.value.takeIf { it.isNotBlank() }?.let { builder.addDnsServer(it) }
+            val advertisedDnsServers =
+                when (activeRuntime?.runtimeFamily) {
+                    "cdn-anti-whitelist" -> listOf(PUBLIC_VPN_DNS_PRIMARY, PUBLIC_VPN_DNS_SECONDARY)
+                    else -> options.dnsServerAddress.value.takeIf { it.isNotBlank() }?.let(::listOf).orEmpty()
+                }
+            advertisedDnsServers.forEach { builder.addDnsServer(it) }
             addRoutes(builder, options.inet4RouteAddress, "0.0.0.0", 0, options.inet4Address.hasNext())
             addRoutes(builder, options.inet6RouteAddress, "::", 0, options.inet6Address.hasNext())
             excludeOwnPackageFromVpn(builder)
@@ -442,10 +521,19 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                 activeRuntime = prepared
                 pendingVkCaptchaUrl = null
                 lastOpenedVkCaptchaUrl = null
+                recordCurrentSessionLog = VpnSessionLogStore.isArmed(this)
                 appendLog("Validated Android runtime config: ${prepared.configPath}")
                 appendDiagnostic(
                     "Prepared Android VPN runtime. source=${args.getString("startSource", "unknown")} family=${prepared.runtimeFamily} activation=${prepared.activationState} mode=${prepared.configMode} profileHash=${prepared.profileHash ?: "n/a"} features=${prepared.activeFeatures.joinToString(",")}",
                 )
+                if (recordCurrentSessionLog) {
+                    appendDiagnostic("Recording this VPN session to Downloads/Odin's log after the tunnel stops.")
+                }
+                if (prepared.runtimeFamily == "cdn-anti-whitelist") {
+                    appendDiagnostic(
+                        "Selected CDN front for this start. tag=${prepared.frontTag ?: "n/a"} sni=${prepared.selectedSniHint ?: "n/a"} host=${prepared.frontHost ?: "n/a"} connect=${prepared.frontConnectHost ?: "n/a"}:${prepared.frontConnectPort ?: 0} path=${prepared.frontPath ?: "/"}",
+                    )
+                }
                 prepared.remotePeer?.let { appendLog("VK relay remote peer: $it") }
                 val vkWarmupOnly = !prepared.vkBinaryPath.isNullOrBlank()
                 if (vkWarmupOnly) {
@@ -464,6 +552,13 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                         maybePromoteVkRuntimeToRunning(line)
                     }.also { process ->
                         watchVkProcess(process)
+                    }
+                }
+                if (!prepared.nativeBinaryPath.isNullOrBlank()) {
+                    nativeProcess = VpnRuntimeLibbox.startNativeProcess(prepared) { line ->
+                        handleNativeProcessLogLine(line)
+                    }.also { process ->
+                        watchNativeProcess(process)
                     }
                 }
 
@@ -518,26 +613,28 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             }
             closeRuntimeResources("handleStop:$reason")
             val current = VpnRuntimeStore.snapshot(this)
-            persistTerminalState(
-                current.copy(
-                    status = "stopped",
-                    error = null,
-                    lastTest = current.lastTest,
-                    lastNetworkEvent = "stop:$reason",
-                    lastStartupStage = "stopped",
-                    lastFailureStage = null,
-                    lastFailureCode = null,
-                    logTail =
-                        trimLogTail(
-                            current.logTail +
-                                if (requestedByUser) {
-                                    "Android VPN runtime stop requested. reason=$reason"
-                                } else {
-                                    "Android VPN runtime stopped. reason=$reason"
-                                },
-                        ),
-                ),
-            )
+            val stopped =
+                persistTerminalState(
+                    current.copy(
+                        status = "stopped",
+                        error = null,
+                        lastTest = current.lastTest,
+                        lastNetworkEvent = "stop:$reason",
+                        lastStartupStage = "stopped",
+                        lastFailureStage = null,
+                        lastFailureCode = null,
+                        logTail =
+                            trimLogTail(
+                                current.logTail +
+                                    if (requestedByUser) {
+                                        "Android VPN runtime stop requested. reason=$reason"
+                                    } else {
+                                        "Android VPN runtime stopped. reason=$reason"
+                                    },
+                            ),
+                    ),
+                )
+            finalizeSessionLogIfNeeded(stopped, "handleStop:$reason")
             runCatching { runOnMainSync { stopForeground(STOP_FOREGROUND_REMOVE) } }
                 .onFailure { appendDiagnostic("stopForeground failed during handleStop: ${it.message}") }
             runCatching {
@@ -558,6 +655,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
     ) {
         synchronized(lifecycleLock) {
             appendDiagnostic("handleFailure entered. message=$message")
+            prepareNextCdnFrontRetryIfAvailable()
             closeRuntimeResources("handleFailure")
             val current = VpnRuntimeStore.snapshot(this)
             val failureBase =
@@ -574,6 +672,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                         ),
                     ),
                 )
+            finalizeSessionLogIfNeeded(next, "handleFailure")
             runOnMainSync { updateNotification(next) }
             runCatching { runOnMainSync { stopForeground(STOP_FOREGROUND_REMOVE) } }
                 .onFailure { appendDiagnostic("stopForeground failed during handleFailure: ${it.message}") }
@@ -581,10 +680,44 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         }
     }
 
+    private fun prepareNextCdnFrontRetryIfAvailable() {
+        val attempted = VpnRuntimeRestoreStore.readAttemptedStartRequest(this) ?: return
+        val runtimeFamily = attempted.getString("runtimeFamily", null)?.trim().orEmpty()
+        if (runtimeFamily != "cdn-anti-whitelist") {
+            return
+        }
+        val advanced = VpnRuntimeLibbox.advanceCdnFrontOverrideForRetry(attempted)
+        val previousTag = attempted.getString("frontTag", attempted.getString("cdnFrontTag", null))?.trim().orEmpty()
+        val nextTag = advanced.getString("frontTag", advanced.getString("cdnFrontTag", null))?.trim().orEmpty()
+        if (nextTag.isBlank() || nextTag == previousTag) {
+            return
+        }
+        val previousSni = attempted.getString("cdnTlsServerName", attempted.getString("tlsServerName", null))?.trim().orEmpty()
+        val nextSni = advanced.getString("cdnTlsServerName", advanced.getString("tlsServerName", null))?.trim().orEmpty()
+        val previousHost = attempted.getString("frontHost", attempted.getString("cdnFrontHost", null))?.trim().orEmpty()
+        val nextHost = advanced.getString("frontHost", advanced.getString("cdnFrontHost", null))?.trim().orEmpty()
+        VpnRuntimeRestoreStore.persistAttemptedStartRequest(this, advanced)
+        VpnRuntimeRestoreStore.persistStartRequest(this, advanced)
+        VpnRuntimeRestoreStore.markResumeEligible(this, false)
+        appendDiagnostic(
+            "Prepared next CDN front candidate for the next manual retry. previousTag=$previousTag previousSni=${previousSni.ifBlank { "n/a" }} previousHost=${previousHost.ifBlank { "n/a" }} nextTag=$nextTag nextSni=${nextSni.ifBlank { "n/a" }} nextHost=${nextHost.ifBlank { "n/a" }}",
+        )
+    }
+
     private fun startPreparedRuntimeTunnel(
         prepared: PreparedRuntime,
         startedAt: Long,
     ): Long {
+        if (prepared.skipVpnTunnel) {
+            updateStartupStage("native_process_started")
+            appendDiagnostic("Native sidecar runtime started without libbox CommandServer.")
+            VpnRuntimeLibbox.waitForLocalSocks(prepared.socksAddress, 20_000)
+            updateStartupStage("socks_ready")
+            appendDiagnostic("Local SOCKS endpoint became ready at ${prepared.socksAddress}.")
+            val startupDurationMs = SystemClock.elapsedRealtime() - startedAt
+            appendDiagnostic("Android native sidecar startup completed in ${startupDurationMs}ms.")
+            return startupDurationMs
+        }
         var startupStage = "command_server_ready"
         val server = CommandServer(this, this)
         server.start()
@@ -618,17 +751,19 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         shuttingDown = true
         try {
             appendDiagnostic(
-                "Closing runtime resources. origin=$origin commandServer=${commandServer != null} vkProcess=${vkProcess != null} tun=${tunDescriptor != null} wakeLock=${wakeLock?.isHeld == true}",
+                "Closing runtime resources. origin=$origin commandServer=${commandServer != null} vkProcess=${vkProcess != null} nativeProcess=${nativeProcess != null} tun=${tunDescriptor != null} wakeLock=${wakeLock?.isHeld == true}",
             )
             val process = vkProcess
+            val sidecarProcess = nativeProcess
             vkProcess = null
+            nativeProcess = null
             lastVkProcessLogLine = null
+            lastNativeProcessLogLine = null
             pendingVkCaptchaUrl = null
             lastOpenedVkCaptchaUrl = null
             vkTunnelStartPending = false
             vkTunnelActivationInFlight = false
             vkStartupStartedAtMs = 0L
-
             appendDiagnostic("Stopping libbox service before tearing down Android tunnel resources. origin=$origin")
             runCatching { commandServer?.closeService() }
                 .onFailure { appendDiagnostic("commandServer.closeService failed during $origin: ${it.message}") }
@@ -651,6 +786,17 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                         process.waitFor(250, TimeUnit.MILLISECONDS)
                     }
                 }.onFailure { appendDiagnostic("vkProcess teardown failed during $origin: ${it.message}") }
+            }
+            if (sidecarProcess != null) {
+                appendDiagnostic("Stopping native sidecar after Android tunnel shutdown. origin=$origin")
+                runCatching {
+                    sidecarProcess.destroy()
+                    if (!sidecarProcess.waitFor(750, TimeUnit.MILLISECONDS)) {
+                        appendDiagnostic("native sidecar did not exit after destroy(); forcing termination during $origin")
+                        sidecarProcess.destroyForcibly()
+                        sidecarProcess.waitFor(250, TimeUnit.MILLISECONDS)
+                    }
+                }.onFailure { appendDiagnostic("nativeProcess teardown failed during $origin: ${it.message}") }
             }
 
             activeRuntime = null
@@ -681,6 +827,23 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             handleFailure(
                 message = "vk-turn-proxy Android bridge exited with code $exitCode",
                 extraLogLine = lastLine?.let { "Last vk-turn-proxy log: $it" },
+            )
+        }
+    }
+
+    private fun watchNativeProcess(process: Process) {
+        thread(name = "odin-one-native-watch", isDaemon = true) {
+            val exitCode = runCatching { process.waitFor() }.getOrDefault(-1)
+            appendDiagnostic(
+                "Native sidecar watcher observed process exit. exitCode=$exitCode shuttingDown=$shuttingDown sameProcess=${process === nativeProcess}",
+            )
+            if (shuttingDown || process !== nativeProcess) {
+                return@thread
+            }
+            val lastLine = lastNativeProcessLogLine?.takeIf { it.isNotBlank() }
+            handleFailure(
+                message = "Native Android sidecar exited with code $exitCode",
+                extraLogLine = lastLine?.let { "Last native sidecar log: $it" },
             )
         }
     }
@@ -789,6 +952,11 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         maybeHandleVkCaptchaPrompt(line)
     }
 
+    private fun handleNativeProcessLogLine(line: String) {
+        lastNativeProcessLogLine = line
+        appendLog(line)
+    }
+
     private fun maybeHandleVkCaptchaPrompt(line: String) {
         val url = extractVkCaptchaUrl(line) ?: return
         if (pendingVkCaptchaUrl == url) {
@@ -854,7 +1022,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         if (!isActiveTunnelStatus(snapshot.status) || !matchesTunnelRequest(snapshot, args)) {
             return false
         }
-        return activeRuntime != null || commandServer != null || vkProcess != null || tunDescriptor != null
+        return activeRuntime != null || commandServer != null || vkProcess != null || nativeProcess != null || tunDescriptor != null
     }
 
     private fun acquireWakeLock() {
@@ -1045,6 +1213,51 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             ),
             sync = true,
         )
+
+    private fun finalizeSessionLogIfNeeded(
+        snapshot: TunnelSnapshot,
+        origin: String,
+    ) {
+        if (!recordCurrentSessionLog) {
+            return
+        }
+
+        recordCurrentSessionLog = false
+        VpnSessionLogStore.setArmed(this, false)
+
+        val contents =
+            buildString {
+                appendLine("timestamp=${currentTimestamp()}")
+                appendLine("origin=$origin")
+                appendLine("status=${snapshot.status}")
+                appendLine("serverHost=${snapshot.serverHost ?: ""}")
+                appendLine("transport=${snapshot.transport ?: ""}")
+                appendLine("engine=${snapshot.engine ?: ""}")
+                appendLine("protocol=${snapshot.protocol ?: ""}")
+                appendLine("runtimeFamily=${snapshot.runtimeFamily ?: ""}")
+                appendLine("activationState=${snapshot.activationState ?: ""}")
+                appendLine("sessionId=${snapshot.sessionId ?: ""}")
+                appendLine("sessionStartedAt=${snapshot.sessionStartedAt ?: ""}")
+                appendLine("frontHost=${snapshot.frontHost ?: ""}")
+                appendLine("frontTag=${snapshot.frontTag ?: ""}")
+                appendLine("selectedSniHint=${snapshot.selectedSniHint ?: ""}")
+                appendLine()
+                append(snapshot.logTail.joinToString(separator = "\n"))
+                appendLine()
+            }
+
+        runCatching {
+            val saved =
+                VpnSessionLogStore.saveSessionLog(
+                    context = this,
+                    contents = contents,
+                    timestampMs = System.currentTimeMillis(),
+                )
+            Log.i(TAG, "Saved VPN session log to ${saved.exportPath}")
+        }.onFailure { error ->
+            Log.e(TAG, "Failed to save VPN session log", error)
+        }
+    }
 
     private fun updateStartupStage(stage: String) {
         captureRuntimeState { current ->
@@ -1440,6 +1653,8 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
 
     companion object {
         private const val TAG = "VpnRuntimeService"
+        private const val PUBLIC_VPN_DNS_PRIMARY = "1.1.1.1"
+        private const val PUBLIC_VPN_DNS_SECONDARY = "1.0.0.1"
         const val ACTION_START = "com.odinone.desktop.vk.action.START_VPN_RUNTIME"
         const val ACTION_STOP = "com.odinone.desktop.vk.action.STOP_VPN_RUNTIME"
         const val EXTRA_START_ARGS = "start_args"

@@ -16,7 +16,7 @@ open class BuildTask : DefaultTask() {
 
     @TaskAction
     fun assemble() {
-        val executable = """npm""";
+        val executable = resolveNpmExecutable();
         try {
             runTauriCli(executable)
         } catch (e: Exception) {
@@ -42,6 +42,31 @@ open class BuildTask : DefaultTask() {
                 throw e;
             }
         }
+    }
+
+    private fun resolveNpmExecutable(): String {
+        val explicit = listOf(
+            System.getenv("ODIN_ONE_NPM"),
+            System.getenv("NPM_EXECUTABLE"),
+        ).firstOrNull { !it.isNullOrBlank() }?.trim()
+        if (!explicit.isNullOrBlank()) {
+            return explicit
+        }
+        val pathEntries = (System.getenv("PATH") ?: "")
+            .split(File.pathSeparator)
+            .filter { it.isNotBlank() }
+        val candidates = buildList {
+            add("npm")
+            for (entry in pathEntries) {
+                add(File(entry, "npm").absolutePath)
+                if (Os.isFamily(Os.FAMILY_WINDOWS)) {
+                    add(File(entry, "npm.cmd").absolutePath)
+                    add(File(entry, "npm.exe").absolutePath)
+                    add(File(entry, "npm.bat").absolutePath)
+                }
+            }
+        }
+        return candidates.firstOrNull { File(it).canExecute() } ?: "npm"
     }
 
     fun runTauriCli(executable: String) {
