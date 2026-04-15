@@ -33,6 +33,7 @@ export interface ServerDraft {
   vkTurnStreamCount?: number;
   vkTurnProxyPort?: number;
   realityPort?: number;
+  yandexEdgeOriginPort?: number;
 }
 
 export interface EdgeServerDraft {

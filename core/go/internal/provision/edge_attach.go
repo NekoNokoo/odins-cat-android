@@ -104,7 +104,7 @@ func normalizedEdgeRoutingMode(edge *EdgeAttach) EdgeRoutingMode {
 		return EdgeRoutingModeXrayProxy
 	}
 	trimmed := strings.TrimSpace(string(edge.RoutingMode))
-	if trimmed == "" {
+	if trimmed == "" || EdgeRoutingMode(trimmed) == EdgeRoutingModeTCPForward {
 		return EdgeRoutingModeXrayProxy
 	}
 	return EdgeRoutingMode(trimmed)
@@ -192,6 +192,15 @@ func ensureRemoteEdgeXrayInstalled(client *ssh.Client, targetPath string) error 
 	))
 	_, err := runRemote(client, cmd)
 	return err
+}
+
+func renderEdgeServiceReadyCommand(serviceName string, publicPort int) string {
+	return remoteRootShell(fmt.Sprintf(
+		"for _ in $(seq 1 20); do state=\"$(systemctl is-active %s 2>/dev/null || true)\"; if [ \"$state\" = \"active\" ] && ss -H -ltn | awk '{print $4}' | grep -Eq '(^|\\\\]|:)%d$'; then exit 0; fi; sleep 1; done; systemctl is-active %s",
+		quoteShell(serviceName),
+		publicPort,
+		quoteShell(serviceName),
+	))
 }
 
 func renderYandexEdgeTCPForwardSystemdUnit(originHost string, originPort, publicPort int) string {

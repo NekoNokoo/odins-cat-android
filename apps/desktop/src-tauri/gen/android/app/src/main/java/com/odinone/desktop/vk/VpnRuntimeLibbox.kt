@@ -2296,17 +2296,6 @@ object VpnRuntimeLibbox {
             val baseArgs = JSObject(normalized.toString()).apply { remove("configMode") }
             val baseOptions = readRealityRuntimeOptions(baseArgs, profile)
             val vpsOptions = readRealityVpsLabRuntimeOptions(normalized, profile, readRealitySettings(profile, normalized.getString("serverHost", "")?.trim().orEmpty()))
-            val vpsSource = vpsOptions.source.orEmpty()
-            val vpsTag = vpsOptions.tag.orEmpty()
-            val yandexProxyBridgeSource =
-                vpsSource.contains("yandex-edge", ignoreCase = true) &&
-                    (vpsSource.contains("xray-proxy", ignoreCase = true) ||
-                        vpsTag.contains("xray-proxy", ignoreCase = true))
-            if (yandexProxyBridgeSource && isCdnAntiWhitelistEnabled(profile)) {
-                normalized.put("runtimeFamily", RUNTIME_FAMILY_CDN_ANTI_WHITELIST)
-                normalized.remove("configMode")
-                return normalizeRuntimeArgs(normalized)
-            }
             normalized.put("activationState", vpsOptions.activationState)
             normalized.put("configMode", vpsOptions.mode)
             normalized.put("dnsMode", baseOptions.dnsMode)

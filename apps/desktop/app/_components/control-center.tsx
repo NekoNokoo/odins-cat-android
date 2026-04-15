@@ -156,6 +156,15 @@ const initialEdgeDraft: EdgeDraft = {
   publicPort: 443,
   routingMode: "xray-proxy",
 };
+
+const normalizeEdgeRoutingMode = (
+  value: string | undefined,
+): EdgeRoutingMode => {
+  if (value === "sni-router" || value === "xray-proxy") {
+    return value;
+  }
+  return "xray-proxy";
+};
 const diagnosticsPreviewMaxLines = 8;
 const diagnosticsPreviewMaxChars = 720;
 const diagnosticsLogPreviewMaxLines = 24;
@@ -1194,6 +1203,10 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         ? t("manualPortsRequired")
         : draft.vkTurnProxyPort === draft.realityPort
           ? t("manualPortsDistinct")
+          : draft.yandexEdgeOriginPort &&
+              (draft.yandexEdgeOriginPort === draft.realityPort ||
+                draft.yandexEdgeOriginPort === draft.vkTurnProxyPort)
+            ? t("yandexEdgeOriginPortDistinct")
           : null;
   const deployModeLabel = `${t("deployModeDual")} / ${deployPortMode === "manual" ? t("portSetupManual") : t("portSetupAuto")}`;
   const importedProfileForCurrentHost = importedProfileMatchesHost(
@@ -1780,6 +1793,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           ),
           vkTurnProxyPort: normalizePortHint(parsed.draft.vkTurnProxyPort),
           realityPort: normalizePortHint(parsed.draft.realityPort),
+          yandexEdgeOriginPort: normalizePortHint(
+            parsed.draft.yandexEdgeOriginPort,
+          ),
         });
         if (
           parsed.accessMode === "vless-reality" ||
@@ -1800,7 +1816,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         setDeployPortMode(
           parsed.deployPortMode === "manual" ||
             normalizePortHint(parsed.draft.vkTurnProxyPort) ||
-            normalizePortHint(parsed.draft.realityPort)
+            normalizePortHint(parsed.draft.realityPort) ||
+            normalizePortHint(parsed.draft.yandexEdgeOriginPort)
             ? "manual"
             : "auto",
         );
@@ -1825,12 +1842,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             parsed.edgeDraft.publicPort > 0
               ? parsed.edgeDraft.publicPort
               : initialEdgeDraft.publicPort,
-          routingMode:
-            parsed.edgeDraft.routingMode === "sni-router" ||
-            parsed.edgeDraft.routingMode === "tcp-forward" ||
-            parsed.edgeDraft.routingMode === "xray-proxy"
-              ? parsed.edgeDraft.routingMode
-              : initialEdgeDraft.routingMode,
+          routingMode: normalizeEdgeRoutingMode(parsed.edgeDraft.routingMode),
         });
       }
       if (parsed.importedProfile?.localPath) {
@@ -2171,7 +2183,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           },
           secret: edgeDraft.secret,
           publicPort: edgeDraft.publicPort,
-          routingMode: edgeDraft.routingMode,
+          routingMode: normalizeEdgeRoutingMode(edgeDraft.routingMode),
         },
       };
     }
@@ -2602,15 +2614,21 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         ownerRuntimeLabRequest = {
           mode: ownerRuntimeLabMode,
           hintServerName: "",
-          vpsServerName: "www.cloudflare.com",
-          vpsPort: 52444,
+          vpsServerName:
+            yandexEdgeFallback?.serverName?.trim() || "www.cloudflare.com",
+          vpsPort:
+            yandexEdgeFallback?.originPort ??
+            ownerProfile?.vlessReality?.port ??
+            importedProfile?.vlessReality?.port ??
+            52443,
           vpsConnectHost:
             yandexEdgeFallback?.connectHost ?? yandexEdgeConnectHost,
           vpsConnectPort:
             yandexEdgeFallback?.connectPort ?? yandexEdgeConnectPort,
           vpsTransport: "tcp",
-          vpsFlow: "xtls-rprx-vision",
-          vpsFingerprint: "chrome",
+          vpsFlow: yandexEdgeFallback?.flow?.trim() || "xtls-rprx-vision",
+          vpsFingerprint:
+            yandexEdgeFallback?.fingerprint?.trim() || "chrome",
           vpsSource: yandexEdgeFallback?.source || yandexEdgeSource,
           vpsTag: yandexEdgeFallback?.tag || yandexEdgeTag,
         };
@@ -2619,15 +2637,23 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         ownerRuntimeLabRequest = {
           mode: ownerRuntimeLabMode,
           hintServerName: "",
-          vpsServerName: "www.cloudflare.com",
-          vpsPort: 52444,
+          vpsServerName:
+            yandexEdgeProxyFallback?.serverName?.trim() ||
+            "www.cloudflare.com",
+          vpsPort:
+            yandexEdgeProxyFallback?.originPort ??
+            ownerProfile?.vlessReality?.port ??
+            importedProfile?.vlessReality?.port ??
+            52443,
           vpsConnectHost:
             yandexEdgeProxyFallback?.connectHost ?? yandexEdgeConnectHost,
           vpsConnectPort:
             yandexEdgeProxyFallback?.connectPort ?? yandexEdgeConnectPort,
           vpsTransport: "tcp",
-          vpsFlow: "xtls-rprx-vision",
-          vpsFingerprint: "chrome",
+          vpsFlow:
+            yandexEdgeProxyFallback?.flow?.trim() || "xtls-rprx-vision",
+          vpsFingerprint:
+            yandexEdgeProxyFallback?.fingerprint?.trim() || "chrome",
           vpsSource:
             yandexEdgeProxyFallback?.source || `${yandexEdgeSource}:proxy`,
           vpsTag: yandexEdgeProxyFallback?.tag || `${yandexEdgeTag}-proxy`,
@@ -2807,16 +2833,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       return buildTunnelStartRequest(baseDraft);
     }
     if (selectedAccessMode === "yandex-edge") {
-      if (localProfileUsesCdnYandexEdge) {
-        return {
-          ...buildTunnelStartRequest(baseDraft),
-          runtimeIdentityOverride: {
-            runtimeFamily: "cdn-anti-whitelist",
-            activationState: "active",
-          },
-        };
-      }
-      return buildTunnelStartRequest(baseDraft, "reality-yandex-edge-proxy", {
+      return buildTunnelStartRequest(baseDraft, "reality-yandex-edge", {
         allowImportedProfileForOwnerRuntimeLab: true,
         requireYandexEdgeSupport: true,
       });
@@ -4530,6 +4547,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                               ...current,
                               vkTurnProxyPort: undefined,
                               realityPort: undefined,
+                              yandexEdgeOriginPort: undefined,
                             }));
                           }}
                         >
@@ -4587,6 +4605,23 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                             }))
                           }
                           placeholder="52443"
+                          inputMode="numeric"
+                        />
+                      </label>
+
+                      <label className="input-field">
+                        <span>{t("yandexEdgeOriginPort")}</span>
+                        <input
+                          value={draft.yandexEdgeOriginPort ?? ""}
+                          onChange={(event) =>
+                            setDraft((current) => ({
+                              ...current,
+                              yandexEdgeOriginPort: normalizePortHint(
+                                Number.parseInt(event.target.value, 10),
+                              ),
+                            }))
+                          }
+                          placeholder="52444"
                           inputMode="numeric"
                         />
                       </label>
@@ -4795,9 +4830,6 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                         }))
                       }
                     >
-                      <option value="tcp-forward">
-                        {t("edgeRoutingTcpForward")}
-                      </option>
                       <option value="sni-router">
                         {t("edgeRoutingSniRouter")}
                       </option>

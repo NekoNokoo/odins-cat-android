@@ -148,15 +148,18 @@ const dictionaries = {
     portSetupAuto: "Авто",
     portSetupManual: "Вручную",
     portSetupAutoHint:
-      "Сервер сам подберёт свободные публичные порты для VK relay и REALITY при следующем deploy.",
+      "Сервер сам подберёт свободные порты для VK relay, REALITY и Yandex edge origin xHTTP при следующем deploy/attach.",
     portSetupManualHint:
-      "Зафиксируйте два публичных порта: VK relay по UDP и VLESS + REALITY по TCP.",
+      "Зафиксируйте порты вручную. Для origin нужны VK relay по UDP и VLESS + REALITY по TCP; Yandex edge origin xHTTP можно тоже зафиксировать или оставить пустым для авто-выбора.",
     vkRelayPort: "VK relay порт (UDP)",
     realityPort: "REALITY порт (TCP)",
+    yandexEdgeOriginPort: "Yandex edge origin xHTTP порт (TCP)",
     manualPortsRequired:
       "Для ручного режима нужно указать оба публичных порта: VK relay и REALITY.",
     manualPortsDistinct:
       "VK relay и REALITY должны использовать разные номера портов.",
+    yandexEdgeOriginPortDistinct:
+      "Yandex edge origin xHTTP должен использовать отдельный TCP порт, отличный от VK relay и REALITY.",
     protocolMode: "Direct protocol",
     protocolWireGuard: "WireGuard over xray",
     protocolReality: "VLESS + REALITY",
@@ -671,15 +674,18 @@ const dictionaries = {
     portSetupAuto: "Auto",
     portSetupManual: "Manual",
     portSetupAutoHint:
-      "The server will pick free public ports for the VK relay and REALITY on the next deploy.",
+      "The server will pick free ports for the VK relay, REALITY, and the Yandex edge origin xHTTP hop on the next deploy/attach.",
     portSetupManualHint:
-      "Pin both public ports yourself: VK relay over UDP and VLESS + REALITY over TCP.",
+      "Pin ports manually. Origin requires VK relay over UDP and VLESS + REALITY over TCP; the Yandex edge origin xHTTP port can also be pinned or left blank for auto-selection.",
     vkRelayPort: "VK relay port (UDP)",
     realityPort: "REALITY port (TCP)",
+    yandexEdgeOriginPort: "Yandex edge origin xHTTP port (TCP)",
     manualPortsRequired:
       "Manual mode requires both public ports: VK relay and REALITY.",
     manualPortsDistinct:
       "VK relay and REALITY must use different port numbers.",
+    yandexEdgeOriginPortDistinct:
+      "The Yandex edge origin xHTTP hop must use its own TCP port, different from VK relay and REALITY.",
     protocolMode: "Direct protocol",
     protocolWireGuard: "WireGuard over xray",
     protocolReality: "VLESS + REALITY",

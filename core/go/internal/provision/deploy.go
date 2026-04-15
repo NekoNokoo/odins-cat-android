@@ -581,13 +581,15 @@ func executeEdgeAttach(id string, req Request) error {
 	); err != nil {
 		return err
 	}
-	healthCommand := remoteRootShell(fmt.Sprintf(
-		"systemctl is-active %s && ss -H -ltn | awk '{print $4}' | grep -Eq '(^|\\]|:)%d$' && timeout 8 bash -lc 'cat </dev/null >/dev/tcp/%s/%d'",
-		quoteShell(layout.serviceName),
-		publicPort,
-		req.Server.Host,
-		reality.Port,
-	))
+	healthCommand := fmt.Sprintf(
+		"%s && %s",
+		renderEdgeServiceReadyCommand(layout.serviceName, publicPort),
+		remoteRootShell(fmt.Sprintf(
+			"timeout 8 bash -lc 'cat </dev/null >/dev/tcp/%s/%d'",
+			req.Server.Host,
+			reality.Port,
+		)),
+	)
 	if _, err := runRemote(edgeClient, healthCommand); err != nil {
 		return err
 	}
