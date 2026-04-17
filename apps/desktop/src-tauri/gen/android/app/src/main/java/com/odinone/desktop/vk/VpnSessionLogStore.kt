@@ -23,6 +23,56 @@ object VpnSessionLogStore {
         val exportPath: String,
     )
 
+    fun saveTextLog(
+        context: Context,
+        fileName: String,
+        contents: String,
+        mimeType: String = "text/plain",
+    ): SavedLogFile {
+        val sanitizedName =
+            fileName
+                .ifBlank { "odin-debug.log.txt" }
+                .replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/$DOWNLOAD_FOLDER"
+        val bytes = contents.toByteArray(Charsets.UTF_8)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = context.contentResolver
+            val values =
+                ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, sanitizedName)
+                    put(MediaStore.Downloads.MIME_TYPE, mimeType)
+                    put(MediaStore.Downloads.RELATIVE_PATH, relativePath)
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+            val uri =
+                resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: throw IOException("Failed to create debug log file in public Downloads.")
+            try {
+                resolver.openOutputStream(uri, "wt")?.use { output ->
+                    output.write(bytes)
+                    output.flush()
+                } ?: throw IOException("Failed to open debug log output stream.")
+                values.clear()
+                values.put(MediaStore.Downloads.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            } catch (error: Exception) {
+                resolver.delete(uri, null, null)
+                throw error
+            }
+            return SavedLogFile(
+                exportPath = "${Environment.DIRECTORY_DOWNLOADS}/$DOWNLOAD_FOLDER/$sanitizedName",
+            )
+        }
+
+        val downloadsDir =
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val exportDir = File(downloadsDir, DOWNLOAD_FOLDER).apply { mkdirs() }
+        val outputFile = File(exportDir, sanitizedName)
+        outputFile.writeText(contents, Charsets.UTF_8)
+        return SavedLogFile(exportPath = outputFile.absolutePath)
+    }
+
     fun isArmed(context: Context): Boolean =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getBoolean(PREF_KEY_RECORD_NEXT_SESSION, false)
@@ -48,44 +98,11 @@ object VpnSessionLogStore {
                     Instant.ofEpochMilli(timestampMs).atZone(ZoneId.systemDefault()),
                 )
             }.log.txt"
-        val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/$DOWNLOAD_FOLDER"
-        val bytes = contents.toByteArray(Charsets.UTF_8)
-        val mimeType = "text/plain"
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val resolver = context.contentResolver
-            val values =
-                ContentValues().apply {
-                    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
-                    put(MediaStore.Downloads.MIME_TYPE, mimeType)
-                    put(MediaStore.Downloads.RELATIVE_PATH, relativePath)
-                    put(MediaStore.Downloads.IS_PENDING, 1)
-                }
-            val uri =
-                resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                    ?: throw IOException("Failed to create session log file in public Downloads.")
-            try {
-                resolver.openOutputStream(uri, "wt")?.use { output ->
-                    output.write(bytes)
-                    output.flush()
-                } ?: throw IOException("Failed to open session log output stream.")
-                values.clear()
-                values.put(MediaStore.Downloads.IS_PENDING, 0)
-                resolver.update(uri, values, null, null)
-            } catch (error: Exception) {
-                resolver.delete(uri, null, null)
-                throw error
-            }
-            return SavedLogFile(
-                exportPath = "${Environment.DIRECTORY_DOWNLOADS}/$DOWNLOAD_FOLDER/$fileName",
-            )
-        }
-
-        val downloadsDir =
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        val exportDir = File(downloadsDir, DOWNLOAD_FOLDER).apply { mkdirs() }
-        val outputFile = File(exportDir, fileName)
-        outputFile.writeText(contents, Charsets.UTF_8)
-        return SavedLogFile(exportPath = outputFile.absolutePath)
+        return saveTextLog(
+            context = context,
+            fileName = fileName,
+            contents = contents,
+            mimeType = "text/plain",
+        )
     }
 }

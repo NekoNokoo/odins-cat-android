@@ -69,6 +69,13 @@ class ShareInviteFileArgs {
 }
 
 @InvokeArg
+class ExportDebugLogArgs {
+    var fileName: String = "whitelist-probe.log.txt"
+    var contents: String = ""
+    var mimeType: String = "text/plain"
+}
+
+@InvokeArg
 class OpenExternalUrlArgs {
     var url: String = ""
 }
@@ -349,6 +356,34 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve(payload)
         }.onFailure { error ->
             invoke.reject(error.message ?: "Failed to open Android share sheet.")
+        }
+    }
+
+    @Command
+    fun exportDebugLog(invoke: Invoke) {
+        val args = invoke.parseArgs(ExportDebugLogArgs::class.java)
+        if (args.contents.isBlank()) {
+            invoke.reject("Debug log contents are required.")
+            return
+        }
+
+        runCatching {
+            val saved =
+                VpnSessionLogStore.saveTextLog(
+                    context = activity,
+                    fileName = args.fileName,
+                    contents = args.contents,
+                    mimeType = args.mimeType.ifBlank { "text/plain" },
+                )
+            JSObject().apply {
+                put("ok", true)
+                put("fileName", args.fileName)
+                put("exportPath", saved.exportPath)
+            }
+        }.onSuccess { payload ->
+            invoke.resolve(payload)
+        }.onFailure { error ->
+            invoke.reject(error.message ?: "Failed to save debug log.")
         }
     }
 

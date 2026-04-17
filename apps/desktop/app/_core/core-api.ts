@@ -49,6 +49,102 @@ type TauriCoreModule = typeof import("@tauri-apps/api/core");
 
 let tauriCorePromise: Promise<TauriCoreModule | null> | null = null;
 
+const STATIC_WHITELIST_SOURCE = "embedded-static-whitelist";
+const STATIC_WHITELIST_IP_LIST = `${STATIC_WHITELIST_SOURCE}:ipwhitelist.txt`;
+const STATIC_WHITELIST_CIDR_LIST = `${STATIC_WHITELIST_SOURCE}:cidrwhitelist.txt`;
+const STATIC_WHITELIST_CIDRS = [
+  "51.250.0.0/17",
+  "84.201.128.0/18",
+  "158.160.0.0/16",
+  "217.16.24.0/21",
+  "95.163.248.0/22",
+  "185.241.192.0/22",
+  "185.39.206.0/24",
+  "91.222.239.0/24",
+  "109.73.201.0/24",
+  "95.181.182.0/24",
+  "89.253.200.0/21",
+  "79.174.91.0/24",
+  "79.174.92.0/24",
+  "79.174.93.0/24",
+  "79.174.94.0/24",
+  "79.174.95.0/24",
+  "185.177.73.0/24",
+  "134.17.94.0/24",
+  "185.141.216.0/24",
+  "103.111.114.0/24",
+  "78.159.247.0/24",
+  "87.250.247.0/24",
+  "87.250.251.0/24",
+  "87.250.250.0/24",
+  "87.250.254.0/24",
+  "77.88.21.0/24"
+] as const;
+
+function parseIpv4(ip: string) {
+  const parts = ip.trim().split(".");
+  if (parts.length !== 4) {
+    return null;
+  }
+  const octets = parts.map((part) => Number.parseInt(part, 10));
+  if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) {
+    return null;
+  }
+  return (
+    ((octets[0] ?? 0) << 24) |
+    ((octets[1] ?? 0) << 16) |
+    ((octets[2] ?? 0) << 8) |
+    (octets[3] ?? 0)
+  ) >>> 0;
+}
+
+function ipMatchesCidr(ip: number, cidr: string) {
+  const [base, prefixText] = cidr.split("/");
+  const baseIp = base ? parseIpv4(base) : null;
+  const prefix = prefixText ? Number.parseInt(prefixText, 10) : NaN;
+  if (baseIp === null || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) {
+    return false;
+  }
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return (ip & mask) >>> 0 === (baseIp & mask) >>> 0;
+}
+
+function checkStaticWhitelistIp(ip: string): WhitelistLookupResult {
+  const trimmedIp = ip.trim();
+  const parsedIp = parseIpv4(trimmedIp);
+  if (parsedIp === null) {
+    return {
+      ip: trimmedIp,
+      valid: false,
+      matchedIp: false,
+      matchedCidr: false,
+      matchedCidrs: [],
+      checkedAt: new Date().toISOString(),
+      cached: true,
+      sourceRepo: STATIC_WHITELIST_SOURCE,
+      ipListUrl: STATIC_WHITELIST_IP_LIST,
+      cidrListUrl: STATIC_WHITELIST_CIDR_LIST,
+      error: "enter a valid IPv4 address"
+    };
+  }
+
+  const matchedCidrs = STATIC_WHITELIST_CIDRS.filter((cidr) => ipMatchesCidr(parsedIp, cidr));
+  return {
+    ip: trimmedIp,
+    valid: true,
+    matchedIp: false,
+    matchedCidr: matchedCidrs.length > 0,
+    matchedCidrs,
+    checkedAt: new Date().toISOString(),
+    listsFetchedAt: STATIC_WHITELIST_SOURCE,
+    cached: true,
+    sourceRepo: STATIC_WHITELIST_SOURCE,
+    ipListUrl: STATIC_WHITELIST_IP_LIST,
+    cidrListUrl: STATIC_WHITELIST_CIDR_LIST,
+    note: "Using the bundled static whitelist dataset."
+  };
+}
+
 function unsupportedResult<T>(status: number, data: T): CoreApiResult<T> {
   return {
     ok: false,
@@ -361,24 +457,11 @@ export const coreApi = {
     if (await prefersAndroidNativeBridge()) {
       return invokeNative<WhitelistLookupResult>("mobile_check_whitelist_ip", { ip });
     }
-    return unsupportedResult(
-      501,
-      {
-        ip,
-        valid: false,
-        matchedIp: false,
-        matchedCidr: false,
-        matchedCidrs: [],
-        checkedAt: new Date().toISOString(),
-        cached: false,
-        sourceRepo: "https://github.com/hxehex/russia-mobile-internet-whitelist",
-        ipListUrl:
-          "https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/ipwhitelist.txt",
-        cidrListUrl:
-          "https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/cidrwhitelist.txt",
-        error: "Whitelist IP lookup is currently available only through the Android native bridge."
-      } satisfies WhitelistLookupResult
-    );
+    return {
+      ok: true,
+      status: 200,
+      data: checkStaticWhitelistIp(ip)
+    };
   },
 
   async inspectMobileNetworkLens(payload: MobileNetworkLensRequest) {
@@ -493,6 +576,27 @@ export const coreApi = {
         fileName,
         error: "Native invite file sharing is currently available only through the Android bridge."
       } as InviteFileShareResult & { error: string }
+    );
+  },
+
+  async exportDebugLog(fileName: string, contents: string) {
+    if (await prefersAndroidNativeBridge()) {
+      return invokeNative<{ ok: boolean; fileName: string; exportPath: string }>(
+        "mobile_export_debug_log",
+        {
+          fileName,
+          contents
+        }
+      );
+    }
+    return unsupportedResult(
+      501,
+      {
+        ok: false,
+        fileName,
+        exportPath: "",
+        error: "Debug log export is currently available only through the Android native bridge."
+      } as { ok: boolean; fileName: string; exportPath: string; error: string }
     );
   },
 
