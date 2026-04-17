@@ -558,6 +558,17 @@ pub(crate) struct LocalTunnelTestPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct LocalTunnelSpeedTestPayload {
+    #[serde(default)]
+    latency_url: String,
+    #[serde(default)]
+    download_url: String,
+    #[serde(default)]
+    download_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct MobileNetworkLensPayload {
     #[serde(default)]
     origin_host: String,
@@ -1550,6 +1561,33 @@ pub async fn mobile_run_local_tunnel_test(
 }
 
 #[tauri::command]
+pub async fn mobile_run_local_tunnel_speed_test(
+    app: AppHandle,
+    payload: LocalTunnelSpeedTestPayload,
+) -> Result<Value, String> {
+    let download_bytes = if payload.download_bytes > 0 {
+        payload.download_bytes
+    } else {
+        2_000_000
+    };
+    let latency_url = optional_string(&payload.latency_url)
+        .unwrap_or("https://www.gstatic.com/generate_204")
+        .to_string();
+    let download_url = optional_string(&payload.download_url)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("https://speed.cloudflare.com/__down?bytes={download_bytes}"));
+    android_vpn::run_speed_test(
+        &app,
+        json!({
+            "latencyUrl": latency_url,
+            "downloadUrl": download_url,
+            "downloadBytes": download_bytes
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn mobile_inspect_network_lens(
     app: AppHandle,
     payload: MobileNetworkLensPayload,
@@ -1867,6 +1905,7 @@ pub fn register_mobile_commands(builder: tauri::Builder<tauri::Wry>) -> tauri::B
             mobile_stop_local_tunnel,
             mobile_get_local_tunnel_status,
             mobile_run_local_tunnel_test,
+            mobile_run_local_tunnel_speed_test,
             mobile_inspect_network_lens,
             mobile_list_installed_apps,
             mobile_get_split_tunnel_selection,

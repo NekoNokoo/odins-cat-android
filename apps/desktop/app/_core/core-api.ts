@@ -26,6 +26,19 @@ export type CoreHealthState = {
   status: string;
 };
 
+export type TunnelSpeedTestResult = {
+  ok: boolean;
+  status: "idle" | "running" | "passed" | "failed";
+  latencyUrl?: string;
+  downloadUrl?: string;
+  checkedAt?: string;
+  latencyMs?: number;
+  downloadMbps?: number;
+  downloadBytes?: number;
+  downloadDurationMs?: number;
+  error?: string;
+};
+
 export type CoreApiResult<T> = {
   ok: boolean;
   status: number;
@@ -43,6 +56,12 @@ type GuestProfileRequest = ProvisionRequest & {
 
 type ImportProfileRequest = {
   shareCode: string;
+};
+
+type TunnelSpeedTestRequest = {
+  latencyUrl?: string;
+  downloadUrl?: string;
+  downloadBytes?: number;
 };
 
 type TauriCoreModule = typeof import("@tauri-apps/api/core");
@@ -80,6 +99,9 @@ const STATIC_WHITELIST_CIDRS = [
   "87.250.254.0/24",
   "77.88.21.0/24"
 ] as const;
+const DEFAULT_SPEEDTEST_LATENCY_URL = "https://www.gstatic.com/generate_204";
+const DEFAULT_SPEEDTEST_DOWNLOAD_BYTES = 2_000_000;
+const DEFAULT_SPEEDTEST_DOWNLOAD_URL = `https://speed.cloudflare.com/__down?bytes=${DEFAULT_SPEEDTEST_DOWNLOAD_BYTES}`;
 
 function parseIpv4(ip: string) {
   const parts = ip.trim().split(".");
@@ -143,6 +165,84 @@ function checkStaticWhitelistIp(ip: string): WhitelistLookupResult {
     cidrListUrl: STATIC_WHITELIST_CIDR_LIST,
     note: "Using the bundled static whitelist dataset."
   };
+}
+
+async function runBrowserSpeedTest(
+  payload: TunnelSpeedTestRequest = {}
+): Promise<TunnelSpeedTestResult> {
+  const latencyUrl = payload.latencyUrl?.trim() || DEFAULT_SPEEDTEST_LATENCY_URL;
+  const downloadBytes =
+    typeof payload.downloadBytes === "number" && payload.downloadBytes > 0
+      ? Math.floor(payload.downloadBytes)
+      : DEFAULT_SPEEDTEST_DOWNLOAD_BYTES;
+  const downloadUrl =
+    payload.downloadUrl?.trim() ||
+    `https://speed.cloudflare.com/__down?bytes=${downloadBytes}`;
+
+  const checkedAt = new Date().toISOString();
+
+  try {
+    const latencyStartedAt = performance.now();
+    const latencyResponse = await fetch(latencyUrl, {
+      method: "HEAD",
+      cache: "no-store"
+    });
+    const latencyFinishedAt = performance.now();
+    if (!latencyResponse.ok) {
+      return {
+        ok: false,
+        status: "failed",
+        latencyUrl,
+        downloadUrl,
+        checkedAt,
+        error: `Latency probe returned HTTP ${latencyResponse.status}.`
+      };
+    }
+
+    const downloadStartedAt = performance.now();
+    const downloadResponse = await fetch(downloadUrl, {
+      method: "GET",
+      cache: "no-store"
+    });
+    if (!downloadResponse.ok) {
+      return {
+        ok: false,
+        status: "failed",
+        latencyUrl,
+        downloadUrl,
+        checkedAt,
+        latencyMs: Math.max(1, Math.round(latencyFinishedAt - latencyStartedAt)),
+        error: `Download probe returned HTTP ${downloadResponse.status}.`
+      };
+    }
+
+    const buffer = await downloadResponse.arrayBuffer();
+    const downloadFinishedAt = performance.now();
+    const measuredBytes = buffer.byteLength;
+    const durationMs = Math.max(1, Math.round(downloadFinishedAt - downloadStartedAt));
+    const mbps = Number((((measuredBytes * 8) / 1_000_000 / durationMs) * 1000).toFixed(1));
+
+    return {
+      ok: true,
+      status: "passed",
+      latencyUrl,
+      downloadUrl,
+      checkedAt,
+      latencyMs: Math.max(1, Math.round(latencyFinishedAt - latencyStartedAt)),
+      downloadMbps: mbps,
+      downloadBytes: measuredBytes,
+      downloadDurationMs: durationMs
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: "failed",
+      latencyUrl,
+      downloadUrl,
+      checkedAt,
+      error: error instanceof Error ? error.message : "Browser speed test failed."
+    };
+  }
 }
 
 function unsupportedResult<T>(status: number, data: T): CoreApiResult<T> {
@@ -397,6 +497,23 @@ export const coreApi = {
       return result;
     }
     return postJson<LocalTunnelState>("/api/local-tunnel/test", { url });
+  },
+
+  async runLocalTunnelSpeedTest(payload: TunnelSpeedTestRequest = {}) {
+    if (await prefersAndroidNativeBridge()) {
+      const result = await invokeNative<TunnelSpeedTestResult>("mobile_run_local_tunnel_speed_test", {
+        payload
+      });
+      if (!result.data.ok) {
+        return unsupportedResult(502, result.data);
+      }
+      return result;
+    }
+    return {
+      ok: true,
+      status: 200,
+      data: await runBrowserSpeedTest(payload)
+    };
   },
 
   async getSystemProxyStatus() {

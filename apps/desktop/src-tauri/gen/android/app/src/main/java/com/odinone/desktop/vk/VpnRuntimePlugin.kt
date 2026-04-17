@@ -45,6 +45,13 @@ class ConnectivityTestArgs {
 }
 
 @InvokeArg
+class SpeedTestArgs {
+    var latencyUrl: String = "https://www.gstatic.com/generate_204"
+    var downloadUrl: String = "https://speed.cloudflare.com/__down?bytes=2000000"
+    var downloadBytes: Long = 2_000_000
+}
+
+@InvokeArg
 class NetworkLensArgs {
     var originHost: String = ""
     var tunnelHost: String? = null
@@ -240,6 +247,39 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
                         sync = true,
                     )
                 invoke.resolve(failed.toJsObject())
+            }
+        }
+    }
+
+    @Command
+    fun runSpeedTest(invoke: Invoke) {
+        val args = invoke.parseArgs(SpeedTestArgs::class.java)
+        thread(name = "odin-one-speed-test", isDaemon = true) {
+            Log.i(
+                "VpnRuntimeService",
+                "VpnRuntimePlugin received runSpeedTest for ${args.downloadUrl} (${args.downloadBytes} bytes)",
+            )
+            runCatching {
+                VpnRuntimeLibbox.runSpeedTest(
+                    context = activity,
+                    latencyUrl = args.latencyUrl,
+                    downloadUrl = args.downloadUrl,
+                    requestedDownloadBytes = args.downloadBytes,
+                )
+            }.onSuccess { result ->
+                invoke.resolve(result.toJsObject())
+            }.onFailure { error ->
+                Log.e("VpnRuntimeService", "runSpeedTest crashed before producing a result", error)
+                invoke.resolve(
+                    TunnelSpeedTestSnapshot(
+                        ok = false,
+                        status = "failed",
+                        latencyUrl = args.latencyUrl,
+                        downloadUrl = args.downloadUrl,
+                        checkedAt = currentTimestamp(),
+                        error = error.message ?: "Android VPN speed test crashed.",
+                    ).toJsObject(),
+                )
             }
         }
     }

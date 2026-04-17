@@ -585,6 +585,78 @@ body > main.shell > section.workspace > .mobile-shell > .home-scroll {
   line-height: 1.35;
 }
 
+.home-speed-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid rgba(17, 17, 17, 0.12);
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(244, 243, 238, 0.94) 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.home-speed-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.home-speed-card__head strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.98rem;
+  line-height: 1.15;
+}
+
+.home-speed-card__stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.home-speed-card__stat {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(17, 17, 17, 0.12);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.84);
+}
+
+.home-speed-card__stat span {
+  color: var(--muted);
+  font-family: var(--font-mono), monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.home-speed-card__stat strong {
+  min-width: 0;
+  font-size: 1rem;
+  line-height: 1.15;
+  letter-spacing: -0.03em;
+  word-break: break-word;
+}
+
+.home-speed-card__meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.home-speed-card__actions {
+  display: grid;
+}
+
+.home-speed-card__actions .ghost,
+.home-speed-card__actions .primary {
+  width: 100%;
+}
+
 .home-whitelist-pill {
   display: inline-flex;
   align-items: center;

@@ -30,7 +30,11 @@ import type {
   WhitelistLookupResult,
 } from "@whitelist/contracts";
 import { StageList } from "@whitelist/ui/StageList";
-import { coreApi, type CoreHealthState } from "../_core/core-api";
+import {
+  coreApi,
+  type CoreHealthState,
+  type TunnelSpeedTestResult,
+} from "../_core/core-api";
 import { useI18n } from "./i18n";
 
 const initialDraft: ServerDraft = {
@@ -64,6 +68,7 @@ type DeployPortMode = "auto" | "manual";
 type PendingAction =
   | "enableVpn"
   | "disableVpn"
+  | "runSpeedTest"
   | "toggleNextVpnLog"
   | "runWhitelistDebugProbe"
   | "validate"
@@ -122,6 +127,19 @@ type WhitelistDebugProbeAttempt = {
 };
 
 const WHITELIST_DEBUG_PROBE_VARIANT_TIMEOUT_MS = 40_000;
+
+const formatSpeedTestLatency = (
+  value: number | undefined,
+  emptyLabel: string,
+) => (typeof value === "number" && Number.isFinite(value) ? `${Math.round(value)} ms` : emptyLabel);
+
+const formatSpeedTestDownload = (
+  value: number | undefined,
+  emptyLabel: string,
+) =>
+  typeof value === "number" && Number.isFinite(value)
+    ? `${value.toFixed(1)} Mbps`
+    : emptyLabel;
 
 type WhitelistDebugProbeExecution = {
   attempt: WhitelistDebugProbeAttempt;
@@ -887,6 +905,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   >(null);
   const [mobileNetworkLens, setMobileNetworkLens] =
     useState<MobileNetworkLensResult | null>(null);
+  const [speedTestResult, setSpeedTestResult] =
+    useState<TunnelSpeedTestResult | null>(null);
   const importProfileFileInputRef = useRef<HTMLInputElement | null>(null);
   const [localTunnel, setLocalTunnel] = useState<LocalTunnelState | null>(null);
   const [systemProxy, setSystemProxy] = useState<SystemProxyState | null>(null);
@@ -1261,6 +1281,22 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const primaryStatusText = vpnVisualActive
     ? t("vpnEnabled")
     : t("vpnDisabled");
+  const speedTestReady =
+    runtimeTunnelActive && localTunnel?.status === "running" && !!localTunnel?.socksAddress;
+  const speedTestLatencyLabel = formatSpeedTestLatency(
+    speedTestResult?.latencyMs,
+    t("speedTestIdleValue"),
+  );
+  const speedTestDownloadLabel = formatSpeedTestDownload(
+    speedTestResult?.downloadMbps,
+    t("speedTestIdleValue"),
+  );
+  const speedTestCheckedAt = speedTestResult?.checkedAt
+    ? new Date(speedTestResult.checkedAt).toLocaleTimeString(locale === "ru" ? "ru-RU" : "en-US", {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : null;
   const relayOwnerConnectAnimation =
     (selectedAccessMode === "yandex-edge" ||
       selectedAccessMode === "yandex-edge-proxy" ||
@@ -1570,6 +1606,11 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           selectedAccessMode === "yandex-edge-proxy") &&
           routeLensTunnelDisplay)),
   );
+  useEffect(() => {
+    if (!speedTestReady && speedTestResult) {
+      setSpeedTestResult(null);
+    }
+  }, [speedTestReady, speedTestResult]);
   const ownerRuntimeLabPanelVisible =
     isAndroidClient && ownerRuntimeLabUnlocked;
   const ownerRuntimeLabHintInputsVisible =
@@ -3810,6 +3851,31 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     return result;
   };
 
+  const handleRunSpeedTest = () => {
+    if (!speedTestReady) {
+      return;
+    }
+    setPendingAction("runSpeedTest");
+    startTransition(async () => {
+      try {
+        const res = await coreApi.runLocalTunnelSpeedTest();
+        setSpeedTestResult(res.data);
+      } catch (requestError) {
+        setSpeedTestResult({
+          ok: false,
+          status: "failed",
+          checkedAt: new Date().toISOString(),
+          error:
+            requestError instanceof Error
+              ? requestError.message
+              : t("speedTestFailed"),
+        });
+      } finally {
+        setPendingAction(null);
+      }
+    });
+  };
+
   const describeTunnelProbeFailure = (state: LocalTunnelState) => {
     const message =
       state.lastTest?.error ?? state.error ?? t("tunnelTestFailed");
@@ -4718,6 +4784,64 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                     ) : null}
                   </div>
                 ) : null}
+
+                <div className="home-speed-card">
+                  <div className="home-speed-card__head">
+                    <div>
+                      <span className="section-eyebrow">
+                        {t("speedTestTitle")}
+                      </span>
+                      <strong>{t("speedTestSubtitle")}</strong>
+                    </div>
+                    <span
+                      className={`home-whitelist-pill home-whitelist-pill--${
+                        speedTestResult?.ok ? "inactive" : "unknown"
+                      }`}
+                    >
+                      {isBusy("runSpeedTest")
+                        ? t("testing")
+                        : speedTestResult?.ok
+                          ? t("ready")
+                          : t("tunnelStatusIdle")}
+                    </span>
+                  </div>
+
+                  <div className="home-speed-card__stats">
+                    <div className="home-speed-card__stat">
+                      <span>{t("speedTestLatency")}</span>
+                      <strong>{speedTestLatencyLabel}</strong>
+                    </div>
+                    <div className="home-speed-card__stat">
+                      <span>{t("speedTestDownload")}</span>
+                      <strong>{speedTestDownloadLabel}</strong>
+                    </div>
+                  </div>
+
+                  {speedTestResult?.error ? (
+                    <p className="home-speed-card__meta">{speedTestResult.error}</p>
+                  ) : speedTestCheckedAt ? (
+                    <p className="home-speed-card__meta">
+                      {t("speedTestCheckedAt")}: {speedTestCheckedAt}
+                    </p>
+                  ) : (
+                    <p className="home-speed-card__meta">
+                      {t("speedTestHint")}
+                    </p>
+                  )}
+
+                  <div className="home-speed-card__actions">
+                    <button
+                      className="ghost"
+                      type="button"
+                      onClick={handleRunSpeedTest}
+                      disabled={!speedTestReady || isBusy("runSpeedTest")}
+                    >
+                      {isBusy("runSpeedTest")
+                        ? t("testing")
+                        : t("speedTestRun")}
+                    </button>
+                  </div>
+                </div>
               </div>
 
               <div className="home-divider" />

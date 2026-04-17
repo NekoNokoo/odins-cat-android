@@ -33,6 +33,33 @@ data class TunnelTestSnapshot(
     val checkedAt: String? = null,
 )
 
+data class TunnelSpeedTestSnapshot(
+    val ok: Boolean = false,
+    val status: String = "idle",
+    val latencyUrl: String? = null,
+    val downloadUrl: String? = null,
+    val checkedAt: String? = null,
+    val latencyMs: Int? = null,
+    val downloadMbps: Double? = null,
+    val downloadBytes: Long? = null,
+    val downloadDurationMs: Long? = null,
+    val error: String? = null,
+) {
+    fun toJsObject(): JSObject =
+        JSObject().apply {
+            put("ok", ok)
+            put("status", status)
+            put("latencyUrl", latencyUrl)
+            put("downloadUrl", downloadUrl)
+            put("checkedAt", checkedAt)
+            put("latencyMs", latencyMs)
+            put("downloadMbps", downloadMbps)
+            put("downloadBytes", downloadBytes)
+            put("downloadDurationMs", downloadDurationMs)
+            put("error", error)
+        }
+}
+
 data class TunnelSnapshot(
     val status: String = "idle",
     val socksAddress: String? = null,
