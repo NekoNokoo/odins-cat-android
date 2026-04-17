@@ -585,6 +585,15 @@ body > main.shell > section.workspace > .mobile-shell > .home-scroll {
   line-height: 1.35;
 }
 
+.home-hero-actions {
+  display: grid;
+}
+
+.home-hero-actions .ghost,
+.home-hero-actions .primary {
+  width: 100%;
+}
+
 .home-speed-card {
   display: grid;
   gap: 10px;

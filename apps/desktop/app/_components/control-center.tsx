@@ -53,6 +53,7 @@ type MobileSheet =
   | "server"
   | "apps"
   | "mode-picker"
+  | "speedtest"
   | "whitelist"
   | "logs"
   | "more"
@@ -4785,62 +4786,14 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                   </div>
                 ) : null}
 
-                <div className="home-speed-card">
-                  <div className="home-speed-card__head">
-                    <div>
-                      <span className="section-eyebrow">
-                        {t("speedTestTitle")}
-                      </span>
-                      <strong>{t("speedTestSubtitle")}</strong>
-                    </div>
-                    <span
-                      className={`home-whitelist-pill home-whitelist-pill--${
-                        speedTestResult?.ok ? "inactive" : "unknown"
-                      }`}
-                    >
-                      {isBusy("runSpeedTest")
-                        ? t("testing")
-                        : speedTestResult?.ok
-                          ? t("ready")
-                          : t("tunnelStatusIdle")}
-                    </span>
-                  </div>
-
-                  <div className="home-speed-card__stats">
-                    <div className="home-speed-card__stat">
-                      <span>{t("speedTestLatency")}</span>
-                      <strong>{speedTestLatencyLabel}</strong>
-                    </div>
-                    <div className="home-speed-card__stat">
-                      <span>{t("speedTestDownload")}</span>
-                      <strong>{speedTestDownloadLabel}</strong>
-                    </div>
-                  </div>
-
-                  {speedTestResult?.error ? (
-                    <p className="home-speed-card__meta">{speedTestResult.error}</p>
-                  ) : speedTestCheckedAt ? (
-                    <p className="home-speed-card__meta">
-                      {t("speedTestCheckedAt")}: {speedTestCheckedAt}
-                    </p>
-                  ) : (
-                    <p className="home-speed-card__meta">
-                      {t("speedTestHint")}
-                    </p>
-                  )}
-
-                  <div className="home-speed-card__actions">
-                    <button
-                      className="ghost"
-                      type="button"
-                      onClick={handleRunSpeedTest}
-                      disabled={!speedTestReady || isBusy("runSpeedTest")}
-                    >
-                      {isBusy("runSpeedTest")
-                        ? t("testing")
-                        : t("speedTestRun")}
-                    </button>
-                  </div>
+                <div className="home-hero-actions">
+                  <button
+                    className="ghost"
+                    type="button"
+                    onClick={() => setActiveSheet("speedtest")}
+                  >
+                    {t("speedTestOpen")}
+                  </button>
                 </div>
               </div>
 
@@ -5010,6 +4963,90 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
               className: "mode-grid--single",
               closeOnSelect: true,
             })}
+          </div>
+        </div>
+      ) : null}
+
+      {activeSheet === "speedtest" ? (
+        <div
+          className="sheet-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("speedTestTitle")}
+        >
+          <button
+            className="sheet-overlay__backdrop"
+            onClick={() => setActiveSheet(null)}
+            aria-label={t("close")}
+          />
+          <div className="sheet-panel">
+            <div className="sheet-panel__head">
+              <div>
+                <span className="section-eyebrow">{t("speedTestTitle")}</span>
+                <h3 className="sheet-panel__title">{t("speedTestSubtitle")}</h3>
+              </div>
+              <button
+                className="ghost ghost--compact"
+                type="button"
+                onClick={() => setActiveSheet(null)}
+              >
+                {t("close")}
+              </button>
+            </div>
+
+            <p className="compact-note compact-note--panel">
+              {t("speedTestHint")}
+            </p>
+
+            <section className="sheet-card">
+              <div className="sheet-card__head">
+                <div>
+                  <span className="section-eyebrow">{t("speedTestTitle")}</span>
+                  <strong>{t("speedTestSubtitle")}</strong>
+                </div>
+                <span
+                  className={`sheet-card__badge ${
+                    speedTestResult?.ok ? "pill pill-ok" : ""
+                  }`}
+                >
+                  {isBusy("runSpeedTest")
+                    ? t("testing")
+                    : speedTestResult?.ok
+                      ? t("ready")
+                      : t("tunnelStatusIdle")}
+                </span>
+              </div>
+
+              <div className="home-speed-card__stats">
+                <div className="home-speed-card__stat">
+                  <span>{t("speedTestLatency")}</span>
+                  <strong>{speedTestLatencyLabel}</strong>
+                </div>
+                <div className="home-speed-card__stat">
+                  <span>{t("speedTestDownload")}</span>
+                  <strong>{speedTestDownloadLabel}</strong>
+                </div>
+              </div>
+
+              {speedTestResult?.error ? (
+                <p className="status-banner status-error">{speedTestResult.error}</p>
+              ) : speedTestCheckedAt ? (
+                <p className="compact-note">
+                  {t("speedTestCheckedAt")}: {speedTestCheckedAt}
+                </p>
+              ) : null}
+
+              <div className="sheet-actions">
+                <button
+                  className="primary"
+                  type="button"
+                  onClick={handleRunSpeedTest}
+                  disabled={!speedTestReady || isBusy("runSpeedTest")}
+                >
+                  {isBusy("runSpeedTest") ? t("testing") : t("speedTestRun")}
+                </button>
+              </div>
+            </section>
           </div>
         </div>
       ) : null}
