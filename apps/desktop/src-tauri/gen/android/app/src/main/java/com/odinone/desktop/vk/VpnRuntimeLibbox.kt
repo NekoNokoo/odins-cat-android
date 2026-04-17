@@ -733,7 +733,10 @@ object VpnRuntimeLibbox {
                 val wireGuard = readWireGuardSettings(profile)
                 val bridgePort = selectUdpPort(DEFAULT_VK_BRIDGE_PORT)
                 val vkTurnStreamCount = readVkTurnStreamCount(normalizedArgs, profile)
-                val requestedExcludePackages = normalizeSplitTunnelPackages(parseStringArray(normalizedArgs, "excludePackages"))
+                val requestedExcludePackages =
+                    com.odinone.desktop.vk.normalizeSplitTunnelPackages(
+                        com.odinone.desktop.vk.parseStringArray(normalizedArgs, "excludePackages"),
+                    )
                 val vkBinary = File(context.applicationInfo.nativeLibraryDir, "libvkturn.so")
                 if (!vkBinary.exists()) {
                     throw IllegalArgumentException("Missing bundled libvkturn.so in Android runtime")
@@ -779,9 +782,14 @@ object VpnRuntimeLibbox {
         args: JSObject,
         refreshRelayAutoselect: Boolean = false,
     ): JSObject {
-        val patched = RealityRelayAutoselect.normalizeRuntimeArgs(context, args, refreshIfStale = refreshRelayAutoselect)
+        val patched =
+            com.odinone.desktop.vk.RealityRelayAutoselect.normalizeRuntimeArgs(
+                context,
+                args,
+                refreshIfStale = refreshRelayAutoselect,
+            )
         val normalized = normalizeRuntimeArgs(patched)
-        return RealityRelayAutoselect.appendTelemetry(context, normalized)
+        return com.odinone.desktop.vk.RealityRelayAutoselect.appendTelemetry(context, normalized)
     }
 
     private fun clearInactiveRuntimeArtifacts(
@@ -975,7 +983,7 @@ object VpnRuntimeLibbox {
             )
         }
         runCatching {
-            recordConnectivityProbeResult(context, updated)
+            com.odinone.desktop.vk.recordConnectivityProbeResult(context, updated)
         }.onFailure { error ->
             Log.w("VpnRuntimeService", "Failed to persist relay autoselect probe history", error)
         }

@@ -270,7 +270,10 @@ data class TunnelSnapshot(
                 whitelistHintTag = obj.getString("whitelistHintTag", null),
                 startSource = obj.getString("startSource", null),
                 profileHash = obj.getString("profileHash", null),
-                excludePackages = normalizeSplitTunnelPackages(parseStringArray(obj, "excludePackages")),
+                excludePackages =
+                    com.odinone.desktop.vk.normalizeSplitTunnelPackages(
+                        parseStringArray(obj, "excludePackages"),
+                    ),
                 configMode = obj.getString("configMode", null),
                 activeFeatures = parseStringArray(obj, "activeFeatures"),
                 alwaysOnEnabled = optBooleanOrNull(obj, "alwaysOnEnabled"),
@@ -499,7 +502,7 @@ internal fun matchesVpnRuntimeServiceClassName(
     if (normalized.isBlank()) {
         return false
     }
-    return normalized == VpnRuntimeService::class.java.name
+    return normalized == com.odinone.desktop.vk.VpnRuntimeService::class.java.name
 }
 
 private fun resolvePersistedSocksAddress(
@@ -1085,8 +1088,10 @@ fun matchesTunnelRequest(
             protocol = args.getString("protocol", null),
             activationState = args.getString("activationState", null),
         ) &&
-        normalizeSplitTunnelPackages(snapshot.excludePackages) ==
-            normalizeSplitTunnelPackages(parseStringArray(args, "excludePackages")) &&
+        com.odinone.desktop.vk.normalizeSplitTunnelPackages(snapshot.excludePackages) ==
+            com.odinone.desktop.vk.normalizeSplitTunnelPackages(
+                com.odinone.desktop.vk.parseStringArray(args, "excludePackages"),
+            ) &&
         normalizeTunnelArg(snapshot.vkLink) == normalizeTunnelArg(args.getString("vkLink", null))
 
 fun classifySystemRestoreAvailability(
@@ -1210,7 +1215,10 @@ fun startSnapshotFromArgs(args: JSObject, logLine: String): TunnelSnapshot =
             whitelistHintTag = args.getString("whitelistHintTag", null),
             startSource = args.getString("startSource", null),
             profileHash = args.getString("profileHash", null),
-            excludePackages = normalizeSplitTunnelPackages(parseStringArray(args, "excludePackages")),
+            excludePackages =
+                com.odinone.desktop.vk.normalizeSplitTunnelPackages(
+                    com.odinone.desktop.vk.parseStringArray(args, "excludePackages"),
+                ),
             configMode = args.getString("configMode", null),
             sessionId = sessionMarker,
             sessionStartedAt = sessionMarker,

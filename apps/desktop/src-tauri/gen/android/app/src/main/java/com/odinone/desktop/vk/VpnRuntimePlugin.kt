@@ -320,7 +320,7 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
                 put(
                     "apps",
                     JSArray(
-                        listInstalledApps(activity).map { app -> app.toJsObject() },
+                        com.odinone.desktop.vk.listInstalledApps(activity).map { app -> app.toJsObject() },
                     ),
                 )
             },
@@ -603,9 +603,9 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
                 put("excludePackages", JSArray(normalizeSplitTunnelPackages(incoming)))
                 return@apply
             }
-            val persisted = SplitTunnelSelectionStore.read(activity).excludePackages
+            val persisted = com.odinone.desktop.vk.SplitTunnelSelectionStore.read(activity).excludePackages
             if (persisted.isNotEmpty()) {
-                put("excludePackages", JSArray(persisted))
+                put("excludePackages", JSArray(ArrayList(persisted)))
             }
         }
 
