@@ -1,93 +1,221 @@
-# Odin's Cat для Android
+# Odin One VK
 
-Публичный Android-only репозиторий для дистрибуции приложения, релизов и пользовательской документации.
+Self-hosted access client for constrained networks.
 
-Репозиторий предназначен для тех, кому нужно:
+This repository contains the public project snapshot for Odin One VK: a desktop and Android-oriented client that helps deploy, operate, test, and share self-hosted access profiles with a strong focus on:
 
-- скачать актуальный Android APK
-- посмотреть список изменений по релизам
-- поднять свой сервер в Yandex Cloud
-- подключить телефон и запустить VPN
+- direct self-hosted access
+- multi-hop entry routing
+- Yandex Edge style first-hop deployments
+- VK relay based transport experiments
+- diagnostics, logging, and safe repeatable field testing
 
-## Что есть в этом репозитории
+## Important notice
 
-- релизные заметки
-- инструкция по поднятию сервера в Yandex Cloud
-- PDF-версия инструкции
-- ссылки и материалы для Android-релизов
+This repository is published for research, engineering, and interoperability purposes.
 
-## Текущая версия
+It is not a universal “one click bypass” project, and it should not be treated as legal advice, operational advice, or a guarantee that a specific setup will work in a specific network.
 
-- `0.8.0`
+## What the project is
 
-Что входит в `0.8.0`:
+Odin One VK grew out of a practical need: a self-hosted client is not very useful in restrictive networks if it only knows how to connect to a single direct foreign endpoint.
 
-- `Yandex edge` доведён до рабочей bridge-цепочки `xhttp -> REALITY -> origin`
-- Android runtime для этого пути стабилизирован и больше не уходит в legacy path
-- `edge attach` для `xray-proxy` больше не зависит от `socat`
-- `cover-host pool` и `ordered fallback` уже встроены в `Yandex camo`
+The project therefore focuses not just on “connecting”, but on the full lifecycle of a self-hosted access stack:
 
-## Технологии и режимы
+- validating remote nodes over SSH
+- deploying server-side components automatically
+- building and caching owner access profiles
+- generating shareable guest access
+- switching between multiple access modes
+- testing real traffic through the active tunnel path
+- collecting logs when a route fails
 
-Odin's Cat ориентирован на Android и собран как практичный VPN-клиент для собственных серверов и управляемых access-профилей.
+In other words, this is not just a config viewer. It is an operator-facing access client.
 
-Что лежит в основе пользовательского опыта:
+## How the current architecture works
 
-- `VLESS + REALITY` для современного и гибкого VPN-подключения
-- `YANDEX EDGE` как отдельный режим для совместимых edge-сценариев
-- `VK RELAY` как дополнительный relay-путь
-- `Split App` для раздельного туннелирования на Android
-- SSH-ориентированный deploy-flow для развёртывания сервера в `Yandex Cloud`
+At a high level, the project supports two main classes of route:
 
-Это значит, что пользователь может:
+1. Direct self-hosted access
+2. Multi-hop access with a separate first hop
 
-- развернуть свой сервер
-- подключить телефон без ручной возни с большим количеством параметров
-- переключать доступные режимы в одном приложении
-- исключать выбранные приложения из VPN без поломки основного потока
+In the multi-hop model, the client first connects to a permitted or more reliable entry surface, and only after that traffic is relayed toward the origin node. In practice this means the first hop can be separated from the final external server and tested independently.
 
-## Чем Odin's Cat отличается
+This is what makes the project useful for constrained-network experiments: the first hop, the relay surface, and the final route can be inspected separately rather than treated as one opaque tunnel.
 
-Odin's Cat делает упор не просто на подключение к чужому VPN-сервису, а на удобную связку:
+## Access modes
 
-- Android-клиент
-- собственный сервер
-- понятный deploy-flow
-- аккуратный выбор сетевого режима под текущую ситуацию
+The current client is built around several access modes rather than a single fixed path.
 
-Практические отличия от типичных клиентов:
+### 1. Direct VLESS + REALITY
 
-- акцент на self-hosted сценарий, а не только на подписочный VPN
-- несколько режимов доступа в одном клиенте вместо одного фиксированного пути
-- Android-first split tunneling для bypass отдельных приложений
-- русскоязычная документация и готовый путь развёртывания через `Yandex Cloud`
-- релизный репозиторий без исходного кода, где есть только APK, документация и инструкции
+This is the simplest self-hosted mode.
 
-## Как начать
+Use it when:
 
-1. Открой раздел `Releases` этого репозитория и скачай свежий `APK`.
-2. Установи приложение на Android-устройство.
-3. Разверни сервер по инструкции:
-   [Yandex Cloud Guide](./docs/guides/yandex-vm-ssh-phone-bootstrap-guide.md)
-4. Подготовь доступ к серверу и импортируй профиль в приложение.
-5. Включи VPN и при необходимости настрой `Split App`.
+- a direct route is sufficient
+- you want the cleanest self-hosted setup
+- you need a baseline for comparing more complex routes
 
-## Документация
+### 2. Yandex Edge
 
-- [Инструкция по серверу в Yandex Cloud](./docs/guides/yandex-vm-ssh-phone-bootstrap-guide.md)
-- [Release notes 0.8.0](./docs/releases/v0.8.0.md)
+This is the main multi-hop mode for entry-surface experiments.
 
-## Что будет в GitHub Release
+Use it when:
 
-В релиз `0.8.0` рекомендуется прикладывать:
+- you need a dedicated first hop
+- you want the client to connect to a separate entry VM first
+- you want to keep the origin node behind that entry layer
 
-- `Odin-Cat-0.8.0.apk`
-- `Odin-Cat-0.8.0.aab`
-- `yandex-vm-ssh-phone-bootstrap-guide.pdf`
+This mode is where the project’s “edge-attached” logic becomes important: the first hop and the origin are treated as separate parts of the path.
 
-## Важно
+### 3. VK relay
 
-- Исходный код в этот репозиторий не входит.
-- Внутренние implementation details и dev-инструменты сюда не публикуются.
-- Android package id для совместимости остаётся `com.odinone.desktop.vk`.
-- Проверенный Android label релиза: `Odin's Cat 0.8.0`.
+This mode uses relay-oriented transport experiments based on the VK path.
+
+Use it when:
+
+- you want an alternative route family
+- you need a fallback that behaves differently from the direct path
+- you want to compare relay-based behavior against direct and edge-based routes
+
+In the client, `VK relay` is not just a toggle. The intended flow is:
+
+1. Select the `VK relay` mode
+2. Open the `Servers` screen
+3. Paste a fresh VK call link
+4. Start the route from there
+
+Without that order, the relay path is not properly initialized.
+
+### 4. Free baseline modes
+
+The project also keeps simple baseline modes for comparison and low-cost operation:
+
+- direct `VLESS + REALITY`
+- `WireGuard over xray`
+
+These modes are useful as controls, as lighter self-hosted options, and as a sanity check when a more complex route family fails.
+
+## Split tunneling by default
+
+One of the most important practical details is that the client is designed to avoid sending all traffic through the same path unnecessarily.
+
+Split tunneling is enabled by default in two dimensions:
+
+- site and domain routing
+- application-level routing
+
+That means the client is designed from the start to:
+
+- keep traffic that does not need the tunnel outside the tunnel
+- reduce unnecessary load on the active route
+- avoid forcing all applications through the same path
+- preserve a cleaner and more controllable traffic profile
+
+This is not an optional afterthought. It is part of the default operating model.
+
+## What the app already does
+
+The current public snapshot already includes work in these areas:
+
+- Next.js based desktop UI
+- Tauri desktop shell
+- Android shell sharing the same UI model
+- Go provisioning core
+- real SSH validation
+- real server-side deployment flow
+- owner profile generation and caching
+- guest/share code generation
+- import flow for remote access keys
+- runtime diagnostics
+- white IP checks
+- profile probing and debug logging
+- built-in tunnel speed test through the active route path
+
+## Why diagnostics matter here
+
+In ordinary clients the question is often just “did it connect or not?”
+
+Here that is not enough.
+
+Odin One VK is intentionally built to help answer more useful operational questions:
+
+- Did the first hop start?
+- Did the second hop come up?
+- Is the active route actually passing traffic?
+- Which mode worked last time?
+- Which profile failed and at what stage?
+
+This is why logging, probing, and route-by-route inspection are first-class parts of the product rather than hidden debug leftovers.
+
+## Repository layout
+
+```text
+apps/
+  desktop/        main desktop and Android-shared client shell
+packages/
+  contracts/      shared TypeScript contracts
+  ui/             shared UI layer and i18n
+core/
+  go/             provisioning core and remote orchestration
+docs/             notes, rollout docs, and implementation references
+```
+
+## Tech stack
+
+- `Next.js` for the main application UI
+- `Tauri` for native desktop and Android packaging
+- `Go` for provisioning and orchestration logic
+- `Rust` for the Tauri host layer and mobile bridge logic
+- `xray` as the main route engine
+
+## Local development
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Run the desktop UI:
+
+```bash
+npm run dev
+```
+
+Run the Go core:
+
+```bash
+cd core/go
+go run ./cmd/mvpd
+```
+
+Run the Tauri desktop shell:
+
+```bash
+npm run desktop:tauri:dev
+```
+
+Build Android artifacts:
+
+```bash
+npm run android:tauri:build
+```
+
+## Project direction
+
+The project is moving toward a more complete self-hosted operator client with:
+
+- cleaner route selection
+- stronger field diagnostics
+- better multi-hop deployment safety
+- more predictable Android operation
+- improved profile handling for owner and guest users
+
+## Thanks
+
+Special thanks to these repositories for ideas, prior art, and useful reference points while exploring relay and constrained-network workflows:
+
+- [cacggghp/vk-turn-proxy](https://github.com/cacggghp/vk-turn-proxy)
+- [igareck/vpn-configs-for-russia](https://github.com/igareck/vpn-configs-for-russia)
