@@ -1,221 +1,221 @@
 # Odin One VK
 
-Self-hosted access client for constrained networks.
+Self-hosted клиент доступа для ограниченных сетей.
 
-This repository contains the public project snapshot for Odin One VK: a desktop and Android-oriented client that helps deploy, operate, test, and share self-hosted access profiles with a strong focus on:
+Этот репозиторий содержит публичный срез проекта Odin One VK: desktop- и Android-ориентированный клиент, который помогает разворачивать, запускать, тестировать и передавать self-hosted профили доступа с упором на:
 
-- direct self-hosted access
-- multi-hop entry routing
-- Yandex Edge style first-hop deployments
-- VK relay based transport experiments
-- diagnostics, logging, and safe repeatable field testing
+- прямой self-hosted доступ
+- многохоповую входную маршрутизацию
+- first-hop сценарии в стиле Yandex Edge
+- relay-эксперименты на базе VK
+- диагностику, логирование и безопасные повторяемые полевые тесты
 
-## Important notice
+## Важное замечание
 
-This repository is published for research, engineering, and interoperability purposes.
+Этот репозиторий опубликован в исследовательских, инженерных и интероперабельных целях.
 
-It is not a universal “one click bypass” project, and it should not be treated as legal advice, operational advice, or a guarantee that a specific setup will work in a specific network.
+Это не универсальный проект формата «одна кнопка и всё заработало», и его не следует воспринимать как юридическую рекомендацию, эксплуатационную инструкцию или гарантию того, что конкретная конфигурация будет работать в конкретной сети.
 
-## What the project is
+## Что это за проект
 
-Odin One VK grew out of a practical need: a self-hosted client is not very useful in restrictive networks if it only knows how to connect to a single direct foreign endpoint.
+Odin One VK вырос из практической задачи: self-hosted клиент мало полезен в ограниченных сетях, если он умеет подключаться только к одному прямому внешнему узлу.
 
-The project therefore focuses not just on “connecting”, but on the full lifecycle of a self-hosted access stack:
+Поэтому проект сосредоточен не просто на “подключении”, а на полном жизненном цикле self-hosted схемы доступа:
 
-- validating remote nodes over SSH
-- deploying server-side components automatically
-- building and caching owner access profiles
-- generating shareable guest access
-- switching between multiple access modes
-- testing real traffic through the active tunnel path
-- collecting logs when a route fails
+- проверка удалённых узлов по SSH
+- автоматическое развёртывание серверных компонентов
+- генерация и кэширование профиля владельца
+- создание shareable-доступа для гостя
+- переключение между несколькими режимами доступа
+- тестирование реального трафика через активный маршрут
+- сбор логов, когда маршрут не работает
 
-In other words, this is not just a config viewer. It is an operator-facing access client.
+Иными словами, это не просто просмотрщик конфигов. Это операторский клиент доступа.
 
-## How the current architecture works
+## Как устроена текущая архитектура
 
-At a high level, the project supports two main classes of route:
+На верхнем уровне проект поддерживает два основных класса маршрутов:
 
-1. Direct self-hosted access
-2. Multi-hop access with a separate first hop
+1. Прямой self-hosted доступ
+2. Многохоповый доступ с отдельным first hop
 
-In the multi-hop model, the client first connects to a permitted or more reliable entry surface, and only after that traffic is relayed toward the origin node. In practice this means the first hop can be separated from the final external server and tested independently.
+В многохоповой модели клиент сначала подключается к допустимой или более надёжной входной поверхности, и только после этого трафик пересылается к origin-узлу. На практике это означает, что first hop можно отделить от финального внешнего сервера и тестировать независимо.
 
-This is what makes the project useful for constrained-network experiments: the first hop, the relay surface, and the final route can be inspected separately rather than treated as one opaque tunnel.
+Именно это делает проект полезным для экспериментов в ограниченных сетях: first hop, relay-поверхность и финальный маршрут можно рассматривать отдельно, а не как один непрозрачный туннель.
 
-## Access modes
+## Режимы доступа
 
-The current client is built around several access modes rather than a single fixed path.
+Текущий клиент построен вокруг нескольких режимов доступа, а не одного фиксированного пути.
 
 ### 1. Direct VLESS + REALITY
 
-This is the simplest self-hosted mode.
+Это самый простой self-hosted режим.
 
-Use it when:
+Подходит, когда:
 
-- a direct route is sufficient
-- you want the cleanest self-hosted setup
-- you need a baseline for comparing more complex routes
+- достаточно прямого маршрута
+- нужна наиболее чистая self-hosted конфигурация
+- нужна базовая контрольная точка для сравнения со сложными маршрутами
 
 ### 2. Yandex Edge
 
-This is the main multi-hop mode for entry-surface experiments.
+Это основной многохоповый режим для экспериментов с входной поверхностью.
 
-Use it when:
+Подходит, когда:
 
-- you need a dedicated first hop
-- you want the client to connect to a separate entry VM first
-- you want to keep the origin node behind that entry layer
+- нужен отдельный first hop
+- нужно, чтобы клиент сначала подключался к выделенной entry-VM
+- нужно держать origin-узел за этой входной прослойкой
 
-This mode is where the project’s “edge-attached” logic becomes important: the first hop and the origin are treated as separate parts of the path.
+Именно в этом режиме становится важна логика “edge-attached”: first hop и origin рассматриваются как отдельные части маршрута.
 
 ### 3. VK relay
 
-This mode uses relay-oriented transport experiments based on the VK path.
+Этот режим использует relay-эксперименты, построенные вокруг VK-сценария.
 
-Use it when:
+Подходит, когда:
 
-- you want an alternative route family
-- you need a fallback that behaves differently from the direct path
-- you want to compare relay-based behavior against direct and edge-based routes
+- нужен альтернативный класс маршрута
+- нужен fallback, который ведёт себя иначе, чем direct path
+- нужно сравнить relay-поведение с прямыми и edge-режимами
 
-In the client, `VK relay` is not just a toggle. The intended flow is:
+В клиенте `VK relay` — это не просто переключатель. Предполагаемый порядок работы такой:
 
-1. Select the `VK relay` mode
-2. Open the `Servers` screen
-3. Paste a fresh VK call link
-4. Start the route from there
+1. Выбрать режим `VK relay`
+2. Открыть экран `Серверы`
+3. Вставить свежую ссылку на звонок VK
+4. Уже после этого запускать маршрут
 
-Without that order, the relay path is not properly initialized.
+Без этого порядка relay-путь не инициализируется как задумано.
 
-### 4. Free baseline modes
+### 4. Бесплатные базовые режимы
 
-The project also keeps simple baseline modes for comparison and low-cost operation:
+Проект также сохраняет простые базовые режимы для сравнения и малозатратной эксплуатации:
 
 - direct `VLESS + REALITY`
 - `WireGuard over xray`
 
-These modes are useful as controls, as lighter self-hosted options, and as a sanity check when a more complex route family fails.
+Эти режимы полезны как контрольные точки, как более лёгкие self-hosted варианты и как sanity check, если более сложная схема дала сбой.
 
-## Split tunneling by default
+## Split tunneling по умолчанию
 
-One of the most important practical details is that the client is designed to avoid sending all traffic through the same path unnecessarily.
+Одна из самых важных практических особенностей заключается в том, что клиент не пытается без необходимости отправлять весь трафик по одному и тому же маршруту.
 
-Split tunneling is enabled by default in two dimensions:
+Split tunneling включён по умолчанию сразу в двух измерениях:
 
-- site and domain routing
-- application-level routing
+- маршрутизация сайтов и доменов
+- маршрутизация на уровне приложений
 
-That means the client is designed from the start to:
+Это означает, что клиент изначально спроектирован так, чтобы:
 
-- keep traffic that does not need the tunnel outside the tunnel
-- reduce unnecessary load on the active route
-- avoid forcing all applications through the same path
-- preserve a cleaner and more controllable traffic profile
+- трафик, которому не нужен туннель, оставался вне туннеля
+- не создавать лишнюю нагрузку на активный маршрут
+- не заставлять все приложения идти по одному и тому же пути
+- поддерживать более чистый и контролируемый профиль трафика
 
-This is not an optional afterthought. It is part of the default operating model.
+Это не дополнительная опция “на потом”. Это часть базовой модели работы.
 
-## What the app already does
+## Что приложение уже умеет
 
-The current public snapshot already includes work in these areas:
+Текущий публичный срез уже включает работу в следующих направлениях:
 
-- Next.js based desktop UI
-- Tauri desktop shell
-- Android shell sharing the same UI model
-- Go provisioning core
-- real SSH validation
-- real server-side deployment flow
-- owner profile generation and caching
-- guest/share code generation
-- import flow for remote access keys
+- desktop UI на базе `Next.js`
+- desktop shell на базе `Tauri`
+- Android shell, использующий ту же UI-модель
+- provisioning core на `Go`
+- реальную SSH-проверку
+- реальный server-side deploy flow
+- генерацию и кэширование owner-profile
+- генерацию guest/share code
+- import flow для access-ключей
 - runtime diagnostics
 - white IP checks
-- profile probing and debug logging
-- built-in tunnel speed test through the active route path
+- profile probing и debug logging
+- встроенный speed test через активный маршрут
 
-## Why diagnostics matter here
+## Почему здесь так важна диагностика
 
-In ordinary clients the question is often just “did it connect or not?”
+В обычных клиентах вопрос часто сводится к одному: “подключилось или нет?”
 
-Here that is not enough.
+Здесь этого недостаточно.
 
-Odin One VK is intentionally built to help answer more useful operational questions:
+Odin One VK намеренно строится так, чтобы помогать отвечать на более полезные эксплуатационные вопросы:
 
-- Did the first hop start?
-- Did the second hop come up?
-- Is the active route actually passing traffic?
-- Which mode worked last time?
-- Which profile failed and at what stage?
+- Запустился ли first hop?
+- Поднялся ли second hop?
+- Идёт ли трафик через активный маршрут на самом деле?
+- Какой режим сработал в прошлый раз?
+- Какой профиль не сработал и на каком этапе?
 
-This is why logging, probing, and route-by-route inspection are first-class parts of the product rather than hidden debug leftovers.
+Именно поэтому логирование, probing и пошаговый осмотр маршрута — это части продукта первого класса, а не скрытые debug-хвосты.
 
-## Repository layout
+## Структура репозитория
 
 ```text
 apps/
-  desktop/        main desktop and Android-shared client shell
+  desktop/        основной desktop- и Android-shared client shell
 packages/
-  contracts/      shared TypeScript contracts
-  ui/             shared UI layer and i18n
+  contracts/      общие TypeScript-контракты
+  ui/             общий UI-слой и i18n
 core/
-  go/             provisioning core and remote orchestration
-docs/             notes, rollout docs, and implementation references
+  go/             provisioning core и удалённая оркестрация
+docs/             заметки, rollout-доки и технические референсы
 ```
 
-## Tech stack
+## Технологический стек
 
-- `Next.js` for the main application UI
-- `Tauri` for native desktop and Android packaging
-- `Go` for provisioning and orchestration logic
-- `Rust` for the Tauri host layer and mobile bridge logic
-- `xray` as the main route engine
+- `Next.js` для основного UI
+- `Tauri` для native desktop и Android packaging
+- `Go` для provisioning и orchestration logic
+- `Rust` для Tauri host layer и mobile bridge logic
+- `xray` как основной route engine
 
-## Local development
+## Локальная разработка
 
-Install dependencies:
+Установка зависимостей:
 
 ```bash
 npm install
 ```
 
-Run the desktop UI:
+Запуск desktop UI:
 
 ```bash
 npm run dev
 ```
 
-Run the Go core:
+Запуск Go core:
 
 ```bash
 cd core/go
 go run ./cmd/mvpd
 ```
 
-Run the Tauri desktop shell:
+Запуск Tauri desktop shell:
 
 ```bash
 npm run desktop:tauri:dev
 ```
 
-Build Android artifacts:
+Сборка Android-артефактов:
 
 ```bash
 npm run android:tauri:build
 ```
 
-## Project direction
+## Куда проект движется дальше
 
-The project is moving toward a more complete self-hosted operator client with:
+Проект движется в сторону более полноценного self-hosted операторского клиента с:
 
-- cleaner route selection
-- stronger field diagnostics
-- better multi-hop deployment safety
-- more predictable Android operation
-- improved profile handling for owner and guest users
+- более чистым выбором маршрутов
+- более сильной полевой диагностикой
+- более безопасным многохоповым deploy-потоком
+- более предсказуемой работой на Android
+- более аккуратной работой с owner- и guest-профилями
 
-## Thanks
+## Благодарности
 
-Special thanks to these repositories for ideas, prior art, and useful reference points while exploring relay and constrained-network workflows:
+Отдельная благодарность этим репозиториям за идеи, prior art и полезные ориентиры при исследовании relay- и constrained-network сценариев:
 
 - [cacggghp/vk-turn-proxy](https://github.com/cacggghp/vk-turn-proxy)
 - [igareck/vpn-configs-for-russia](https://github.com/igareck/vpn-configs-for-russia)
