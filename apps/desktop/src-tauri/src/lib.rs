@@ -106,14 +106,19 @@ fn ensure_backend_running(app: &AppHandle) -> tauri::Result<()> {
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn resolve_mvpd_path(resource_dir: PathBuf) -> PathBuf {
+    let binary_name = if cfg!(target_os = "windows") {
+        "mvpd.exe"
+    } else {
+        "mvpd"
+    };
     let candidates = [
-        resource_dir.join("bin").join("mvpd"),
-        resource_dir.join("mvpd"),
+        resource_dir.join("bin").join(binary_name),
+        resource_dir.join(binary_name),
     ];
     candidates
         .into_iter()
         .find(|path| path.exists())
-        .unwrap_or_else(|| resource_dir.join("bin").join("mvpd"))
+        .unwrap_or_else(|| resource_dir.join("bin").join(binary_name))
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]

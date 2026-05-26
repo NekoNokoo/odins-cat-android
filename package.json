@@ -14,6 +14,7 @@
     "desktop:repeat:test": "npm run repeat:test -w @whitelist/desktop",
     "desktop:tauri:dev": "npm run tauri:dev -w @whitelist/desktop",
     "desktop:tauri:build": "npm run tauri:build -w @whitelist/desktop",
+    "windows:tauri:build": "npm run tauri:windows:build -w @whitelist/desktop",
     "android:tauri:dev": "npm run tauri:android:dev -w @whitelist/desktop",
     "android:tauri:build": "npm run tauri:android:build -w @whitelist/desktop"
   }

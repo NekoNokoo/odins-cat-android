@@ -128,6 +128,11 @@ type WhitelistDebugProbeAttempt = {
 };
 
 const WHITELIST_DEBUG_PROBE_VARIANT_TIMEOUT_MS = 40_000;
+const SPEED_TEST_TOTAL_DURATION_MS = 10_000;
+const SPEED_TEST_WARMUP_DURATION_MS = 2_000;
+const SPEED_TEST_MEASURE_DURATION_MS =
+  SPEED_TEST_TOTAL_DURATION_MS - SPEED_TEST_WARMUP_DURATION_MS;
+const SPEED_TEST_STREAM_COUNT = 8;
 
 const formatSpeedTestLatency = (
   value: number | undefined,
@@ -908,6 +913,10 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     useState<MobileNetworkLensResult | null>(null);
   const [speedTestResult, setSpeedTestResult] =
     useState<TunnelSpeedTestResult | null>(null);
+  const [speedTestCountdownEndsAt, setSpeedTestCountdownEndsAt] =
+    useState<number | null>(null);
+  const [speedTestCountdownRemainingMs, setSpeedTestCountdownRemainingMs] =
+    useState(0);
   const importProfileFileInputRef = useRef<HTMLInputElement | null>(null);
   const [localTunnel, setLocalTunnel] = useState<LocalTunnelState | null>(null);
   const [systemProxy, setSystemProxy] = useState<SystemProxyState | null>(null);
@@ -942,16 +951,41 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const [isPending, startTransition] = useTransition();
   const [androidVpnVisualOverride, setAndroidVpnVisualOverride] =
     useState(false);
+  const [androidUserAgentMatch, setAndroidUserAgentMatch] = useState(false);
   const [ownerRuntimeLabUnlocked, setOwnerRuntimeLabUnlocked] = useState(false);
   const [ownerRuntimeLabUnlockTapCount, setOwnerRuntimeLabUnlockTapCount] =
     useState(0);
   const [ownerRuntimeLab, setOwnerRuntimeLab] = useState<OwnerRuntimeLabState>(
     defaultOwnerRuntimeLabState,
   );
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    setAndroidUserAgentMatch(/Android/i.test(window.navigator.userAgent));
+  }, []);
+
+  useEffect(() => {
+    if (!speedTestCountdownEndsAt) {
+      setSpeedTestCountdownRemainingMs(0);
+      return;
+    }
+
+    const tick = () => {
+      const remaining = Math.max(0, speedTestCountdownEndsAt - Date.now());
+      setSpeedTestCountdownRemainingMs(remaining);
+      if (remaining <= 0) {
+        setSpeedTestCountdownEndsAt(null);
+      }
+    };
+
+    tick();
+    const intervalId = window.setInterval(tick, 200);
+    return () => window.clearInterval(intervalId);
+  }, [speedTestCountdownEndsAt]);
+
   const isAndroidClient =
-    coreHealth?.service === "odin-one-mobile-bridge" ||
-    (typeof window !== "undefined" &&
-      /Android/i.test(window.navigator.userAgent));
+    coreHealth?.service === "odin-one-mobile-bridge" || androidUserAgentMatch;
   const curlCommand = localTunnel?.socksAddress
     ? `curl --socks5-hostname ${localTunnel.socksAddress} -I https://example.com`
     : "";
@@ -959,6 +993,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     splitTunnelSelection.excludePackages,
   );
   const requiresVKLink = selectedAccessMode === "vk-relay";
+  const selectedModeUsesStandalonePublicRelay =
+    selectedAccessMode === "relay-direct";
   const resolvedDraftHost =
     draft.host.trim() ||
     importedProfile?.serverHost?.trim() ||
@@ -1056,8 +1092,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     selectedAccessMode === "yandex-edge" ||
     selectedAccessMode === "yandex-edge-proxy"
       ? hasLocalYandexEdgeAccessProfile
-      : selectedAccessMode === "relay-via-server" ||
-          selectedAccessMode === "relay-direct"
+      : selectedAccessMode === "relay-direct"
+      ? true
+      : selectedAccessMode === "relay-via-server"
       ? hasLocalRelayAccessProfile
       : hasLocalAccessProfile;
   const canGenerateGuestProfile = Boolean(
@@ -1292,6 +1329,16 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     speedTestResult?.downloadMbps,
     t("speedTestIdleValue"),
   );
+  const speedTestCountdownRemainingSeconds =
+    speedTestCountdownRemainingMs > 0
+      ? Math.ceil(speedTestCountdownRemainingMs / 1000)
+      : 0;
+  const speedTestDownloadDisplayLabel =
+    speedTestCountdownRemainingSeconds > 0
+      ? locale === "ru"
+        ? `${speedTestCountdownRemainingSeconds} сек`
+        : `${speedTestCountdownRemainingSeconds}s`
+      : speedTestDownloadLabel;
   const speedTestCheckedAt = speedTestResult?.checkedAt
     ? new Date(speedTestResult.checkedAt).toLocaleTimeString(locale === "ru" ? "ru-RU" : "en-US", {
         hour: "2-digit",
@@ -1525,9 +1572,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       hint: t("runtimeModeRelayDirectHint"),
       status: protocolEntryById.has("vless-reality-relay-direct")
         ? t("modeStatusOptional")
-        : t("modeStatusLocked"),
-      available:
-        isAndroidClient && protocolEntryById.has("vless-reality-relay-direct"),
+        : t("modeStatusReady"),
+      available: isAndroidClient,
     },
   ];
   const selectedAccessModeCard =
@@ -1571,6 +1617,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         resolvedYandexEdgeFallback?.connectHost ||
         yandexEdgeConnectHost
       : "";
+  const activeRelayTunnelHost =
+    relayRuntimeActive ? localTunnel?.frontConnectHost?.trim() || "" : "";
+  const activeFrontTunnelHost = activeYandexTunnelHost || activeRelayTunnelHost;
   const routeLensNetworkLabel =
     mobileNetworkLens?.networkType === "cellular"
       ? t("routeLensNetworkCellular")
@@ -1595,16 +1644,12 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         : "unknown";
   const routeLensNote =
     mobileNetworkLens?.note?.trim() ||
-    (((selectedAccessMode === "yandex-edge" ||
-      selectedAccessMode === "yandex-edge-proxy") &&
-      yandexEdgeRuntimeHint) ||
-      "") ||
+    ((yandexTunnelRuntimeActive && yandexEdgeRuntimeHint) || "") ||
     (!mobileNetworkLens?.isCellular ? t("whitelistProbeCellularOnly") : "");
   const routeLensVisible = Boolean(
     isAndroidClient &&
       (routeLensOriginDisplay ||
-        ((selectedAccessMode === "yandex-edge" ||
-          selectedAccessMode === "yandex-edge-proxy") &&
+        ((yandexTunnelRuntimeActive || relayRuntimeActive) &&
           routeLensTunnelDisplay)),
   );
   useEffect(() => {
@@ -2197,6 +2242,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     }
     void refreshMobileNetworkLens(true);
   }, [
+    activeFrontTunnelHost,
     activeYandexTunnelHost,
     isAndroidClient,
     localTunnel?.activationState,
@@ -2205,6 +2251,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     localTunnel?.status,
     resolvedDraftHost,
     selectedAccessMode,
+    selectedModeUsesStandalonePublicRelay,
   ]);
 
   useEffect(() => {
@@ -2510,12 +2557,10 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       return null;
     }
 
-    const originHost = resolvedDraftHost.trim();
-    const tunnelHost =
-      selectedAccessMode === "yandex-edge" ||
-      selectedAccessMode === "yandex-edge-proxy"
-        ? activeYandexTunnelHost
-        : "";
+    const originHost = selectedModeUsesStandalonePublicRelay
+      ? ""
+      : resolvedDraftHost.trim();
+    const tunnelHost = activeFrontTunnelHost;
     if (!originHost && !tunnelHost) {
       setMobileNetworkLens(null);
       return null;
@@ -2702,6 +2747,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       requireRelaySupport?: boolean;
       requireYandexEdgeSupport?: boolean;
       forceRelayAutoselectDefaults?: boolean;
+      allowSyntheticRelayProfile?: boolean;
     },
   ) => {
     const allowImportedProfileForOwnerRuntimeLab =
@@ -2711,6 +2757,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       options?.requireYandexEdgeSupport ?? false;
     const forceRelayAutoselectDefaults =
       options?.forceRelayAutoselectDefaults ?? false;
+    const allowSyntheticRelayProfile =
+      options?.allowSyntheticRelayProfile ?? false;
     const effectiveOwnerRuntimeLab =
       allowImportedProfileForOwnerRuntimeLab &&
       forceRelayAutoselectDefaults &&
@@ -2731,7 +2779,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       effectiveBaseDraft.host.trim() ||
       importedProfile?.serverHost?.trim() ||
       ownerProfile?.serverHost?.trim() ||
-      "";
+      (allowSyntheticRelayProfile ? "public-relay.local" : "");
     const ownerProfileAvailable = Boolean(
       (requireYandexEdgeSupport
         ? ownerProfileSupportsYandexEdgeMode(ownerProfile, effectiveBaseDraft)
@@ -2760,6 +2808,12 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       importedProfileAvailable &&
       !secret.trim() &&
       !ownerProfileAvailable,
+    );
+    const usingSyntheticRelayProfile = Boolean(
+      allowSyntheticRelayProfile &&
+        ownerRuntimeLabMode === "reality-vps-lab" &&
+        !ownerProfileAvailable &&
+        !usingImportedProfile,
     );
     const serverDraft: ServerDraft =
       usingImportedProfile && importedProfile
@@ -2794,7 +2848,11 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       if (!isAndroidClient) {
         throw new Error(t("ownerLabAndroidOnly"));
       }
-      if (!ownerProfileAvailable && !usingImportedProfile) {
+      if (
+        !ownerProfileAvailable &&
+        !usingImportedProfile &&
+        !usingSyntheticRelayProfile
+      ) {
         throw new Error(
           allowImportedProfileForOwnerRuntimeLab
             ? t("ownerLabNeedsAccessProfile")
@@ -3056,6 +3114,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       return buildTunnelStartRequest(baseDraft, "reality-vps-lab", {
         allowImportedProfileForOwnerRuntimeLab: true,
         forceRelayAutoselectDefaults: true,
+        allowSyntheticRelayProfile: true,
       });
     }
     return buildTunnelStartRequest(baseDraft);
@@ -3856,10 +3915,16 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     if (!speedTestReady) {
       return;
     }
+    const countdownEndsAt = Date.now() + SPEED_TEST_TOTAL_DURATION_MS;
+    setSpeedTestCountdownEndsAt(countdownEndsAt);
     setPendingAction("runSpeedTest");
     startTransition(async () => {
       try {
-        const res = await coreApi.runLocalTunnelSpeedTest();
+        const res = await coreApi.runLocalTunnelSpeedTest({
+          warmupDurationMs: SPEED_TEST_WARMUP_DURATION_MS,
+          measureDurationMs: SPEED_TEST_MEASURE_DURATION_MS,
+          streamCount: SPEED_TEST_STREAM_COUNT,
+        });
         setSpeedTestResult(res.data);
       } catch (requestError) {
         setSpeedTestResult({
@@ -3872,6 +3937,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
               : t("speedTestFailed"),
         });
       } finally {
+        setSpeedTestCountdownEndsAt(null);
         setPendingAction(null);
       }
     });
@@ -4665,7 +4731,69 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
 
   return (
     <>
-      <div className="mobile-shell">
+      <div className="mobile-shell halo-desktop-shell">
+        <aside className="halo-brief" data-tauri-drag-region>
+          <div className="halo-brief__brand">
+            <span className="halo-kicker">HALO · Windows</span>
+            <h2>
+              <b>Один</b> ключ.
+              <br />
+              <i>Две поверхности.</i>
+            </h2>
+            <p>
+              Desktop-оболочка использует тот же invite JSON, что и Android:
+              импорт, экспорт и runtime-профиль идут через общий контракт.
+            </p>
+          </div>
+
+          <div className="halo-brief__stats">
+            <div className="halo-stat halo-stat--lime">
+              <span>JSON</span>
+              <strong>.odinone-access</strong>
+            </div>
+            <div className="halo-stat">
+              <span>runtime</span>
+              <strong>{primaryStatusBadge}</strong>
+            </div>
+            <div className="halo-stat">
+              <span>mode</span>
+              <strong>{selectedAccessModeCard.label}</strong>
+            </div>
+          </div>
+
+          <div className="halo-brief__actions">
+            <button
+              className="primary"
+              type="button"
+              onClick={handleOpenImportProfileFile}
+              disabled={isPending}
+            >
+              {t("importProfileFile")}
+            </button>
+            <button
+              className="ghost"
+              type="button"
+              onClick={handleExportInviteFile}
+              disabled={
+                isPending ||
+                isBusy("exportInviteFile") ||
+                !exportableInviteProfile?.rawJson
+              }
+            >
+              {t("exportProfileFile")}
+            </button>
+          </div>
+
+          {inviteFileNotice ? (
+            <p className="halo-note">{inviteFileNotice}</p>
+          ) : (
+            <p className="halo-note">
+              JSON-файл можно перенести с телефона на Windows без пересборки
+              профиля.
+            </p>
+          )}
+        </aside>
+
         <div className="home-scroll">
           <section className="phone-card home-stack">
             <div className="home-stack__scroll">
@@ -4696,7 +4824,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                     vpnActionActive
                       ? isBusy("disableVpn")
                       : isPending ||
-                        !resolvedDraftHost ||
+                        (!resolvedDraftHost &&
+                          !selectedModeUsesStandalonePublicRelay) ||
                         ((selectedAccessMode === "yandex-edge" ||
                           selectedAccessMode === "yandex-edge-proxy" ||
                           selectedAccessMode === "relay-via-server" ||
@@ -4737,8 +4866,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
 
                     <div
                       className={`home-network-card__grid ${
-                        (selectedAccessMode === "yandex-edge" ||
-                          selectedAccessMode === "yandex-edge-proxy") &&
+                        (yandexTunnelRuntimeActive || relayRuntimeActive) &&
                         routeLensOriginDisplay &&
                         routeLensTunnelDisplay
                           ? ""
@@ -4761,8 +4889,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                         </div>
                       ) : null}
 
-                      {(selectedAccessMode === "yandex-edge" ||
-                        selectedAccessMode === "yandex-edge-proxy") &&
+                      {(yandexTunnelRuntimeActive || relayRuntimeActive) &&
                       routeLensTunnelDisplay ? (
                         <div className="home-network-hop">
                           <span>{t("routeLensTunnel")}</span>
@@ -4788,7 +4915,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
 
                 <div className="home-hero-actions">
                   <button
-                    className="ghost"
+                    className="ghost home-hero-actions__button"
                     type="button"
                     onClick={() => setActiveSheet("speedtest")}
                   >
@@ -5024,7 +5151,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                 </div>
                 <div className="home-speed-card__stat">
                   <span>{t("speedTestDownload")}</span>
-                  <strong>{speedTestDownloadLabel}</strong>
+                  <strong>{speedTestDownloadDisplayLabel}</strong>
                 </div>
               </div>
 

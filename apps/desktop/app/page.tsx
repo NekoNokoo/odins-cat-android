@@ -2,8 +2,8 @@
 
 import { AppShell } from "@whitelist/ui/AppShell";
 import { LanguageToggle } from "./_components/i18n";
-import { ControlCenter } from "./_components/control-center";
 import { LaunchIntro } from "./_components/launch-intro";
+import { ControlCenter } from "./_components/control-center";
 
 function HeaderWhitelistCat() {
   return (
@@ -22,7 +22,7 @@ export default function Page() {
     <>
       <LaunchIntro />
       <AppShell
-        title="Odin's Cat"
+        title="Odin's Cat · HALO"
         titleAccessory={<HeaderWhitelistCat />}
         headerAction={<LanguageToggle />}
         dragRegion
