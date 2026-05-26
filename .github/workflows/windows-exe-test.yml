@@ -1,12 +1,12 @@
-name: Windows test build
+name: Windows EXE test artifact
 
 on:
   workflow_dispatch: {}
   push: {}
 
 jobs:
-  build-windows:
-    name: Build Windows EXE
+  build-windows-exe:
+    name: Build raw Windows EXE
     runs-on: windows-latest
 
     steps:
@@ -37,7 +37,7 @@ jobs:
       - name: Upload Windows test EXE
         uses: actions/upload-artifact@v4
         with:
-          name: odins-cat-halo-windows-test
+          name: odins-cat-halo-windows-exe-test
           if-no-files-found: error
           path: |
             apps/desktop/src-tauri/target/release/odin-one-desktop.exe
