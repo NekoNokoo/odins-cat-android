@@ -43,6 +43,9 @@ data class TunnelSpeedTestSnapshot(
     val downloadMbps: Double? = null,
     val downloadBytes: Long? = null,
     val downloadDurationMs: Long? = null,
+    val warmupDurationMs: Long? = null,
+    val streamCount: Int? = null,
+    val measuredViaTunnel: Boolean? = null,
     val error: String? = null,
 ) {
     fun toJsObject(): JSObject =
@@ -56,6 +59,9 @@ data class TunnelSpeedTestSnapshot(
             put("downloadMbps", downloadMbps)
             put("downloadBytes", downloadBytes)
             put("downloadDurationMs", downloadDurationMs)
+            put("warmupDurationMs", warmupDurationMs)
+            put("streamCount", streamCount)
+            put("measuredViaTunnel", measuredViaTunnel)
             put("error", error)
         }
 }

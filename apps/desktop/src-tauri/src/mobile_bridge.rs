@@ -4248,7 +4248,8 @@ async fn mobile_run_edge_attach(
     match routing_mode {
         EDGE_ROUTING_MODE_SNI_ROUTER => ensure_remote_haproxy_installed(&mut edge_ssh).await?,
         EDGE_ROUTING_MODE_XRAY_PROXY => {
-            ensure_remote_edge_xray_installed(&mut edge_ssh, &layout.xray_path).await?
+            ensure_remote_edge_xray_installed(&mut edge_ssh, &layout.xray_path).await?;
+            ensure_remote_haproxy_installed(&mut edge_ssh).await?
         }
         _ => ensure_remote_socat_installed(&mut edge_ssh).await?,
     }
@@ -5600,6 +5601,46 @@ fn apply_exclude_packages_to_request(request: &mut Value, exclude_packages: &[St
     }
 }
 
+fn is_direct_public_relay_runtime(owner_runtime_lab: Option<&OwnerRuntimeLabPayload>) -> bool {
+    let Some(owner_runtime_lab) = owner_runtime_lab else {
+        return false;
+    };
+    owner_runtime_lab.mode.trim() == OWNER_RUNTIME_LAB_MODE_REALITY_VPS_LAB
+        && !owner_runtime_lab.vps_owner_reality_egress
+        && owner_runtime_lab
+            .vps_relay_autoselect
+            .as_ref()
+            .map(|value| value.enabled)
+            .unwrap_or(false)
+}
+
+fn synthetic_public_relay_profile_json() -> Result<String, String> {
+    serde_json::to_string(&json!({
+        "name": "Odin's Cat Public Relay",
+        "serverHost": "public-relay.local",
+        "transport": "xray",
+        "engine": "sing-box",
+        "protocol": "vless-reality",
+        "vlessReality": {
+            "port": 443,
+            "uuid": "aae59c28-a4e7-46bd-8fa5-a239e8cfe0b1",
+            "flow": "xtls-rprx-vision",
+            "serverName": "ads.x5.ru",
+            "publicKey": "Py03aPnCma9Ip4xCvtBsK77NScUYphSw46RmdjFSvls",
+            "shortId": "5aea2cffba100557",
+            "fingerprint": "chrome"
+        },
+        "stagedFallbacks": {
+            "realityRelayDirect": {
+                "status": "ready",
+                "subscriptionUrl": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_URL,
+                "sourceLabel": OWNER_RUNTIME_LAB_RELAY_AUTOSELECT_DEFAULT_SOURCE_LABEL
+            }
+        }
+    }))
+    .map_err(|err| format!("serialize synthetic public relay profile: {err}"))
+}
+
 fn resolve_android_runtime_request(
     app: &AppHandle,
     payload: &LocalTunnelStartPayload,
@@ -5617,6 +5658,7 @@ fn resolve_android_runtime_request(
     let owner_runtime_lab = requested_owner_runtime_lab(payload);
     let runtime_family = requested_runtime_family(payload);
     let activation_state = requested_activation_state(payload);
+    let direct_public_relay_runtime = is_direct_public_relay_runtime(owner_runtime_lab);
 
     if payload.secret.trim().is_empty() {
         if let Ok((invite, local_path)) =
@@ -5660,6 +5702,35 @@ fn resolve_android_runtime_request(
 
     let owner_path = owner_profile_path(app, host)?;
     if !owner_path.exists() {
+        if direct_public_relay_runtime {
+            let mut raw_json = synthetic_public_relay_profile_json()?;
+            if let Some(owner_runtime_lab) = owner_runtime_lab {
+                raw_json = apply_owner_runtime_lab_overrides(&raw_json, owner_runtime_lab)?;
+            }
+            raw_json = apply_vk_turn_stream_count_override(
+                &raw_json,
+                requested_vk_turn_stream_count(&payload.server),
+            )?;
+            let mut request = json!({
+                "serverHost": host,
+                "transport": transport,
+                "engine": engine,
+                "protocol": protocol,
+                "vkLink": payload.vk_link.trim(),
+                "vkTurnStreamCount": requested_vk_turn_stream_count(&payload.server),
+                "profileJson": raw_json,
+                "profileSource": "public-relay",
+                "useRealityStartEndpoint": use_reality_start_endpoint
+            });
+            if let Some(runtime_family) = runtime_family {
+                request["runtimeFamily"] = json!(runtime_family);
+            }
+            if let Some(activation_state) = activation_state {
+                request["activationState"] = json!(activation_state);
+            }
+            apply_exclude_packages_to_request(&mut request, &exclude_packages);
+            return Ok(request);
+        }
         if owner_runtime_lab.is_none() && payload.secret.trim().is_empty() {
             return Err(format!(
                 "no local imported access key found for host {host:?}"

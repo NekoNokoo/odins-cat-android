@@ -31,6 +31,8 @@ import java.security.MessageDigest
 import java.security.KeyStore
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import org.json.JSONArray
 import org.json.JSONObject
@@ -47,8 +49,13 @@ private const val MAX_VK_TURN_STREAM_COUNT = 16
 private const val DEFAULT_LOG_LINES = 3000L
 private const val DEFAULT_HTTP_FALLBACK_TEST_URL = "http://example.com"
 private const val DEFAULT_SPEEDTEST_LATENCY_URL = "https://www.gstatic.com/generate_204"
-private const val DEFAULT_SPEEDTEST_DOWNLOAD_BYTES = 2_000_000L
-private const val DEFAULT_SPEEDTEST_DOWNLOAD_URL = "https://speed.cloudflare.com/__down?bytes=2000000"
+private const val DEFAULT_SPEEDTEST_DOWNLOAD_BYTES = 250_000_000L
+private const val DEFAULT_SPEEDTEST_DOWNLOAD_URL = "https://speed.cloudflare.com/__down"
+private const val DEFAULT_SPEEDTEST_WARMUP_DURATION_MS = 2_000L
+private const val DEFAULT_SPEEDTEST_MEASURE_DURATION_MS = 8_000L
+private const val DEFAULT_SPEEDTEST_STREAM_COUNT = 8
+private const val MAX_SPEEDTEST_STREAM_COUNT = 8
+private const val DEFAULT_SPEEDTEST_LATENCY_SAMPLE_COUNT = 4
 private const val NETWORK_LENS_YANDEX_URL = "https://yandex.ru"
 private const val NETWORK_LENS_GOOGLE_URL = "https://google.com"
 private const val NETWORK_LENS_GEOLOOKUP_URL_PREFIX = "https://ipwho.is/"
@@ -995,6 +1002,9 @@ object VpnRuntimeLibbox {
         latencyUrl: String,
         downloadUrl: String,
         requestedDownloadBytes: Long,
+        warmupDurationMs: Long,
+        measureDurationMs: Long,
+        streamCount: Int,
     ): TunnelSpeedTestSnapshot {
         val current = VpnRuntimeStore.snapshot(context)
         if (current.status != "running" || current.socksAddress.isNullOrBlank()) {
@@ -1004,6 +1014,9 @@ object VpnRuntimeLibbox {
                 latencyUrl = latencyUrl.ifBlank { DEFAULT_SPEEDTEST_LATENCY_URL },
                 downloadUrl = downloadUrl.ifBlank { DEFAULT_SPEEDTEST_DOWNLOAD_URL },
                 checkedAt = currentTimestamp(),
+                warmupDurationMs = warmupDurationMs,
+                streamCount = streamCount,
+                measuredViaTunnel = true,
                 error = "Android VPN tunnel is not running.",
             )
         }
@@ -1015,27 +1028,36 @@ object VpnRuntimeLibbox {
             } else {
                 DEFAULT_SPEEDTEST_DOWNLOAD_BYTES
             }
-        val resolvedDownloadUrl =
-            downloadUrl.ifBlank {
-                "https://speed.cloudflare.com/__down?bytes=$resolvedDownloadBytes"
-            }
+        val resolvedDownloadUrl = downloadUrl.ifBlank { DEFAULT_SPEEDTEST_DOWNLOAD_URL }
+        val resolvedWarmupDurationMs = warmupDurationMs.coerceAtLeast(0L)
+        val resolvedMeasureDurationMs = measureDurationMs.coerceAtLeast(1L)
+        val resolvedStreamCount =
+            streamCount.coerceIn(1, MAX_SPEEDTEST_STREAM_COUNT)
         val (host, port) = splitHostAndPort(current.socksAddress)
         val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(host, port))
 
         VpnRuntimeStore.update(context, sync = true) { latest ->
             latest.copy(
-                logTail = trimLogTail(latest.logTail + "Speed test started for $resolvedDownloadUrl via $host:$port."),
+                logTail =
+                    trimLogTail(
+                        latest.logTail +
+                            "Speed test started for $resolvedDownloadUrl via $host:$port ($resolvedStreamCount streams, warmup ${resolvedWarmupDurationMs}ms, measure ${resolvedMeasureDurationMs}ms).",
+                    ),
             )
         }
 
         return runCatching {
-            val latencyResult = executeTimedHttpProbeWithLocalSocksRetries(resolvedLatencyUrl, proxy, "HEAD", host, port)
+            val latencyResult = executeLatencyProbeWithLocalSocksRetries(resolvedLatencyUrl, proxy, "HEAD", host, port)
             if (!latencyResult.ok) {
                 throw IllegalStateException(latencyResult.error ?: "Latency probe failed.")
             }
 
             val downloadResult = executeDownloadProbeWithLocalSocksRetries(
                 targetUrl = resolvedDownloadUrl,
+                requestedDownloadBytes = resolvedDownloadBytes,
+                warmupDurationMs = resolvedWarmupDurationMs,
+                measureDurationMs = resolvedMeasureDurationMs,
+                streamCount = resolvedStreamCount,
                 proxy = proxy,
                 proxyHost = host,
                 proxyPort = port,
@@ -1055,6 +1077,9 @@ object VpnRuntimeLibbox {
                     downloadMbps = downloadResult.downloadMbps,
                     downloadBytes = downloadResult.downloadBytes,
                     downloadDurationMs = downloadResult.downloadDurationMs,
+                    warmupDurationMs = resolvedWarmupDurationMs,
+                    streamCount = resolvedStreamCount,
+                    measuredViaTunnel = true,
                 )
             VpnRuntimeStore.update(context, sync = true) { latest ->
                 latest.copy(
@@ -1074,6 +1099,9 @@ object VpnRuntimeLibbox {
                     latencyUrl = resolvedLatencyUrl,
                     downloadUrl = resolvedDownloadUrl,
                     checkedAt = currentTimestamp(),
+                    warmupDurationMs = resolvedWarmupDurationMs,
+                    streamCount = resolvedStreamCount,
+                    measuredViaTunnel = true,
                     error = error.message ?: "Android VPN speed test failed.",
                 )
             VpnRuntimeStore.update(context, sync = true) { latest ->
@@ -1450,6 +1478,59 @@ object VpnRuntimeLibbox {
             )
     }
 
+    private fun executeLatencyProbeWithLocalSocksRetries(
+        targetUrl: String,
+        proxy: Proxy,
+        method: String,
+        proxyHost: String,
+        proxyPort: Int,
+    ): TunnelSpeedTestSnapshot {
+        val latencySamples = mutableListOf<Int>()
+        var latestFailure: TunnelSpeedTestSnapshot? = null
+
+        repeat(DEFAULT_SPEEDTEST_LATENCY_SAMPLE_COUNT) { sampleIndex ->
+            val probe =
+                executeTimedHttpProbeWithLocalSocksRetries(
+                    targetUrl = targetUrl,
+                    proxy = proxy,
+                    method = method,
+                    proxyHost = proxyHost,
+                    proxyPort = proxyPort,
+                )
+            if (!probe.ok) {
+                latestFailure = probe
+                return probe
+            }
+            probe.latencyMs?.let { latency ->
+                if (sampleIndex > 0) {
+                    latencySamples.add(latency)
+                }
+            }
+        }
+
+        val bestLatencyMs = latencySamples.minOrNull()
+        return if (bestLatencyMs != null) {
+            TunnelSpeedTestSnapshot(
+                ok = true,
+                status = "passed",
+                latencyUrl = targetUrl,
+                checkedAt = currentTimestamp(),
+                latencyMs = bestLatencyMs,
+                measuredViaTunnel = true,
+            )
+        } else {
+            latestFailure
+                ?: TunnelSpeedTestSnapshot(
+                    ok = false,
+                    status = "failed",
+                    latencyUrl = targetUrl,
+                    checkedAt = currentTimestamp(),
+                    measuredViaTunnel = true,
+                    error = "Android latency probe did not produce a usable sample.",
+                )
+        }
+    }
+
     private fun executeHttpProbe(
         targetUrl: String,
         proxy: Proxy,
@@ -1526,6 +1607,10 @@ object VpnRuntimeLibbox {
 
     private fun executeDownloadProbeWithLocalSocksRetries(
         targetUrl: String,
+        requestedDownloadBytes: Long,
+        warmupDurationMs: Long,
+        measureDurationMs: Long,
+        streamCount: Int,
         proxy: Proxy,
         proxyHost: String,
         proxyPort: Int,
@@ -1534,13 +1619,23 @@ object VpnRuntimeLibbox {
         repeat(3) { attempt ->
             val probe =
                 runCatching {
-                    executeDownloadProbe(targetUrl, proxy)
+                    executeDownloadProbe(
+                        targetUrl = targetUrl,
+                        requestedDownloadBytes = requestedDownloadBytes,
+                        warmupDurationMs = warmupDurationMs,
+                        measureDurationMs = measureDurationMs,
+                        streamCount = streamCount,
+                        proxy = proxy,
+                    )
                 }.getOrElse { error ->
                     TunnelSpeedTestSnapshot(
                         ok = false,
                         status = "failed",
                         downloadUrl = targetUrl,
                         checkedAt = currentTimestamp(),
+                        warmupDurationMs = warmupDurationMs,
+                        streamCount = streamCount,
+                        measuredViaTunnel = true,
                         error = error.message ?: "Android download probe failed.",
                     )
                 }
@@ -1560,59 +1655,120 @@ object VpnRuntimeLibbox {
                 status = "failed",
                 downloadUrl = targetUrl,
                 checkedAt = currentTimestamp(),
+                warmupDurationMs = warmupDurationMs,
+                streamCount = streamCount,
+                measuredViaTunnel = true,
                 error = "Android download probe did not produce a result.",
             )
     }
 
     private fun executeDownloadProbe(
         targetUrl: String,
+        requestedDownloadBytes: Long,
+        warmupDurationMs: Long,
+        measureDurationMs: Long,
+        streamCount: Int,
         proxy: Proxy,
     ): TunnelSpeedTestSnapshot {
-        val connection = (URL(targetUrl).openConnection(proxy) as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 8_000
-            readTimeout = 20_000
-            instanceFollowRedirects = true
-            useCaches = false
-        }
-        try {
-            val startedAt = System.nanoTime()
-            val code = connection.responseCode
-            if (code !in 200..399) {
-                return TunnelSpeedTestSnapshot(
-                    ok = false,
-                    status = "failed",
-                    downloadUrl = targetUrl,
-                    checkedAt = currentTimestamp(),
-                    error = "Download probe returned HTTP $code",
-                )
-            }
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            var totalBytes = 0L
-            connection.inputStream.use { input ->
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read <= 0) {
-                        break
+        val measuredBytes = AtomicLong(0L)
+        val streamErrors = ConcurrentLinkedQueue<String>()
+        val startAtNs = System.nanoTime() + 200_000_000L
+        val measureStartAtNs = startAtNs + (warmupDurationMs * 1_000_000L)
+        val measureEndAtNs = measureStartAtNs + (measureDurationMs * 1_000_000L)
+        val workers =
+            (0 until streamCount).map { streamIndex ->
+                thread(name = "odin-speedtest-$streamIndex", isDaemon = true) {
+                    val now = System.nanoTime()
+                    if (startAtNs > now) {
+                        Thread.sleep(((startAtNs - now) / 1_000_000L).coerceAtLeast(0L))
                     }
-                    totalBytes += read.toLong()
+                    var requestRound = 0
+                    while (System.nanoTime() < measureEndAtNs) {
+                        val streamUrl =
+                            appendSpeedTestQuery(
+                                baseUrl = targetUrl,
+                                requestedDownloadBytes = requestedDownloadBytes,
+                                streamIndex = streamIndex,
+                                requestRound = requestRound,
+                            )
+                        requestRound += 1
+                        val connection =
+                            (URL(streamUrl).openConnection(proxy) as HttpURLConnection).apply {
+                                requestMethod = "GET"
+                                connectTimeout = 8_000
+                                readTimeout = (warmupDurationMs + measureDurationMs + 5_000L).toInt()
+                                instanceFollowRedirects = true
+                                useCaches = false
+                                setRequestProperty("Cache-Control", "no-store")
+                                setRequestProperty("Pragma", "no-cache")
+                                setRequestProperty("Accept-Encoding", "identity")
+                                setRequestProperty("Connection", "keep-alive")
+                            }
+
+                        try {
+                            val code = connection.responseCode
+                            if (code !in 200..399) {
+                                streamErrors.add("Stream ${streamIndex + 1} returned HTTP $code")
+                                return@thread
+                            }
+
+                            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                            connection.inputStream.use { input ->
+                                while (System.nanoTime() < measureEndAtNs) {
+                                    val read = input.read(buffer)
+                                    if (read <= 0) {
+                                        break
+                                    }
+                                    if (System.nanoTime() >= measureStartAtNs) {
+                                        measuredBytes.addAndGet(read.toLong())
+                                    }
+                                }
+                            }
+                        } catch (error: Exception) {
+                            streamErrors.add(
+                                error.message ?: "Stream ${streamIndex + 1} failed during download.",
+                            )
+                            return@thread
+                        } finally {
+                            connection.disconnect()
+                        }
+                    }
                 }
             }
-            val durationMs = ((System.nanoTime() - startedAt) / 1_000_000L).coerceAtLeast(1L)
-            val mbps = (((totalBytes * 8.0) / 1_000_000.0) / (durationMs / 1000.0))
-            return TunnelSpeedTestSnapshot(
-                ok = totalBytes > 0,
-                status = if (totalBytes > 0) "passed" else "failed",
-                downloadUrl = targetUrl,
-                checkedAt = currentTimestamp(),
-                downloadMbps = String.format(Locale.US, "%.1f", mbps).toDouble(),
-                downloadBytes = totalBytes,
-                downloadDurationMs = durationMs,
-                error = if (totalBytes > 0) null else "Download probe returned no bytes.",
-            )
-        } finally {
-            connection.disconnect()
-        }
+
+        workers.forEach { worker -> worker.join((warmupDurationMs + measureDurationMs + 8_000L).coerceAtLeast(5_000L)) }
+
+        val totalBytes = measuredBytes.get().coerceAtLeast(0L)
+        val mbps = (((totalBytes * 8.0) / 1_000_000.0) / (measureDurationMs / 1000.0))
+        val primaryError = streamErrors.peek()
+        return TunnelSpeedTestSnapshot(
+            ok = totalBytes > 0,
+            status = if (totalBytes > 0) "passed" else "failed",
+            downloadUrl = targetUrl,
+            checkedAt = currentTimestamp(),
+            downloadMbps = if (totalBytes > 0) String.format(Locale.US, "%.1f", mbps).toDouble() else null,
+            downloadBytes = totalBytes,
+            downloadDurationMs = measureDurationMs,
+            warmupDurationMs = warmupDurationMs,
+            streamCount = streamCount,
+            measuredViaTunnel = true,
+            error =
+                if (totalBytes > 0) {
+                    null
+                } else {
+                    primaryError ?: "Download probe returned no bytes."
+                },
+        )
+    }
+
+    private fun appendSpeedTestQuery(
+        baseUrl: String,
+        requestedDownloadBytes: Long,
+        streamIndex: Int,
+        requestRound: Int,
+    ): String {
+        val separator = if (baseUrl.contains("?")) "&" else "?"
+        return "$baseUrl${separator}bytes=$requestedDownloadBytes&stream=$streamIndex&round=$requestRound&cache_bust=${System.currentTimeMillis()}_${streamIndex}_$requestRound"
     }
 
     private fun isCertificateValidationError(message: String): Boolean {

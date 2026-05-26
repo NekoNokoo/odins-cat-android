@@ -47,8 +47,11 @@ class ConnectivityTestArgs {
 @InvokeArg
 class SpeedTestArgs {
     var latencyUrl: String = "https://www.gstatic.com/generate_204"
-    var downloadUrl: String = "https://speed.cloudflare.com/__down?bytes=2000000"
-    var downloadBytes: Long = 2_000_000
+    var downloadUrl: String = "https://speed.cloudflare.com/__down"
+    var downloadBytes: Long = 250_000_000
+    var warmupDurationMs: Long = 2_000
+    var measureDurationMs: Long = 8_000
+    var streamCount: Int = 8
 }
 
 @InvokeArg
@@ -257,7 +260,7 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
         thread(name = "odin-one-speed-test", isDaemon = true) {
             Log.i(
                 "VpnRuntimeService",
-                "VpnRuntimePlugin received runSpeedTest for ${args.downloadUrl} (${args.downloadBytes} bytes)",
+                "VpnRuntimePlugin received runSpeedTest for ${args.downloadUrl} (${args.downloadBytes} bytes, ${args.streamCount} streams, warmup ${args.warmupDurationMs} ms, measure ${args.measureDurationMs} ms)",
             )
             runCatching {
                 VpnRuntimeLibbox.runSpeedTest(
@@ -265,6 +268,9 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
                     latencyUrl = args.latencyUrl,
                     downloadUrl = args.downloadUrl,
                     requestedDownloadBytes = args.downloadBytes,
+                    warmupDurationMs = args.warmupDurationMs,
+                    measureDurationMs = args.measureDurationMs,
+                    streamCount = args.streamCount,
                 )
             }.onSuccess { result ->
                 invoke.resolve(result.toJsObject())
@@ -277,6 +283,9 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
                         latencyUrl = args.latencyUrl,
                         downloadUrl = args.downloadUrl,
                         checkedAt = currentTimestamp(),
+                        warmupDurationMs = args.warmupDurationMs,
+                        streamCount = args.streamCount,
+                        measuredViaTunnel = true,
                         error = error.message ?: "Android VPN speed test crashed.",
                     ).toJsObject(),
                 )

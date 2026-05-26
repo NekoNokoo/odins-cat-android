@@ -495,6 +495,9 @@ func executeEdgeAttach(id string, req Request) error {
 		if err := ensureRemoteEdgeXrayInstalled(edgeClient, layout.xrayPath); err != nil {
 			return err
 		}
+		if err := ensureRemoteHAProxyInstalled(edgeClient); err != nil {
+			return err
+		}
 	default:
 		if err := ensureRemoteSocatInstalled(edgeClient); err != nil {
 			return err

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Odin's Cat",
+  "productName": "Odins Cat",
   "version": "1.0.0-beta",
   "identifier": "com.odinone.desktop.vk",
   "build": {

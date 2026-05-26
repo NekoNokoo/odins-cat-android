@@ -36,6 +36,9 @@ export type TunnelSpeedTestResult = {
   downloadMbps?: number;
   downloadBytes?: number;
   downloadDurationMs?: number;
+  warmupDurationMs?: number;
+  streamCount?: number;
+  measuredViaTunnel?: boolean;
   error?: string;
 };
 
@@ -62,6 +65,9 @@ type TunnelSpeedTestRequest = {
   latencyUrl?: string;
   downloadUrl?: string;
   downloadBytes?: number;
+  warmupDurationMs?: number;
+  measureDurationMs?: number;
+  streamCount?: number;
 };
 
 type TauriCoreModule = typeof import("@tauri-apps/api/core");
@@ -100,8 +106,12 @@ const STATIC_WHITELIST_CIDRS = [
   "77.88.21.0/24"
 ] as const;
 const DEFAULT_SPEEDTEST_LATENCY_URL = "https://www.gstatic.com/generate_204";
-const DEFAULT_SPEEDTEST_DOWNLOAD_BYTES = 2_000_000;
-const DEFAULT_SPEEDTEST_DOWNLOAD_URL = `https://speed.cloudflare.com/__down?bytes=${DEFAULT_SPEEDTEST_DOWNLOAD_BYTES}`;
+const DEFAULT_SPEEDTEST_DOWNLOAD_BYTES = 250_000_000;
+const DEFAULT_SPEEDTEST_DOWNLOAD_URL = "https://speed.cloudflare.com/__down";
+const DEFAULT_SPEEDTEST_WARMUP_DURATION_MS = 2_000;
+const DEFAULT_SPEEDTEST_MEASURE_DURATION_MS = 8_000;
+const DEFAULT_SPEEDTEST_STREAM_COUNT = 8;
+const DEFAULT_SPEEDTEST_LATENCY_SAMPLE_COUNT = 4;
 
 function parseIpv4(ip: string) {
   const parts = ip.trim().split(".");
@@ -175,63 +185,125 @@ async function runBrowserSpeedTest(
     typeof payload.downloadBytes === "number" && payload.downloadBytes > 0
       ? Math.floor(payload.downloadBytes)
       : DEFAULT_SPEEDTEST_DOWNLOAD_BYTES;
-  const downloadUrl =
-    payload.downloadUrl?.trim() ||
-    `https://speed.cloudflare.com/__down?bytes=${downloadBytes}`;
+  const downloadUrl = payload.downloadUrl?.trim() || DEFAULT_SPEEDTEST_DOWNLOAD_URL;
+  const warmupDurationMs =
+    typeof payload.warmupDurationMs === "number" && payload.warmupDurationMs >= 0
+      ? Math.floor(payload.warmupDurationMs)
+      : DEFAULT_SPEEDTEST_WARMUP_DURATION_MS;
+  const measureDurationMs =
+    typeof payload.measureDurationMs === "number" && payload.measureDurationMs > 0
+      ? Math.floor(payload.measureDurationMs)
+      : DEFAULT_SPEEDTEST_MEASURE_DURATION_MS;
+  const streamCount =
+    typeof payload.streamCount === "number" && payload.streamCount > 0
+      ? Math.min(8, Math.max(1, Math.floor(payload.streamCount)))
+      : DEFAULT_SPEEDTEST_STREAM_COUNT;
 
   const checkedAt = new Date().toISOString();
 
   try {
-    const latencyStartedAt = performance.now();
-    const latencyResponse = await fetch(latencyUrl, {
-      method: "HEAD",
-      cache: "no-store"
-    });
-    const latencyFinishedAt = performance.now();
-    if (!latencyResponse.ok) {
+    const latencySamples: number[] = [];
+    for (let sampleIndex = 0; sampleIndex < DEFAULT_SPEEDTEST_LATENCY_SAMPLE_COUNT; sampleIndex += 1) {
+      const latencyStartedAt = performance.now();
+      const latencyResponse = await fetch(latencyUrl, {
+        method: "HEAD",
+        cache: "no-store"
+      });
+      const latencyFinishedAt = performance.now();
+      if (!latencyResponse.ok) {
+        return {
+          ok: false,
+          status: "failed",
+          latencyUrl,
+          downloadUrl,
+          checkedAt,
+          error: `Latency probe returned HTTP ${latencyResponse.status}.`
+        };
+      }
+      if (sampleIndex > 0) {
+        latencySamples.push(Math.max(1, Math.round(latencyFinishedAt - latencyStartedAt)));
+      }
+    }
+
+    const latencyMs =
+      latencySamples.length > 0
+        ? Math.min(...latencySamples)
+        : undefined;
+    if (typeof latencyMs !== "number") {
       return {
         ok: false,
         status: "failed",
         latencyUrl,
         downloadUrl,
         checkedAt,
-        error: `Latency probe returned HTTP ${latencyResponse.status}.`
+        error: "Latency probe did not produce a usable sample."
       };
     }
 
-    const downloadStartedAt = performance.now();
-    const downloadResponse = await fetch(downloadUrl, {
-      method: "GET",
-      cache: "no-store"
-    });
-    if (!downloadResponse.ok) {
-      return {
-        ok: false,
-        status: "failed",
-        latencyUrl,
-        downloadUrl,
-        checkedAt,
-        latencyMs: Math.max(1, Math.round(latencyFinishedAt - latencyStartedAt)),
-        error: `Download probe returned HTTP ${downloadResponse.status}.`
-      };
-    }
+    const testStartedAt = performance.now() + 200;
+    const warmupEndsAt = testStartedAt + warmupDurationMs;
+    const measureEndsAt = warmupEndsAt + measureDurationMs;
+    const buildDownloadUrl = (streamIndex: number) => {
+      const separator = downloadUrl.includes("?") ? "&" : "?";
+      return `${downloadUrl}${separator}bytes=${downloadBytes}&stream=${streamIndex}&cache_bust=${Date.now()}-${streamIndex}`;
+    };
 
-    const buffer = await downloadResponse.arrayBuffer();
-    const downloadFinishedAt = performance.now();
-    const measuredBytes = buffer.byteLength;
-    const durationMs = Math.max(1, Math.round(downloadFinishedAt - downloadStartedAt));
+    const runStream = async (streamIndex: number) => {
+      const delayMs = Math.max(0, testStartedAt - performance.now());
+      if (delayMs > 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+      }
+      const controller = new AbortController();
+      const response = await fetch(buildDownloadUrl(streamIndex), {
+        method: "GET",
+        cache: "no-store",
+        signal: controller.signal
+      });
+      if (!response.ok || !response.body) {
+        throw new Error(`Download probe returned HTTP ${response.status}.`);
+      }
+
+      const reader = response.body.getReader();
+      let measuredBytes = 0;
+      try {
+        while (performance.now() < measureEndsAt) {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+          const chunkBytes = value?.byteLength ?? 0;
+          if (performance.now() >= warmupEndsAt) {
+            measuredBytes += chunkBytes;
+          }
+        }
+      } finally {
+        controller.abort();
+        reader.releaseLock();
+      }
+
+      return measuredBytes;
+    };
+
+    const downloadSamples = await Promise.all(
+      Array.from({ length: streamCount }, (_, index) => runStream(index)),
+    );
+    const measuredBytes = downloadSamples.reduce((sum, value) => sum + value, 0);
+    const durationMs = Math.max(1, measureDurationMs);
     const mbps = Number((((measuredBytes * 8) / 1_000_000 / durationMs) * 1000).toFixed(1));
 
     return {
-      ok: true,
+      ok: measuredBytes > 0,
       status: "passed",
       latencyUrl,
       downloadUrl,
       checkedAt,
-      latencyMs: Math.max(1, Math.round(latencyFinishedAt - latencyStartedAt)),
+      latencyMs,
       downloadMbps: mbps,
       downloadBytes: measuredBytes,
-      downloadDurationMs: durationMs
+      downloadDurationMs: durationMs,
+      warmupDurationMs,
+      streamCount,
+      measuredViaTunnel: false
     };
   } catch (error) {
     return {
@@ -240,6 +312,9 @@ async function runBrowserSpeedTest(
       latencyUrl,
       downloadUrl,
       checkedAt,
+      warmupDurationMs,
+      streamCount,
+      measuredViaTunnel: false,
       error: error instanceof Error ? error.message : "Browser speed test failed."
     };
   }

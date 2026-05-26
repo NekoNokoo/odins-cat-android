@@ -45,11 +45,16 @@ private const val RELAY_PROBE_OWNER = "owner"
 private const val RELAY_PROBE_GOOGLEVIDEO = "googlevideo"
 private const val RELAY_PROBE_GSTATIC = "gstatic"
 private const val RELAY_PROBE_YOUTUBE = "youtube"
+private const val RELAY_EMBEDDED_SOURCE_SUFFIX = "-embedded-fallback"
 private val OWNER_EGRESS_STICKY_CANDIDATE_URIS =
     listOf(
-        "vless://56022eef-4ade-4240-b0cc-eb006797e7ac@94.126.207.245:443?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&fp=random&sni=api.vk.com&pbk=V32osv0u9T3QItvyk4UgK-mjJuXkXLn4u_3pbk8eNgs&sid=9339#%F0%9F%87%B7%F0%9F%87%BA%20Russia%20%5B%2ACIDR%5D%20YA",
-        "vless://4862ed52-9ee5-000a-b7ba-d39429afc7f4@217.16.21.235:443?type=tcp&security=reality&encryption=none&flow=xtls-rprx-vision&fp=random&pbk=OCRYYq4e92sQ-wWFRX6WX9pdvuFBWOqybLhpSiv3nFA&sid=111111&sni=5post-gate.x5.ru#%F0%9F%87%B7%F0%9F%87%BA%20Russia%20%5B%2ACIDR%5D%20VK",
+        "vless://aae59c28-a4e7-46bd-8fa5-a239e8cfe0b1@51.250.45.194:443/?type=tcp&encryption=none&flow=xtls-rprx-vision&sni=ads.x5.ru&fp=random&security=reality&pbk=Py03aPnCma9Ip4xCvtBsK77NScUYphSw46RmdjFSvls&sid=5aea2cffba100557&packetEncoding=xudp#%F0%9F%87%A9%F0%9F%87%AA%20Germany%20%7C%20%F0%9F%8C%90%20%5B%2ACIDR%5D%20YA",
+        "vless://a96f18f0-4a56-4c4f-be6e-434835f5523c@158.160.71.158:443?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&fp=chrome&sni=ads.x5.ru&pbk=0j-QVy2pFdCuKAkppUYr0diUSjjKse9CtM5AMhHzqD4&sid=8ac77e6bab737698&spx=%2F#%F0%9F%87%B1%F0%9F%87%B9%20Lithuania%20%5B%2ACIDR%5D%20YA",
+        "vless://30a3d65b-2963-48ef-ac5c-9f354fadc85c@212.233.121.168:5443?encryption=none&type=tcp&security=reality&fp=chrome&sni=ads.x5.ru&pbk=nxnDt_F4R6QK9mKQ7dUpvCcJPtwYNPdlNWWjeiDyYj0&sid=e0d4ee#%F0%9F%87%B5%F0%9F%87%B1%20Poland%20%5B%2ACIDR%5D%20VK",
+        "vless://e0e062be-e77b-4568-9477-512388d65bc8@51.250.23.54:443?type=tcp&encryption=none&security=reality&pbk=-tpEyDuFARd0Lvo6l6g25xCNK9tBiVMhpymAJY_gO2I&fp=qq&sni=max.ru&spx=%2F&sid=7405645f#%F0%9F%87%B3%F0%9F%87%B1%20The%20Netherlands%20%5B%2ACIDR%5D%20YA",
+        "vless://19ef3d02-1c55-4fec-9794-6def8cbac396@185.130.113.39:5443?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&fp=chrome&sni=i.oneme.ru&pbk=-nZqMxt7meVxfnQeK46MAYh5scb0M6La82axD8KHJXk&sid=91e2a4c7#%F0%9F%87%AB%F0%9F%87%AE%20Finland%20%5B%2ACIDR%5D%20VK",
     )
+private val EMBEDDED_RELAY_SUBSCRIPTION_BODY = OWNER_EGRESS_STICKY_CANDIDATE_URIS.joinToString("\n")
 private val OWNER_EGRESS_PROVEN_SECOND_HOP_FAMILY_PRIORITY =
     listOf(
         "api.vk.com",
@@ -63,6 +68,17 @@ private val OWNER_EGRESS_RELAY_FAMILY_PRIORITY =
         "api.vk.com",
         "max.ru",
         "eh.vk.com",
+    )
+private val DIRECT_RELAY_FAMILY_PRIORITY =
+    listOf(
+        "ads.x5.ru",
+        "max.ru",
+        "5post-gate.x5.ru",
+        "id.x5.ru",
+        "api.vk.com",
+        "www.vk.ru",
+        "www.vk.com",
+        "i.oneme.ru",
     )
 
 internal data class RealityRelayAutoselectOptions(
@@ -344,7 +360,8 @@ internal object RealityRelayAutoselect {
         )
 
         return runCatching {
-            val body = fetchSubscriptionBody(options.subscriptionUrl)
+            val catalog = loadRelayCatalog(options)
+            val body = catalog.body
             val decodedBody = decodeSubscriptionBody(body)
             val parsed =
                 mergeOwnerEgressStickyCandidates(
@@ -382,7 +399,7 @@ internal object RealityRelayAutoselect {
                 RealityRelayAutoselectState(
                     enabled = true,
                     status = if (best != null) RELAY_AUTOSELECT_STATUS_READY else RELAY_AUTOSELECT_STATUS_NO_CANDIDATE,
-                    sourceLabel = options.sourceLabel,
+                    sourceLabel = catalog.sourceLabel,
                     subscriptionUrl = options.subscriptionUrl,
                     refreshIntervalHours = options.refreshIntervalHours,
                     russianLatencyThresholdMs = options.russianLatencyThresholdMs,
@@ -399,6 +416,8 @@ internal object RealityRelayAutoselect {
                 buildString {
                     append("Relay autoselect refresh completed; trigger=")
                     append(trigger)
+                    append(" source=")
+                    append(catalog.sourceLabel)
                     append(" status=")
                     append(state.status)
                     best?.let {
@@ -417,7 +436,7 @@ internal object RealityRelayAutoselect {
             )
             Log.i(
                 RELAY_AUTOSELECT_TAG,
-                "Relay autoselect refresh completed; trigger=$trigger status=${state.status} best=${state.bestCandidate?.sni ?: "<none>"} host=${state.bestCandidate?.host ?: "<none>"} port=${state.bestCandidate?.port ?: 0}",
+                "Relay autoselect refresh completed; trigger=$trigger source=${catalog.sourceLabel} status=${state.status} best=${state.bestCandidate?.sni ?: "<none>"} host=${state.bestCandidate?.host ?: "<none>"} port=${state.bestCandidate?.port ?: 0}",
             )
             state
         }.getOrElse { error ->
@@ -531,7 +550,9 @@ internal object RealityRelayAutoselect {
         when {
             !refreshIfStale -> false
             options.preferOwnerRelayStability -> true
-            refreshIfStale -> shouldRefresh(state, options)
+            // Direct public relays are volatile. A cached TCP-reachable candidate can stay
+            // selected while no longer carrying real user traffic, so refresh on each start.
+            refreshIfStale -> true
             else -> false
         }
 
@@ -613,6 +634,16 @@ internal object RealityRelayAutoselect {
         reality.put("publicKey", candidate.publicKey)
         reality.put("shortId", candidate.shortId)
         candidate.flow?.takeIf { it.isNotBlank() }?.let { reality.put("flow", it) }
+
+        if (!options.preferOwnerRelayStability) {
+            val baseReality = profile.optJSONObject("vlessReality") ?: JSObject().also { profile.put("vlessReality", it) }
+            baseReality.put("port", candidate.port)
+            baseReality.put("uuid", candidate.uuid)
+            baseReality.put("serverName", candidate.sni)
+            baseReality.put("publicKey", candidate.publicKey)
+            baseReality.put("shortId", candidate.shortId)
+            candidate.flow?.takeIf { it.isNotBlank() }?.let { baseReality.put("flow", it) }
+        }
 
         vpsLab.put("enabled", true)
         if (vpsLab.optString("mode").isBlank()) {
@@ -828,7 +859,14 @@ internal fun preselectCandidates(
                     .thenBy { it.host },
             )
         } else {
-            ranked
+            ranked.sortedWith(
+                compareBy<RealityRelayCandidate> { directRelaySeedTier(it) }
+                    .thenBy<RealityRelayCandidate> { directRelaySelectionTier(it, history) }
+                    .thenByDescending { it.preScore }
+                    .thenBy { it.sni }
+                    .thenBy { it.port }
+                    .thenBy { it.host },
+            )
         }
     for (candidate in effectiveRanked) {
         if (selected.size >= options.candidateLimit) {
@@ -845,6 +883,23 @@ internal fun preselectCandidates(
         perSni[candidate.sni] = currentPerSni + 1
     }
     return selected
+}
+
+private fun directRelaySeedTier(candidate: RealityRelayCandidate): Int {
+    val familyIndex = DIRECT_RELAY_FAMILY_PRIORITY.indexOf(candidate.sni)
+    val normalizedFamilyRank =
+        if (familyIndex >= 0) {
+            familyIndex
+        } else {
+            DIRECT_RELAY_FAMILY_PRIORITY.size + 10
+        }
+    val transportPenalty =
+        when {
+            candidate.transport == "tcp" && candidate.port == 443 -> 0
+            candidate.transport == "tcp" -> 10
+            else -> 20
+        }
+    return transportPenalty + normalizedFamilyRank
 }
 
 internal fun chooseBestCandidate(
@@ -948,6 +1003,42 @@ internal fun recordConnectivityProbeResult(
         "Recorded relay probe result label=$label passed=$passed sni=${candidate.sni} host=${candidate.host} port=${candidate.port}",
     )
     return true
+}
+
+private data class RelayCatalogLoadResult(
+    val body: String,
+    val sourceLabel: String,
+)
+
+private fun loadRelayCatalog(options: RealityRelayAutoselectOptions): RelayCatalogLoadResult {
+    val remoteBody =
+        runCatching { fetchSubscriptionBody(options.subscriptionUrl) }
+            .getOrElse { error ->
+                Log.w(
+                    RELAY_AUTOSELECT_TAG,
+                    "Failed to fetch relay catalog from ${options.subscriptionUrl}; using embedded fallback.",
+                    error,
+                )
+                ""
+            }
+    val decodedRemoteBody = decodeSubscriptionBody(remoteBody)
+    val remoteCandidates =
+        runCatching { parseRelayCandidates(decodedRemoteBody) }
+            .getOrDefault(emptyList())
+    if (remoteCandidates.isNotEmpty()) {
+        return RelayCatalogLoadResult(
+            body = remoteBody,
+            sourceLabel = options.sourceLabel,
+        )
+    }
+    Log.w(
+        RELAY_AUTOSELECT_TAG,
+        "Relay catalog from ${options.subscriptionUrl} is unavailable or empty; falling back to embedded candidates.",
+    )
+    return RelayCatalogLoadResult(
+        body = EMBEDDED_RELAY_SUBSCRIPTION_BODY,
+        sourceLabel = options.sourceLabel + RELAY_EMBEDDED_SOURCE_SUFFIX,
+    )
 }
 
 private fun fetchSubscriptionBody(url: String): String {
@@ -1112,25 +1203,64 @@ private fun directRelaySelectionTier(
     val exact = entries?.optJSONObject(candidate.exactKey())
     val family = families?.optJSONObject(candidate.familyKey())
 
+    val exactOwner = probeHistoryPassed(exact, RELAY_PROBE_OWNER)
     val exactGeneric = genericProbePassed(exact)
+    val familyOwner = probeHistoryPassed(family, RELAY_PROBE_OWNER)
     val familyGeneric = genericProbePassed(family)
-    val exactClean = !hasProbeFailures(exact, RELAY_PROBE_GOOGLEVIDEO, RELAY_PROBE_GSTATIC, RELAY_PROBE_YOUTUBE)
-    val familyClean = !hasProbeFailures(family, RELAY_PROBE_GOOGLEVIDEO, RELAY_PROBE_GSTATIC, RELAY_PROBE_YOUTUBE)
-    val exactRecentFailure = hasRecentProbeFailure(exact, RELAY_PROBE_GOOGLEVIDEO, RELAY_PROBE_GSTATIC, RELAY_PROBE_YOUTUBE)
-    val familyRecentFailure = hasRecentProbeFailure(family, RELAY_PROBE_GOOGLEVIDEO, RELAY_PROBE_GSTATIC, RELAY_PROBE_YOUTUBE)
+    val exactClean =
+        !hasProbeFailures(
+            exact,
+            RELAY_PROBE_OWNER,
+            RELAY_PROBE_GOOGLEVIDEO,
+            RELAY_PROBE_GSTATIC,
+            RELAY_PROBE_YOUTUBE,
+        )
+    val familyClean =
+        !hasProbeFailures(
+            family,
+            RELAY_PROBE_OWNER,
+            RELAY_PROBE_GOOGLEVIDEO,
+            RELAY_PROBE_GSTATIC,
+            RELAY_PROBE_YOUTUBE,
+        )
+    val exactRecentFailure =
+        hasRecentProbeFailure(
+            exact,
+            RELAY_PROBE_OWNER,
+            RELAY_PROBE_GOOGLEVIDEO,
+            RELAY_PROBE_GSTATIC,
+            RELAY_PROBE_YOUTUBE,
+        )
+    val familyRecentFailure =
+        hasRecentProbeFailure(
+            family,
+            RELAY_PROBE_OWNER,
+            RELAY_PROBE_GOOGLEVIDEO,
+            RELAY_PROBE_GSTATIC,
+            RELAY_PROBE_YOUTUBE,
+        )
+    val preferredSeed = ownerEgressSeedTier(candidate)
 
     return when {
-        exactGeneric && exactClean -> 0
-        exactGeneric && !exactRecentFailure -> 1
-        exactGeneric -> 2
-        familyGeneric && familyClean -> 3
-        familyGeneric && !familyRecentFailure -> 4
-        familyGeneric -> 5
-        exactClean && familyClean -> 6
-        exactClean && !familyRecentFailure -> 7
-        familyClean && !exactRecentFailure -> 8
-        !exactRecentFailure && !familyRecentFailure -> 9
-        else -> 10
+        exactOwner && exactGeneric && exactClean -> preferredSeed
+        exactOwner && exactGeneric && !exactRecentFailure -> 5 + preferredSeed
+        exactOwner && exactClean -> 10 + preferredSeed
+        exactOwner -> 15 + preferredSeed
+        familyOwner && familyGeneric && familyClean -> 20 + preferredSeed
+        familyOwner && familyGeneric && !familyRecentFailure -> 25 + preferredSeed
+        familyOwner && familyClean -> 30 + preferredSeed
+        familyOwner -> 35 + preferredSeed
+        exactGeneric && exactClean -> 40 + preferredSeed
+        exactGeneric && !exactRecentFailure -> 45 + preferredSeed
+        exactGeneric -> 50 + preferredSeed
+        familyGeneric && familyClean -> 55 + preferredSeed
+        familyGeneric && !familyRecentFailure -> 60 + preferredSeed
+        familyGeneric -> 65 + preferredSeed
+        exactClean && familyClean -> 70 + preferredSeed
+        exactClean && !familyRecentFailure -> 75 + preferredSeed
+        familyClean && !exactRecentFailure -> 80 + preferredSeed
+        !exactRecentFailure && !familyRecentFailure -> 85 + preferredSeed
+        else -> 90 + preferredSeed
     }
 }
 
