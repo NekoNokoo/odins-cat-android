@@ -1,6 +1,8 @@
 name: Windows EXE test artifact
 
-on: [push, workflow_dispatch]
+on:
+  push:
+  workflow_dispatch:
 
 jobs:
   build-windows-exe:
