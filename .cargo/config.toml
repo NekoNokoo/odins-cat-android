@@ -13,3 +13,7 @@ ar = "/Users/vladislav/.local/android-sdk/ndk/29.0.14206865/toolchains/llvm/preb
 [target.x86_64-linux-android]
 linker = "/Users/vladislav/.local/android-sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/darwin-x86_64/bin/x86_64-linux-android24-clang"
 ar = "/Users/vladislav/.local/android-sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar"
+
+[target.x86_64-pc-windows-gnu]
+linker = "/opt/homebrew/bin/x86_64-w64-mingw32-gcc"
+ar = "/opt/homebrew/bin/x86_64-w64-mingw32-ar"

@@ -47,13 +47,27 @@ fn build_mvpd(target_os: Option<&str>) -> Result<(), String> {
     }
 
     let go_binary = resolve_go_binary();
-    let output = Command::new(&go_binary)
-        .arg("build")
+    let mut cmd = Command::new(&go_binary);
+    cmd.arg("build")
         .arg("-o")
         .arg(&output_path)
         .arg("./cmd/mvpd")
-        .current_dir(&go_root)
-        .output()
+        .current_dir(&go_root);
+
+    if let Some(os) = target_os {
+        cmd.env("GOOS", os);
+    }
+    if let Ok(arch) = env::var("CARGO_CFG_TARGET_ARCH") {
+        let goarch = match arch.as_str() {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            "i686" => "386",
+            _ => &arch,
+        };
+        cmd.env("GOARCH", goarch);
+    }
+
+    let output = cmd.output()
         .map_err(|err| format!("spawn go build: {err}"))?;
 
     if !output.status.success() {

@@ -9,3 +9,5 @@ bin
 *.log
 target
 tmp
+windows-build
+apps/desktop/src-tauri/gen/schemas/windows-schema.json
