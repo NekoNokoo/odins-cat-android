@@ -1,14 +1,19 @@
 package provision
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -879,10 +884,10 @@ func (m *localTunnelManager) cleanupOrphanedClientsLocked() {
 		return
 	}
 	patterns := []string{
-		filepath.Join(cacheDir, "bin", "xray-darwin-arm64") + " run -config " + filepath.Join(cacheDir, "config", "xray-client-"),
-		filepath.Join(cacheDir, "bin", "xray-darwin-arm64") + " run -config " + filepath.Join(cacheDir, "config", "xray-reality-client-"),
-		filepath.Join(cacheDir, "bin", "sing-box-darwin-arm64") + " run -c " + filepath.Join(cacheDir, "config", "sing-box-client-"),
-		filepath.Join(cacheDir, "bin", "sing-box-darwin-arm64") + " run -c " + filepath.Join(cacheDir, "config", "sing-box-reality-client-"),
+		filepath.Join(cacheDir, "bin", xrayBinaryName()) + " run -config " + filepath.Join(cacheDir, "config", "xray-client-"),
+		filepath.Join(cacheDir, "bin", xrayBinaryName()) + " run -config " + filepath.Join(cacheDir, "config", "xray-reality-client-"),
+		filepath.Join(cacheDir, "bin", singBoxBinaryName()) + " run -c " + filepath.Join(cacheDir, "config", "sing-box-client-"),
+		filepath.Join(cacheDir, "bin", singBoxBinaryName()) + " run -c " + filepath.Join(cacheDir, "config", "sing-box-reality-client-"),
 	}
 	for _, pattern := range patterns {
 		_ = killMatchingProcesses(pattern, false)
@@ -1067,6 +1072,24 @@ func isSOCKSReady(socksAddress string) bool {
 }
 
 func killMatchingProcesses(pattern string, force bool) error {
+	if runtime.GOOS == "windows" {
+		parts := strings.Fields(pattern)
+		if len(parts) == 0 {
+			return nil
+		}
+		exePath := parts[0]
+		exeName := filepath.Base(exePath)
+		if !strings.HasSuffix(strings.ToLower(exeName), ".exe") {
+			return nil
+		}
+		args := []string{"/IM", exeName}
+		if force {
+			args = append(args, "/F")
+		}
+		cmd := exec.Command("taskkill", args...)
+		_ = cmd.Run()
+		return nil
+	}
 	args := []string{"-f"}
 	if force {
 		args = append(args, "-9")
@@ -1092,7 +1115,7 @@ func ensureLocalVKClientBinary() (string, error) {
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return "", err
 	}
-	targetPath := filepath.Join(targetDir, "vk-turn-proxy-client-darwin-arm64-v1.6.0")
+	targetPath := filepath.Join(targetDir, vkClientBinaryName())
 	if info, err := os.Stat(targetPath); err == nil && time.Since(info.ModTime()) < 12*time.Hour {
 		return targetPath, nil
 	}
@@ -1107,11 +1130,15 @@ func ensureLocalVKClientBinary() (string, error) {
 		"-ldflags=-checklinkname=0",
 		"github.com/cacggghp/vk-turn-proxy/client@v1.6.0",
 	)
-	cmd.Env = append(os.Environ(), "GOPATH="+goPathDir, "GOOS=darwin", "GOARCH=arm64", "CGO_ENABLED=0")
+	cmd.Env = append(os.Environ(), "GOPATH="+goPathDir, "GOOS="+runtime.GOOS, "GOARCH="+runtime.GOARCH, "CGO_ENABLED=0")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("go install vk-turn-proxy client: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	installedPath := filepath.Join(goPathDir, "bin", "client")
+	installedName := "client"
+	if runtime.GOOS == "windows" {
+		installedName = "client.exe"
+	}
+	installedPath := filepath.Join(goPathDir, "bin", installedName)
 	data, err := os.ReadFile(installedPath)
 	if err != nil {
 		return "", err
@@ -1139,7 +1166,7 @@ func ensureLocalXrayBinary() (string, error) {
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return "", err
 	}
-	targetPath := filepath.Join(targetDir, "xray-darwin-arm64")
+	targetPath := filepath.Join(targetDir, xrayBinaryName())
 	if _, err := os.Stat(targetPath); err == nil {
 		return targetPath, nil
 	}
@@ -1150,22 +1177,54 @@ func ensureLocalXrayBinary() (string, error) {
 	}
 	defer os.RemoveAll(tmpDir)
 
+	var xrayArch string
+	switch runtime.GOOS {
+	case "windows":
+		switch runtime.GOARCH {
+		case "amd64":
+			xrayArch = "windows-64"
+		case "386":
+			xrayArch = "windows-32"
+		case "arm64":
+			xrayArch = "windows-arm64-v8a"
+		default:
+			xrayArch = "windows-64"
+		}
+	case "darwin":
+		if runtime.GOARCH == "arm64" {
+			xrayArch = "macos-arm64-v8a"
+		} else {
+			xrayArch = "macos-64"
+		}
+	case "linux":
+		switch runtime.GOARCH {
+		case "amd64":
+			xrayArch = "linux-64"
+		case "arm64":
+			xrayArch = "linux-arm64-v8a"
+		default:
+			xrayArch = "linux-64"
+		}
+	default:
+		xrayArch = "linux-64"
+	}
+
 	zipPath := filepath.Join(tmpDir, "xray.zip")
-	curlCmd := exec.Command("curl", "-fsSLo", zipPath, "https://github.com/XTLS/Xray-core/releases/download/v25.8.3/Xray-macos-arm64-v8a.zip")
+	archiveURL := fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/download/v25.8.3/Xray-%s.zip", xrayArch)
+	curlCmd := exec.Command("curl", "-fsSLo", zipPath, archiveURL)
 	if output, err := curlCmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("download xray: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	unzipCmd := exec.Command("unzip", "-oq", zipPath, "xray", "-d", tmpDir)
-	if output, err := unzipCmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("unzip xray: %w: %s", err, strings.TrimSpace(string(output)))
+
+	binaryName := "xray"
+	if runtime.GOOS == "windows" {
+		binaryName = "xray.exe"
 	}
-	data, err := os.ReadFile(filepath.Join(tmpDir, "xray"))
-	if err != nil {
-		return "", err
+
+	if err := extractZipFile(zipPath, binaryName, targetPath); err != nil {
+		return "", fmt.Errorf("extract xray zip: %w", err)
 	}
-	if err := os.WriteFile(targetPath, data, 0o755); err != nil {
-		return "", err
-	}
+
 	return targetPath, nil
 }
 
@@ -1178,7 +1237,7 @@ func ensureLocalSingBoxBinary() (string, error) {
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return "", err
 	}
-	targetPath := filepath.Join(targetDir, "sing-box-darwin-arm64")
+	targetPath := filepath.Join(targetDir, singBoxBinaryName())
 	if _, err := os.Stat(targetPath); err == nil {
 		return targetPath, nil
 	}
@@ -1189,28 +1248,62 @@ func ensureLocalSingBoxBinary() (string, error) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	archivePath := filepath.Join(tmpDir, "sing-box.tar.gz")
+	var osName, archName, extension string
+	switch runtime.GOOS {
+	case "windows":
+		osName = "windows"
+		extension = "zip"
+	case "darwin":
+		osName = "darwin"
+		extension = "tar.gz"
+	case "linux":
+		osName = "linux"
+		extension = "tar.gz"
+	default:
+		osName = runtime.GOOS
+		extension = "tar.gz"
+	}
+
+	switch runtime.GOARCH {
+	case "amd64":
+		archName = "amd64"
+	case "arm64":
+		archName = "arm64"
+	case "386":
+		archName = "386"
+	default:
+		archName = runtime.GOARCH
+	}
+
+	archivePath := filepath.Join(tmpDir, "sing-box."+extension)
 	archiveURL := fmt.Sprintf(
-		"https://github.com/SagerNet/sing-box/releases/download/v%s/sing-box-%s-darwin-arm64.tar.gz",
+		"https://github.com/SagerNet/sing-box/releases/download/v%s/sing-box-%s-%s-%s.%s",
 		singBoxReleaseVersion,
 		singBoxReleaseVersion,
+		osName,
+		archName,
+		extension,
 	)
 	curlCmd := exec.Command("curl", "-fsSLo", archivePath, archiveURL)
 	if output, err := curlCmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("download sing-box: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	tarCmd := exec.Command("tar", "-xzf", archivePath, "-C", tmpDir)
-	if output, err := tarCmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("extract sing-box: %w: %s", err, strings.TrimSpace(string(output)))
+
+	binaryName := "sing-box"
+	if runtime.GOOS == "windows" {
+		binaryName = "sing-box.exe"
 	}
-	binaryPath := filepath.Join(tmpDir, "sing-box-"+singBoxReleaseVersion+"-darwin-arm64", "sing-box")
-	data, err := os.ReadFile(binaryPath)
-	if err != nil {
-		return "", err
+
+	if extension == "zip" {
+		if err := extractZipFile(archivePath, binaryName, targetPath); err != nil {
+			return "", fmt.Errorf("extract sing-box zip: %w", err)
+		}
+	} else {
+		if err := extractTarGzFile(archivePath, binaryName, targetPath); err != nil {
+			return "", fmt.Errorf("extract sing-box tar.gz: %w", err)
+		}
 	}
-	if err := os.WriteFile(targetPath, data, 0o755); err != nil {
-		return "", err
-	}
+
 	return targetPath, nil
 }
 
@@ -1609,4 +1702,93 @@ func compactFiles(files ...*os.File) []*os.File {
 		}
 	}
 	return slices.Clone(result)
+}
+
+func singBoxBinaryName() string {
+	suffix := ""
+	if runtime.GOOS == "windows" {
+		suffix = ".exe"
+	}
+	return fmt.Sprintf("sing-box-%s-%s%s", runtime.GOOS, runtime.GOARCH, suffix)
+}
+
+func xrayBinaryName() string {
+	suffix := ""
+	if runtime.GOOS == "windows" {
+		suffix = ".exe"
+	}
+	return fmt.Sprintf("xray-%s-%s%s", runtime.GOOS, runtime.GOARCH, suffix)
+}
+
+func vkClientBinaryName() string {
+	suffix := ""
+	if runtime.GOOS == "windows" {
+		suffix = ".exe"
+	}
+	return fmt.Sprintf("vk-turn-proxy-client-%s-%s-v1.6.0%s", runtime.GOOS, runtime.GOARCH, suffix)
+}
+
+func extractZipFile(zipPath string, targetFilename string, destPath string) error {
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+		if filepath.Base(f.Name) == targetFilename {
+			rc, err := f.Open()
+			if err != nil {
+				return err
+			}
+			defer rc.Close()
+
+			outFile, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+			if err != nil {
+				return err
+			}
+			defer outFile.Close()
+
+			_, err = io.Copy(outFile, rc)
+			return err
+		}
+	}
+	return fmt.Errorf("file %q not found in zip archive", targetFilename)
+}
+
+func extractTarGzFile(tarPath string, targetFilename string, destPath string) error {
+	f, err := os.Open(tarPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	gzr, err := gzip.NewReader(f)
+	if err != nil {
+		return err
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		if filepath.Base(header.Name) == targetFilename && header.Typeflag == tar.TypeReg {
+			outFile, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+			if err != nil {
+				return err
+			}
+			defer outFile.Close()
+
+			_, err = io.Copy(outFile, tr)
+			return err
+		}
+	}
+	return fmt.Errorf("file %q not found in tar.gz archive", targetFilename)
 }
