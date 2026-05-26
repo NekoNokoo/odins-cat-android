@@ -3,14 +3,6 @@ name: Windows test build
 on:
   workflow_dispatch:
   push:
-    paths:
-      - ".github/workflows/windows-test-build.yml"
-      - "apps/desktop/**"
-      - "core/go/**"
-      - "packages/**"
-      - "package.json"
-      - "package-lock.json"
-      - "tsconfig.base.json"
 
 jobs:
   build-windows:
