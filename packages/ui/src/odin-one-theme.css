@@ -1,15 +1,27 @@
 :root {
-  --bg: #f4f4f1;
-  --panel: #ffffff;
-  --line: #111111;
-  --muted: #686868;
-  --soft: #ebebe6;
-  --accent: #dcb78d;
-  --accent-strong: #161616;
-  --radius-xl: 32px;
-  --radius-lg: 24px;
+  --bg: #e9ece2;
+  --bg-2: #dfe4d7;
+  --paper: #f8f9f2;
+  --glass: rgba(248, 249, 242, 0.62);
+  --glass-strong: rgba(248, 249, 242, 0.84);
+  --ink: #12170f;
+  --ink-2: #2c3326;
+  --muted: #707967;
+  --line: rgba(18, 23, 15, 0.12);
+  --line-2: rgba(18, 23, 15, 0.22);
+  --lime: #d6f23b;
+  --lime-2: #aac51c;
+  --moss: #5e7947;
+  --success: #4d8150;
+  --warning: #b9903d;
+  --danger: #ad4638;
+  --font-heading: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono: "SFMono-Regular", "JetBrains Mono", Consolas, monospace;
+  --radius-xl: 38px;
+  --radius-lg: 26px;
   --radius-md: 18px;
-  --shadow: 0 24px 60px rgba(0, 0, 0, 0.06);
+  --shadow: 0 24px 80px rgba(35, 42, 28, 0.13), 0 8px 24px rgba(35, 42, 28, 0.08);
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 * {
@@ -21,12 +33,16 @@ body {
   margin: 0;
   min-height: 100%;
   background:
-    radial-gradient(circle at top left, #ffffff 0, #f6f6f3 32%, #efefea 100%);
-  color: var(--line);
+    radial-gradient(circle at 80% 10%, rgba(214, 242, 59, 0.28), transparent 35%),
+    radial-gradient(circle at 8% 72%, rgba(248, 249, 242, 0.84), transparent 30%),
+    linear-gradient(180deg, var(--bg), var(--bg-2));
+  color: var(--ink);
 }
 
 body {
   font-family: var(--font-heading), sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 button,
