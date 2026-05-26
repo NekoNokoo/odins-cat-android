@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os/exec"
@@ -19,6 +20,9 @@ type SystemProxyState struct {
 }
 
 func GetSystemProxyState() SystemProxyState {
+	if runtime.GOOS == "windows" {
+		return getWindowsSystemProxyState()
+	}
 	if runtime.GOOS != "darwin" {
 		return SystemProxyState{Supported: false}
 	}
@@ -35,8 +39,11 @@ func GetSystemProxyState() SystemProxyState {
 }
 
 func EnableSystemProxy(socksAddress string) SystemProxyState {
+	if runtime.GOOS == "windows" {
+		return enableWindowsSystemProxy(socksAddress)
+	}
 	if runtime.GOOS != "darwin" {
-		return SystemProxyState{Supported: false, Error: "system proxy is supported on macOS only"}
+		return SystemProxyState{Supported: false, Error: "system proxy is supported on macOS and Windows only"}
 	}
 
 	if strings.TrimSpace(socksAddress) == "" {
@@ -80,8 +87,11 @@ func EnableSystemProxy(socksAddress string) SystemProxyState {
 }
 
 func DisableSystemProxy() SystemProxyState {
+	if runtime.GOOS == "windows" {
+		return disableWindowsSystemProxy()
+	}
 	if runtime.GOOS != "darwin" {
-		return SystemProxyState{Supported: false, Error: "system proxy is supported on macOS only"}
+		return SystemProxyState{Supported: false, Error: "system proxy is supported on macOS and Windows only"}
 	}
 
 	services, err := listNetworkServices()
@@ -238,4 +248,96 @@ func runLocalCommand(name string, args ...string) (string, error) {
 		return "", fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), text)
 	}
 	return text, nil
+}
+
+func getWindowsSystemProxyState() SystemProxyState {
+	cmd := exec.Command("powershell", "-Command", "Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' | Select-Object -Property ProxyEnable, ProxyServer | ConvertTo-Json")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return SystemProxyState{Supported: true, Error: fmt.Sprintf("get windows proxy registry: %v: %s", err, string(output))}
+	}
+
+	type RegResult struct {
+		ProxyEnable int    `json:"ProxyEnable"`
+		ProxyServer string `json:"ProxyServer"`
+	}
+
+	var res RegResult
+	if err := json.Unmarshal(output, &res); err != nil {
+		return SystemProxyState{Supported: true, Enabled: false}
+	}
+
+	state := SystemProxyState{
+		Supported: true,
+		Enabled:   res.ProxyEnable == 1,
+	}
+
+	if state.Enabled && res.ProxyServer != "" {
+		server := res.ProxyServer
+		if strings.HasPrefix(server, "socks=") {
+			server = strings.TrimPrefix(server, "socks=")
+		}
+		host, portText, err := net.SplitHostPort(server)
+		if err == nil {
+			state.Host = host
+			state.Port, _ = strconv.Atoi(portText)
+		} else {
+			state.Host = server
+		}
+	}
+	return state
+}
+
+func enableWindowsSystemProxy(socksAddress string) SystemProxyState {
+	if strings.TrimSpace(socksAddress) == "" {
+		tunnel := GetLocalTunnelState()
+		socksAddress = tunnel.SOCKSAddress
+	}
+	if strings.TrimSpace(socksAddress) == "" {
+		return SystemProxyState{Supported: true, Error: "local SOCKS tunnel is not running"}
+	}
+
+	host, portText, err := net.SplitHostPort(strings.TrimSpace(socksAddress))
+	if err != nil {
+		return SystemProxyState{Supported: true, Error: fmt.Sprintf("invalid SOCKS address: %v", err)}
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return SystemProxyState{Supported: true, Error: fmt.Sprintf("invalid SOCKS port: %v", err)}
+	}
+
+	proxyServer := fmt.Sprintf("socks=%s:%d", host, port)
+
+	psCommand := fmt.Sprintf(
+		"Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name ProxyEnable -Value 1; " +
+			"Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name ProxyServer -Value '%s'; " +
+			"Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name ProxyOverride -Value '<local>'; " +
+			"$signature = '[DllImport(\"wininet.dll\", SetLastError = true, CharSet=CharSet.Auto)] public static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);'; " +
+			"$helper = Add-Type -MemberDefinition $signature -Name MyInteropHelper -PassThru; " +
+			"$helper::InternetSetOption(0, 39, 0, 0); " +
+			"$helper::InternetSetOption(0, 37, 0, 0);",
+		proxyServer,
+	)
+
+	cmd := exec.Command("powershell", "-Command", psCommand)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return SystemProxyState{Supported: true, Error: fmt.Sprintf("enable windows proxy: %v: %s", err, string(output))}
+	}
+
+	return getWindowsSystemProxyState()
+}
+
+func disableWindowsSystemProxy() SystemProxyState {
+	psCommand := "Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name ProxyEnable -Value 0; " +
+		"$signature = '[DllImport(\"wininet.dll\", SetLastError = true, CharSet=CharSet.Auto)] public static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);'; " +
+		"$helper = Add-Type -MemberDefinition $signature -Name MyInteropHelper -PassThru; " +
+		"$helper::InternetSetOption(0, 39, 0, 0); " +
+		"$helper::InternetSetOption(0, 37, 0, 0);"
+
+	cmd := exec.Command("powershell", "-Command", psCommand)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return SystemProxyState{Supported: true, Error: fmt.Sprintf("disable windows proxy: %v: %s", err, string(output))}
+	}
+
+	return getWindowsSystemProxyState()
 }

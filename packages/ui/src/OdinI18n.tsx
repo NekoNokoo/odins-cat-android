@@ -1172,7 +1172,22 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     () => ({
       locale,
       setLocale,
-      t: (key: keyof Dictionary) => dictionaries[locale][key],
+      t: (key: keyof Dictionary) => {
+        let val: string = dictionaries[locale][key];
+        if (typeof window !== "undefined" && /Windows/i.test(window.navigator.userAgent)) {
+          val = val.replace(/macOS/g, "Windows");
+          val = val.replace(/на macOS/g, "на Windows");
+          val = val.replace(/для macOS/g, "для Windows");
+          val = val.replace(/системный SOCKS proxy macOS/g, "системный SOCKS proxy Windows");
+          val = val.replace(/сетевого сервиса macOS/g, "сетевого сервиса Windows");
+          val = val.replace(/настройки интернета macOS/g, "настройки интернета Windows");
+          val = val.replace(/SOCKS proxy macOS/g, "SOCKS proxy Windows");
+          val = val.replace(/macOS system proxy/g, "Windows system proxy");
+          val = val.replace(/macOS VPN mode/g, "Windows VPN mode");
+          val = val.replace(/macOS Test/g, "Windows Test");
+        }
+        return val;
+      },
     }),
     [locale],
   );
