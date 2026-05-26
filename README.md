@@ -145,6 +145,7 @@ Or build a test `.exe` from GitHub Actions:
 1. Open `Actions` -> `Windows test build`.
 2. Click `Run workflow`.
 3. Download the `odins-cat-halo-windows-test` artifact after the run finishes.
+4. Keep `odin-one-desktop.exe` and `bin/mvpd.exe` together when testing.
 
 The Windows shell uses the same `.odinone-access.json` invite file as Android.
 Import and export both go through the shared `InviteProfile` contract, so a
