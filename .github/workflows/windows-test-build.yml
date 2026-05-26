@@ -2,7 +2,11 @@ name: Windows test build
 
 on:
   push:
-  workflow_dispatch:
+    branches:
+      - main
+      - codex/windows-test-exe
+      - codex/windows-halo-build
+  workflow_dispatch: {}
 
 jobs:
   build-windows:
