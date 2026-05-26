@@ -30,7 +30,11 @@ import type {
   WhitelistLookupResult,
 } from "@whitelist/contracts";
 import { StageList } from "@whitelist/ui/StageList";
-import { coreApi, type CoreHealthState } from "../_core/core-api";
+import {
+  coreApi,
+  type CoreHealthState,
+  type TunnelSpeedTestResult,
+} from "../_core/core-api";
 import { useI18n } from "./i18n";
 
 const initialDraft: ServerDraft = {
@@ -44,11 +48,12 @@ const initialDraft: ServerDraft = {
 };
 
 type WorkspaceTab = "server" | "access" | "tunnel";
-type AccessTab = "key" | "share" | "import";
+type AccessTab = "key";
 type MobileSheet =
   | "server"
   | "apps"
   | "mode-picker"
+  | "speedtest"
   | "whitelist"
   | "logs"
   | "more"
@@ -64,7 +69,9 @@ type DeployPortMode = "auto" | "manual";
 type PendingAction =
   | "enableVpn"
   | "disableVpn"
+  | "runSpeedTest"
   | "toggleNextVpnLog"
+  | "runWhitelistDebugProbe"
   | "validate"
   | "deploy"
   | "exportInviteFile"
@@ -86,6 +93,63 @@ type ControlCenterProps = {
 type RuntimeIdentity = {
   runtimeFamily: string;
   activationState: string;
+};
+
+type WhitelistDebugProbeVariant = {
+  id: string;
+  label: string;
+  description: string;
+  resolve: () => {
+    serverDraft: ServerDraft;
+    useRealityStartEndpoint: boolean;
+    usingImportedProfile: boolean;
+    excludePackages: string[];
+    ownerRuntimeLabRequest?: OwnerRuntimeLabRequest;
+    runtimeIdentityOverride?: RuntimeIdentity;
+  };
+};
+
+type WhitelistDebugProbeAttempt = {
+  id: string;
+  label: string;
+  description: string;
+  startedAt: string;
+  finishedAt: string;
+  runtimeFamily: string;
+  activationState: string;
+  ownerRuntimeLabMode: string;
+  status: string;
+  passed: boolean;
+  selectedSniHint?: string;
+  frontTag?: string;
+  lastTestStatus?: string;
+  lastTestError?: string;
+  runtimeError?: string;
+};
+
+const WHITELIST_DEBUG_PROBE_VARIANT_TIMEOUT_MS = 40_000;
+const SPEED_TEST_TOTAL_DURATION_MS = 10_000;
+const SPEED_TEST_WARMUP_DURATION_MS = 2_000;
+const SPEED_TEST_MEASURE_DURATION_MS =
+  SPEED_TEST_TOTAL_DURATION_MS - SPEED_TEST_WARMUP_DURATION_MS;
+const SPEED_TEST_STREAM_COUNT = 8;
+
+const formatSpeedTestLatency = (
+  value: number | undefined,
+  emptyLabel: string,
+) => (typeof value === "number" && Number.isFinite(value) ? `${Math.round(value)} ms` : emptyLabel);
+
+const formatSpeedTestDownload = (
+  value: number | undefined,
+  emptyLabel: string,
+) =>
+  typeof value === "number" && Number.isFinite(value)
+    ? `${value.toFixed(1)} Mbps`
+    : emptyLabel;
+
+type WhitelistDebugProbeExecution = {
+  attempt: WhitelistDebugProbeAttempt;
+  passed: boolean;
 };
 
 type OwnerRuntimeLabMode =
@@ -381,6 +445,12 @@ type EdgeFallbackRuntimeConfig = {
   ownerRealityEgress: boolean;
 };
 
+type RealityFallbackRuntimeConfig = {
+  port: number;
+  serverName: string;
+  flow: string;
+};
+
 const asEdgeFallbackRuntimeConfig = (
   value: unknown,
 ): EdgeFallbackRuntimeConfig | null => {
@@ -419,6 +489,35 @@ const asEdgeFallbackRuntimeConfig = (
   };
 };
 
+const asRealityFallbackRuntimeConfig = (
+  value: unknown,
+): RealityFallbackRuntimeConfig | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const candidate = value as Record<string, unknown>;
+  const port =
+    typeof candidate.port === "number"
+      ? candidate.port
+      : typeof candidate.port === "string"
+        ? Number.parseInt(candidate.port, 10)
+        : Number.NaN;
+  const serverName =
+    typeof candidate.serverName === "string"
+      ? candidate.serverName.trim()
+      : "";
+  const flow =
+    typeof candidate.flow === "string" ? candidate.flow.trim() : "";
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    return null;
+  }
+  return {
+    port,
+    serverName,
+    flow,
+  };
+};
+
 const resolveProfileEdgeFallback = (
   profile:
     | Pick<OwnerAccessProfile, "stagedFallbacks">
@@ -427,6 +526,18 @@ const resolveProfileEdgeFallback = (
     | undefined,
   key: "realityYandexEdge" | "realityYandexEdgeProxy",
 ) => asEdgeFallbackRuntimeConfig(profile?.stagedFallbacks?.[key]);
+
+const resolveProfileRealityFallback = (
+  profile:
+    | Pick<OwnerAccessProfile, "stagedFallbacks">
+    | Pick<InviteProfile, "stagedFallbacks" | "vlessReality">
+    | null
+    | undefined,
+) =>
+  asRealityFallbackRuntimeConfig(
+    profile?.stagedFallbacks?.["vlessReality"] ??
+      ("vlessReality" in (profile ?? {}) ? profile?.vlessReality : null),
+  );
 
 const mergeProtocolPackEntries = (
   ...packs: Array<ProtocolPackEntry[] | null | undefined>
@@ -753,13 +864,9 @@ const samePackageSelection = (
   return normalizedLeft.every((value, index) => value === normalizedRight[index]);
 };
 
-const looksLikeInvitePayload = (value: string) => {
+const looksLikeInviteJsonPayload = (value: string) => {
   const trimmed = value.trim();
-  return (
-    trimmed.startsWith("odin1:") ||
-    trimmed.startsWith("{") ||
-    trimmed.startsWith("[")
-  );
+  return trimmed.startsWith("{") || trimmed.startsWith("[");
 };
 
 const formatInviteExportNotice = (
@@ -804,6 +911,12 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   >(null);
   const [mobileNetworkLens, setMobileNetworkLens] =
     useState<MobileNetworkLensResult | null>(null);
+  const [speedTestResult, setSpeedTestResult] =
+    useState<TunnelSpeedTestResult | null>(null);
+  const [speedTestCountdownEndsAt, setSpeedTestCountdownEndsAt] =
+    useState<number | null>(null);
+  const [speedTestCountdownRemainingMs, setSpeedTestCountdownRemainingMs] =
+    useState(0);
   const importProfileFileInputRef = useRef<HTMLInputElement | null>(null);
   const [localTunnel, setLocalTunnel] = useState<LocalTunnelState | null>(null);
   const [systemProxy, setSystemProxy] = useState<SystemProxyState | null>(null);
@@ -819,11 +932,13 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     useState(false);
   const [nextVpnSessionLogError, setNextVpnSessionLogError] =
     useState<string | null>(null);
+  const [whitelistDebugProbeNotice, setWhitelistDebugProbeNotice] = useState<
+    string | null
+  >(null);
   const [ownerProfile, setOwnerProfile] = useState<OwnerAccessProfile | null>(
     null,
   );
   const [guestProfile, setGuestProfile] = useState<InviteProfile | null>(null);
-  const [importShareCode, setImportShareCode] = useState("");
   const [importedProfile, setImportedProfile] = useState<InviteProfile | null>(
     null,
   );
@@ -836,16 +951,41 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const [isPending, startTransition] = useTransition();
   const [androidVpnVisualOverride, setAndroidVpnVisualOverride] =
     useState(false);
+  const [androidUserAgentMatch, setAndroidUserAgentMatch] = useState(false);
   const [ownerRuntimeLabUnlocked, setOwnerRuntimeLabUnlocked] = useState(false);
   const [ownerRuntimeLabUnlockTapCount, setOwnerRuntimeLabUnlockTapCount] =
     useState(0);
   const [ownerRuntimeLab, setOwnerRuntimeLab] = useState<OwnerRuntimeLabState>(
     defaultOwnerRuntimeLabState,
   );
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    setAndroidUserAgentMatch(/Android/i.test(window.navigator.userAgent));
+  }, []);
+
+  useEffect(() => {
+    if (!speedTestCountdownEndsAt) {
+      setSpeedTestCountdownRemainingMs(0);
+      return;
+    }
+
+    const tick = () => {
+      const remaining = Math.max(0, speedTestCountdownEndsAt - Date.now());
+      setSpeedTestCountdownRemainingMs(remaining);
+      if (remaining <= 0) {
+        setSpeedTestCountdownEndsAt(null);
+      }
+    };
+
+    tick();
+    const intervalId = window.setInterval(tick, 200);
+    return () => window.clearInterval(intervalId);
+  }, [speedTestCountdownEndsAt]);
+
   const isAndroidClient =
-    coreHealth?.service === "odin-one-mobile-bridge" ||
-    (typeof window !== "undefined" &&
-      /Android/i.test(window.navigator.userAgent));
+    coreHealth?.service === "odin-one-mobile-bridge" || androidUserAgentMatch;
   const curlCommand = localTunnel?.socksAddress
     ? `curl --socks5-hostname ${localTunnel.socksAddress} -I https://example.com`
     : "";
@@ -853,6 +993,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     splitTunnelSelection.excludePackages,
   );
   const requiresVKLink = selectedAccessMode === "vk-relay";
+  const selectedModeUsesStandalonePublicRelay =
+    selectedAccessMode === "relay-direct";
   const resolvedDraftHost =
     draft.host.trim() ||
     importedProfile?.serverHost?.trim() ||
@@ -943,12 +1085,16 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       ) &&
         hostsMatch(draft.host || resolvedDraftHost, importedProfile?.serverHost)),
   );
+  const whitelistDebugProbeAvailable =
+    isAndroidClient &&
+    (hasLocalYandexEdgeAccessProfile || hasLocalAccessProfile);
   const hasLocalAccessProfileForSelectedMode =
     selectedAccessMode === "yandex-edge" ||
     selectedAccessMode === "yandex-edge-proxy"
       ? hasLocalYandexEdgeAccessProfile
-      : selectedAccessMode === "relay-via-server" ||
-          selectedAccessMode === "relay-direct"
+      : selectedAccessMode === "relay-direct"
+      ? true
+      : selectedAccessMode === "relay-via-server"
       ? hasLocalRelayAccessProfile
       : hasLocalAccessProfile;
   const canGenerateGuestProfile = Boolean(
@@ -1114,13 +1260,6 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             ? t("whitelistResultCidrOnly")
             : t("whitelistResultMissing")
       : "";
-  const whitelistSourceSummary = whitelistLookup
-    ? [
-        whitelistLookup.sourceRepo,
-        whitelistLookup.ipListUrl,
-        whitelistLookup.cidrListUrl,
-      ].join("\n")
-    : "";
   const pendingVkCaptchaUrl = localTunnel?.pendingCaptchaUrl?.trim() ?? "";
   const androidVkRelayWarmupPending = Boolean(
     isAndroidClient &&
@@ -1180,6 +1319,32 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const primaryStatusText = vpnVisualActive
     ? t("vpnEnabled")
     : t("vpnDisabled");
+  const speedTestReady =
+    runtimeTunnelActive && localTunnel?.status === "running" && !!localTunnel?.socksAddress;
+  const speedTestLatencyLabel = formatSpeedTestLatency(
+    speedTestResult?.latencyMs,
+    t("speedTestIdleValue"),
+  );
+  const speedTestDownloadLabel = formatSpeedTestDownload(
+    speedTestResult?.downloadMbps,
+    t("speedTestIdleValue"),
+  );
+  const speedTestCountdownRemainingSeconds =
+    speedTestCountdownRemainingMs > 0
+      ? Math.ceil(speedTestCountdownRemainingMs / 1000)
+      : 0;
+  const speedTestDownloadDisplayLabel =
+    speedTestCountdownRemainingSeconds > 0
+      ? locale === "ru"
+        ? `${speedTestCountdownRemainingSeconds} сек`
+        : `${speedTestCountdownRemainingSeconds}s`
+      : speedTestDownloadLabel;
+  const speedTestCheckedAt = speedTestResult?.checkedAt
+    ? new Date(speedTestResult.checkedAt).toLocaleTimeString(locale === "ru" ? "ru-RU" : "en-US", {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : null;
   const relayOwnerConnectAnimation =
     (selectedAccessMode === "yandex-edge" ||
       selectedAccessMode === "yandex-edge-proxy" ||
@@ -1347,15 +1512,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const resolvedYandexEdgeRuntime =
     resolveProfileCdnAntiWhitelistRuntime(importedProfile) ??
     resolveProfileCdnAntiWhitelistRuntime(ownerProfile);
-  const yandexEdgeRuntimeHint = resolvedYandexEdgeRuntime
-    ? resolvedYandexEdgeRuntime.tlsAllowInsecure
-      ? locale === "ru"
-        ? "Yandex camo: первый hop маскируется под обычный HTTPS-трафик. Этот режим сделан специально для повышения шанса пройти белые списки."
-        : "Yandex camo masks the first hop as ordinary HTTPS traffic. This mode is designed to improve the chance of passing a whitelist."
-      : locale === "ru"
-        ? "Yandex fast: первый hop идёт через ускоренный HTTPS front. Обычно он быстрее, но camo-режим лучше подходит для жёстких белых списков."
-        : "Yandex fast sends the first hop through a faster HTTPS front. It is usually faster, while camo is better for stricter whitelists."
-    : null;
+  const yandexEdgeRuntimeHint = null;
   const importedProfileOffersYandexEdge =
     isAndroidClient && importedProfilePrefersYandexEdgeMode(importedProfile);
   const ownerProfileOffersYandexEdge =
@@ -1415,9 +1572,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       hint: t("runtimeModeRelayDirectHint"),
       status: protocolEntryById.has("vless-reality-relay-direct")
         ? t("modeStatusOptional")
-        : t("modeStatusLocked"),
-      available:
-        isAndroidClient && protocolEntryById.has("vless-reality-relay-direct"),
+        : t("modeStatusReady"),
+      available: isAndroidClient,
     },
   ];
   const selectedAccessModeCard =
@@ -1461,6 +1617,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         resolvedYandexEdgeFallback?.connectHost ||
         yandexEdgeConnectHost
       : "";
+  const activeRelayTunnelHost =
+    relayRuntimeActive ? localTunnel?.frontConnectHost?.trim() || "" : "";
+  const activeFrontTunnelHost = activeYandexTunnelHost || activeRelayTunnelHost;
   const routeLensNetworkLabel =
     mobileNetworkLens?.networkType === "cellular"
       ? t("routeLensNetworkCellular")
@@ -1485,18 +1644,19 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         : "unknown";
   const routeLensNote =
     mobileNetworkLens?.note?.trim() ||
-    (((selectedAccessMode === "yandex-edge" ||
-      selectedAccessMode === "yandex-edge-proxy") &&
-      yandexEdgeRuntimeHint) ||
-      "") ||
+    ((yandexTunnelRuntimeActive && yandexEdgeRuntimeHint) || "") ||
     (!mobileNetworkLens?.isCellular ? t("whitelistProbeCellularOnly") : "");
   const routeLensVisible = Boolean(
     isAndroidClient &&
       (routeLensOriginDisplay ||
-        ((selectedAccessMode === "yandex-edge" ||
-          selectedAccessMode === "yandex-edge-proxy") &&
+        ((yandexTunnelRuntimeActive || relayRuntimeActive) &&
           routeLensTunnelDisplay)),
   );
+  useEffect(() => {
+    if (!speedTestReady && speedTestResult) {
+      setSpeedTestResult(null);
+    }
+  }, [speedTestReady, speedTestResult]);
   const ownerRuntimeLabPanelVisible =
     isAndroidClient && ownerRuntimeLabUnlocked;
   const ownerRuntimeLabHintInputsVisible =
@@ -1727,6 +1887,87 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     });
   };
 
+  const handleRunWhitelistDebugProbe = () => {
+    if (!isAndroidClient || isBusy("runWhitelistDebugProbe")) {
+      return;
+    }
+
+    const variants = buildWhitelistDebugProbeVariants();
+    if (variants.length === 0) {
+      setError(t("whitelistDebugProbeUnavailable"));
+      return;
+    }
+
+    setError(null);
+    setSuccessNotice(null);
+    setWhitelistDebugProbeNotice(null);
+    setPendingAction("runWhitelistDebugProbe");
+    startTransition(async () => {
+      const attempts: WhitelistDebugProbeAttempt[] = [];
+      let winner: WhitelistDebugProbeAttempt | null = null;
+      let probeFatalError: string | null = null;
+
+      try {
+        for (let variantIndex = 0; variantIndex < variants.length; variantIndex += 1) {
+          const variant = variants[variantIndex];
+          if (!variant) {
+            continue;
+          }
+          const result = await runWhitelistDebugProbeVariant(
+            variant,
+            variantIndex,
+            variants.length,
+          );
+          attempts.push(result.attempt);
+          if (result.passed) {
+            winner ??= result.attempt;
+          }
+        }
+
+        if (!winner) {
+          const stopRes = await coreApi.stopLocalTunnel();
+          setLocalTunnel(stopRes.data);
+          const stoppedTunnel = await waitForStoppedTunnel();
+          setLocalTunnel(stoppedTunnel ?? stopRes.data);
+          setAndroidVpnVisualOverride(false);
+        }
+      } catch (requestError) {
+        probeFatalError =
+          requestError instanceof Error
+            ? requestError.message
+            : t("unknownError");
+      } finally {
+        const fileName = buildWhitelistDebugProbeFileName();
+        const logContents = renderWhitelistDebugProbeLog(
+          attempts,
+          variants,
+          winner,
+        );
+        const exportRes = await coreApi.exportDebugLog(fileName, logContents);
+
+        if (exportRes.ok) {
+          setWhitelistDebugProbeNotice(
+            `${t("saved")}: ${fileName}\n${exportRes.data.exportPath}`,
+          );
+        } else {
+          const exportError = (exportRes.data as { error?: string }).error;
+          setError(exportError ?? t("unknownError"));
+        }
+
+        if (probeFatalError) {
+          setError(probeFatalError);
+        } else if (winner) {
+          setSuccessNotice(
+            `${t("whitelistDebugProbeSucceeded")}: ${winner.label}`,
+          );
+        } else {
+          setError(t("whitelistDebugProbeFailed"));
+        }
+        setPendingAction(null);
+      }
+    });
+  };
+
   const loadSplitTunnelSelectionEffect = useEffectEvent(() => {
     void loadSplitTunnelSelection();
   });
@@ -1757,11 +1998,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       ) {
         setActiveTab(parsed.activeTab);
       }
-      if (
-        parsed.activeAccessTab === "key" ||
-        parsed.activeAccessTab === "share" ||
-        parsed.activeAccessTab === "import"
-      ) {
+      if (parsed.activeAccessTab === "key") {
         setActiveAccessTab(parsed.activeAccessTab);
       }
       if (parsed.draft) {
@@ -2005,6 +2242,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     }
     void refreshMobileNetworkLens(true);
   }, [
+    activeFrontTunnelHost,
     activeYandexTunnelHost,
     isAndroidClient,
     localTunnel?.activationState,
@@ -2013,6 +2251,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     localTunnel?.status,
     resolvedDraftHost,
     selectedAccessMode,
+    selectedModeUsesStandalonePublicRelay,
   ]);
 
   useEffect(() => {
@@ -2318,12 +2557,10 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       return null;
     }
 
-    const originHost = resolvedDraftHost.trim();
-    const tunnelHost =
-      selectedAccessMode === "yandex-edge" ||
-      selectedAccessMode === "yandex-edge-proxy"
-        ? activeYandexTunnelHost
-        : "";
+    const originHost = selectedModeUsesStandalonePublicRelay
+      ? ""
+      : resolvedDraftHost.trim();
+    const tunnelHost = activeFrontTunnelHost;
     if (!originHost && !tunnelHost) {
       setMobileNetworkLens(null);
       return null;
@@ -2510,6 +2747,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       requireRelaySupport?: boolean;
       requireYandexEdgeSupport?: boolean;
       forceRelayAutoselectDefaults?: boolean;
+      allowSyntheticRelayProfile?: boolean;
     },
   ) => {
     const allowImportedProfileForOwnerRuntimeLab =
@@ -2519,6 +2757,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       options?.requireYandexEdgeSupport ?? false;
     const forceRelayAutoselectDefaults =
       options?.forceRelayAutoselectDefaults ?? false;
+    const allowSyntheticRelayProfile =
+      options?.allowSyntheticRelayProfile ?? false;
     const effectiveOwnerRuntimeLab =
       allowImportedProfileForOwnerRuntimeLab &&
       forceRelayAutoselectDefaults &&
@@ -2539,7 +2779,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       effectiveBaseDraft.host.trim() ||
       importedProfile?.serverHost?.trim() ||
       ownerProfile?.serverHost?.trim() ||
-      "";
+      (allowSyntheticRelayProfile ? "public-relay.local" : "");
     const ownerProfileAvailable = Boolean(
       (requireYandexEdgeSupport
         ? ownerProfileSupportsYandexEdgeMode(ownerProfile, effectiveBaseDraft)
@@ -2568,6 +2808,12 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       importedProfileAvailable &&
       !secret.trim() &&
       !ownerProfileAvailable,
+    );
+    const usingSyntheticRelayProfile = Boolean(
+      allowSyntheticRelayProfile &&
+        ownerRuntimeLabMode === "reality-vps-lab" &&
+        !ownerProfileAvailable &&
+        !usingImportedProfile,
     );
     const serverDraft: ServerDraft =
       usingImportedProfile && importedProfile
@@ -2602,7 +2848,11 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       if (!isAndroidClient) {
         throw new Error(t("ownerLabAndroidOnly"));
       }
-      if (!ownerProfileAvailable && !usingImportedProfile) {
+      if (
+        !ownerProfileAvailable &&
+        !usingImportedProfile &&
+        !usingSyntheticRelayProfile
+      ) {
         throw new Error(
           allowImportedProfileForOwnerRuntimeLab
             ? t("ownerLabNeedsAccessProfile")
@@ -2864,10 +3114,146 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       return buildTunnelStartRequest(baseDraft, "reality-vps-lab", {
         allowImportedProfileForOwnerRuntimeLab: true,
         forceRelayAutoselectDefaults: true,
+        allowSyntheticRelayProfile: true,
       });
     }
     return buildTunnelStartRequest(baseDraft);
   };
+
+  const buildWhitelistDebugProbeVariants = (
+    baseDraft: ServerDraft = draft,
+  ): WhitelistDebugProbeVariant[] => {
+    const variants: WhitelistDebugProbeVariant[] = [];
+    const realityProbeCandidates = [
+      {
+        id: "reality-sni-max-ru",
+        serverName: "max.ru",
+        label: t("whitelistDebugProbeVariantMaxRu"),
+        description: t("whitelistDebugProbeVariantMaxRuText"),
+      },
+      {
+        id: "reality-sni-vkvideo-ru",
+        serverName: "vkvideo.ru",
+        label: t("whitelistDebugProbeVariantVkVideoRu"),
+        description: t("whitelistDebugProbeVariantVkVideoRuText"),
+      },
+      {
+        id: "reality-sni-ads-x5-ru",
+        serverName: "ads.x5.ru",
+        label: t("whitelistDebugProbeVariantAdsX5Ru"),
+        description: t("whitelistDebugProbeVariantAdsX5RuText"),
+      },
+      {
+        id: "reality-sni-ya-ru",
+        serverName: "ya.ru",
+        label: t("whitelistDebugProbeVariantYaRu"),
+        description: t("whitelistDebugProbeVariantYaRuText"),
+      },
+      {
+        id: "reality-sni-yandex-net",
+        serverName: "yandex.net",
+        label: t("whitelistDebugProbeVariantYandexNet"),
+        description: t("whitelistDebugProbeVariantYandexNetText"),
+      },
+    ];
+
+    if (hasLocalYandexEdgeAccessProfile) {
+      variants.push({
+        id: "reality-yandex-edge",
+        label: t("whitelistDebugProbeVariantRealityEdge"),
+        description: t("whitelistDebugProbeVariantRealityEdgeText"),
+        resolve: () =>
+          buildTunnelStartRequest(baseDraft, "reality-yandex-edge", {
+            allowImportedProfileForOwnerRuntimeLab: true,
+            requireYandexEdgeSupport: true,
+          }),
+      });
+      variants.push({
+        id: "reality-yandex-edge-proxy",
+        label: t("whitelistDebugProbeVariantProxyEdge"),
+        description: t("whitelistDebugProbeVariantProxyEdgeText"),
+        resolve: () =>
+          buildTunnelStartRequest(baseDraft, "reality-yandex-edge-proxy", {
+            allowImportedProfileForOwnerRuntimeLab: true,
+            requireYandexEdgeSupport: true,
+          }),
+      });
+    }
+
+    if (hasLocalAccessProfile) {
+      variants.push({
+        id: "direct-reality",
+        label: t("whitelistDebugProbeVariantDirectReality"),
+        description: t("whitelistDebugProbeVariantDirectRealityText"),
+        resolve: () => buildTunnelStartRequest(baseDraft),
+      });
+    }
+
+    if (hasLocalYandexEdgeAccessProfile) {
+      for (const candidate of realityProbeCandidates) {
+        variants.push({
+          id: candidate.id,
+          label: candidate.label,
+          description: candidate.description,
+          resolve: () => ({
+            ...buildTunnelStartRequest(baseDraft, "reality-yandex-edge", {
+              allowImportedProfileForOwnerRuntimeLab: true,
+              requireYandexEdgeSupport: true,
+            }),
+            ownerRuntimeLabRequest: {
+              mode: "reality-yandex-edge",
+              hintServerName: "",
+              edgeServerName: candidate.serverName,
+            },
+          }),
+        });
+      }
+    }
+
+    return variants.filter(
+      (variant, index, list) =>
+        list.findIndex((entry) => entry.id === variant.id) === index,
+    );
+  };
+
+  const buildWhitelistDebugProbeFileName = () => {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    return `whitelist-probe-${stamp}.log.txt`;
+  };
+
+  const renderWhitelistDebugProbeLog = (
+    attempts: WhitelistDebugProbeAttempt[],
+    variants: WhitelistDebugProbeVariant[],
+    winner: WhitelistDebugProbeAttempt | null,
+  ) =>
+    [
+      `timestamp=${new Date().toISOString()}`,
+      `host=${resolvedDraftHost}`,
+      `networkType=${mobileNetworkLens?.networkType ?? "unknown"}`,
+      `whitelistStatus=${mobileNetworkLens?.whitelistStatus ?? "unknown"}`,
+      `variantCount=${variants.length}`,
+      `winner=${winner?.id ?? ""}`,
+      "",
+      ...attempts.flatMap((attempt, index) => [
+        `attempt=${index + 1}`,
+        `id=${attempt.id}`,
+        `label=${attempt.label}`,
+        `description=${attempt.description}`,
+        `startedAt=${attempt.startedAt}`,
+        `finishedAt=${attempt.finishedAt}`,
+        `runtimeFamily=${attempt.runtimeFamily}`,
+        `activationState=${attempt.activationState}`,
+        `ownerRuntimeLabMode=${attempt.ownerRuntimeLabMode}`,
+        `status=${attempt.status}`,
+        `passed=${attempt.passed}`,
+        `selectedSniHint=${attempt.selectedSniHint ?? ""}`,
+        `frontTag=${attempt.frontTag ?? ""}`,
+        `lastTestStatus=${attempt.lastTestStatus ?? ""}`,
+        `lastTestError=${attempt.lastTestError ?? ""}`,
+        `runtimeError=${attempt.runtimeError ?? ""}`,
+        "",
+      ]),
+    ].join("\n");
 
   const runningTunnelMatchesRequest = (
     tunnel: LocalTunnelState | null,
@@ -2959,6 +3345,28 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
 
   const sleep = (ms: number) =>
     new Promise((resolve) => window.setTimeout(resolve, ms));
+
+  const withTimeout = async <T,>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    errorMessage: string,
+  ) => {
+    let timeoutId: number | null = null;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timeoutId = window.setTimeout(() => {
+            reject(new Error(errorMessage));
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    }
+  };
 
   const waitForRunningTunnel = async (attempts = 18, delayMs = 1000) => {
     let tunnelData = await pollLocalTunnel(true);
@@ -3079,6 +3487,242 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     }
 
     return tunnelData;
+  };
+
+  const waitForProbeReadyTunnel = async (
+    serverDraft: ServerDraft,
+    ownerRuntimeLabRequest?: OwnerRuntimeLabRequest,
+    excludePackages: string[] = splitTunnelExcludePackages,
+    runtimeIdentityOverride?: RuntimeIdentity,
+    attempts = 24,
+    delayMs = 900,
+  ) => {
+    const expectedRuntimeIdentity = resolveRuntimeIdentity(
+      serverDraft,
+      ownerRuntimeLabRequest,
+      runtimeIdentityOverride,
+    );
+    let tunnelData = await pollLocalTunnel(true);
+
+    const probeReady = (tunnel: LocalTunnelState | null) =>
+      runningTunnelMatchesRequest(
+        tunnel,
+        serverDraft,
+        ownerRuntimeLabRequest,
+        excludePackages,
+        runtimeIdentityOverride,
+      );
+
+    const sameIdentity =
+      tunnelData?.runtimeFamily === expectedRuntimeIdentity.runtimeFamily &&
+      tunnelData.activationState === expectedRuntimeIdentity.activationState;
+
+    if (probeReady(tunnelData)) {
+      return tunnelData;
+    }
+    if (
+      sameIdentity &&
+      tunnelData?.status === "running" &&
+      tunnelData.socksAddress
+    ) {
+      return tunnelData;
+    }
+    if (
+      tunnelData &&
+      (tunnelData.status === "failed" || tunnelData.status === "stopped")
+    ) {
+      return tunnelData;
+    }
+
+    for (let i = 0; i < attempts; i += 1) {
+      await sleep(delayMs);
+      tunnelData = await pollLocalTunnel(true);
+      if (probeReady(tunnelData)) {
+        return tunnelData;
+      }
+      if (
+        tunnelData?.runtimeFamily === expectedRuntimeIdentity.runtimeFamily &&
+        tunnelData.activationState === expectedRuntimeIdentity.activationState &&
+        tunnelData.status === "running" &&
+        tunnelData.socksAddress
+      ) {
+        return tunnelData;
+      }
+      if (
+        tunnelData &&
+        (tunnelData.status === "failed" || tunnelData.status === "stopped")
+      ) {
+        return tunnelData;
+      }
+    }
+
+    return tunnelData;
+  };
+
+  const runWhitelistDebugProbeVariant = async (
+    variant: WhitelistDebugProbeVariant,
+    variantIndex: number,
+    totalVariants: number,
+  ): Promise<WhitelistDebugProbeExecution> => {
+    const startedAt = new Date().toISOString();
+    const {
+      serverDraft,
+      useRealityStartEndpoint,
+      usingImportedProfile,
+      excludePackages,
+      ownerRuntimeLabRequest,
+      runtimeIdentityOverride,
+    } = variant.resolve();
+    const runtimeIdentity = resolveRuntimeIdentity(
+      serverDraft,
+      ownerRuntimeLabRequest,
+      runtimeIdentityOverride,
+    );
+
+    setWhitelistDebugProbeNotice(
+      `${t("whitelistDebugProbeRunning")} (${variantIndex + 1}/${totalVariants}): ${variant.label}`,
+    );
+
+    try {
+      const attempt = await withTimeout(
+        (async (): Promise<WhitelistDebugProbeAttempt> => {
+          let tunnelData = await pollLocalTunnel(true);
+          if (
+            tunnelData &&
+            (tunnelData.status === "running" ||
+              tunnelData.status === "starting") &&
+            !runningTunnelMatchesRequest(
+              tunnelData,
+              serverDraft,
+              ownerRuntimeLabRequest,
+              excludePackages,
+              runtimeIdentityOverride,
+            )
+          ) {
+            const stopRes = await coreApi.stopLocalTunnel();
+            setLocalTunnel(stopRes.data);
+            tunnelData = await waitForStoppedTunnel();
+            setLocalTunnel(tunnelData ?? stopRes.data);
+            setAndroidVpnVisualOverride(false);
+          }
+
+          const startApi =
+            isAndroidClient && ownerRuntimeLabRequest
+              ? coreApi.startLocalTunnelFast
+              : coreApi.startLocalTunnel;
+          const startRes = await startApi(
+            {
+              server: serverDraft,
+              secret: usingImportedProfile ? "" : secret,
+              vkLink,
+              runtimeFamily: runtimeIdentity.runtimeFamily,
+              activationState: runtimeIdentity.activationState,
+              ...(isAndroidClient && excludePackages.length > 0
+                ? { excludePackages }
+                : {}),
+              ...(ownerRuntimeLabRequest
+                ? { ownerRuntimeLab: ownerRuntimeLabRequest }
+                : {}),
+            },
+            useRealityStartEndpoint,
+          );
+
+          tunnelData = startRes.data;
+          setLocalTunnel(tunnelData);
+
+          if (startRes.ok) {
+            tunnelData = ownerRuntimeLabRequest
+              ? await waitForProbeReadyTunnel(
+                  serverDraft,
+                  ownerRuntimeLabRequest,
+                  excludePackages,
+                  runtimeIdentityOverride,
+                )
+              : await waitForRunningTunnel(18, 1000);
+            setLocalTunnel(tunnelData ?? startRes.data);
+          }
+
+          let testedTunnel = tunnelData;
+          if (
+            startRes.ok &&
+            tunnelData?.status === "running" &&
+            tunnelData.socksAddress
+          ) {
+            await sleep(1200);
+            testedTunnel = await runCurrentTunnelTestWithRetry(2, 1200);
+            setLocalTunnel(testedTunnel);
+          }
+
+          const attempt: WhitelistDebugProbeAttempt = {
+            id: variant.id,
+            label: variant.label,
+            description: variant.description,
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            runtimeFamily: runtimeIdentity.runtimeFamily,
+            activationState: runtimeIdentity.activationState,
+            ownerRuntimeLabMode: ownerRuntimeLabRequest?.mode ?? "direct",
+            status: testedTunnel?.status ?? "unknown",
+            passed: Boolean(testedTunnel?.lastTest?.ok),
+            selectedSniHint: testedTunnel?.selectedSniHint,
+            frontTag: testedTunnel?.frontTag,
+            lastTestStatus: testedTunnel?.lastTest?.status,
+            lastTestError:
+              testedTunnel?.lastTest?.error ?? testedTunnel?.lastTest?.output,
+            runtimeError: testedTunnel?.error,
+          };
+
+          const stopRes = await coreApi.stopLocalTunnel();
+          setLocalTunnel(stopRes.data);
+          const stoppedTunnel = await waitForStoppedTunnel();
+          setLocalTunnel(stoppedTunnel ?? stopRes.data);
+          setAndroidVpnVisualOverride(false);
+
+          return attempt;
+        })(),
+        WHITELIST_DEBUG_PROBE_VARIANT_TIMEOUT_MS,
+        `Whitelist debug probe timed out for ${variant.label}.`,
+      );
+
+      return {
+        attempt,
+        passed: attempt.passed,
+      };
+    } catch (variantError) {
+      const latestTunnel = await pollLocalTunnel(true);
+      const message =
+        variantError instanceof Error ? variantError.message : t("unknownError");
+
+      const stopRes = await coreApi.stopLocalTunnel();
+      setLocalTunnel(stopRes.data);
+      const stoppedTunnel = await waitForStoppedTunnel();
+      setLocalTunnel(stoppedTunnel ?? stopRes.data);
+      setAndroidVpnVisualOverride(false);
+
+      return {
+        attempt: {
+          id: variant.id,
+          label: variant.label,
+          description: variant.description,
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          runtimeFamily: runtimeIdentity.runtimeFamily,
+          activationState: runtimeIdentity.activationState,
+          ownerRuntimeLabMode: ownerRuntimeLabRequest?.mode ?? "direct",
+          status: latestTunnel?.status ?? "failed",
+          passed: false,
+          selectedSniHint: latestTunnel?.selectedSniHint,
+          frontTag: latestTunnel?.frontTag,
+          lastTestStatus: latestTunnel?.lastTest?.status ?? "failed",
+          lastTestError:
+            latestTunnel?.lastTest?.error ??
+            latestTunnel?.lastTest?.output ??
+            message,
+          runtimeError: latestTunnel?.error ?? message,
+        },
+        passed: false,
+      };
+    }
   };
 
   const unlockOwnerRuntimeLab = () => {
@@ -3265,6 +3909,38 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     }
 
     return result;
+  };
+
+  const handleRunSpeedTest = () => {
+    if (!speedTestReady) {
+      return;
+    }
+    const countdownEndsAt = Date.now() + SPEED_TEST_TOTAL_DURATION_MS;
+    setSpeedTestCountdownEndsAt(countdownEndsAt);
+    setPendingAction("runSpeedTest");
+    startTransition(async () => {
+      try {
+        const res = await coreApi.runLocalTunnelSpeedTest({
+          warmupDurationMs: SPEED_TEST_WARMUP_DURATION_MS,
+          measureDurationMs: SPEED_TEST_MEASURE_DURATION_MS,
+          streamCount: SPEED_TEST_STREAM_COUNT,
+        });
+        setSpeedTestResult(res.data);
+      } catch (requestError) {
+        setSpeedTestResult({
+          ok: false,
+          status: "failed",
+          checkedAt: new Date().toISOString(),
+          error:
+            requestError instanceof Error
+              ? requestError.message
+              : t("speedTestFailed"),
+        });
+      } finally {
+        setSpeedTestCountdownEndsAt(null);
+        setPendingAction(null);
+      }
+    });
   };
 
   const describeTunnelProbeFailure = (state: LocalTunnelState) => {
@@ -3820,7 +4496,6 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const importProfileFromContents = (
     contents: string,
     options?: {
-      clearTextInput?: boolean;
       fileName?: string;
     },
   ) => {
@@ -3828,15 +4503,16 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     setInviteFileNotice(null);
     startTransition(async () => {
       try {
+        if (!looksLikeInviteJsonPayload(contents)) {
+          setError(t("importJsonOnlyError"));
+          return;
+        }
         const res = await coreApi.importProfile({
           shareCode: contents,
         });
         const data = res.data;
         if (res.ok) {
           applyImportedProfile(data);
-          if (options?.clearTextInput) {
-            setImportShareCode("");
-          }
           if (options?.fileName) {
             setInviteFileNotice(
               `${t("importedProfileFile")}: ${options.fileName}`,
@@ -3853,42 +4529,6 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             ? requestError.message
             : t("unknownError");
         setError(message);
-      }
-    });
-  };
-
-  const handleImportProfile = () => {
-    importProfileFromContents(importShareCode, { clearTextInput: true });
-  };
-
-  const handleImportProfileFromClipboard = () => {
-    setError(null);
-    setInviteFileNotice(null);
-    startTransition(async () => {
-      try {
-        if (
-          typeof navigator === "undefined" ||
-          !navigator.clipboard?.readText
-        ) {
-          setError(t("importClipboardUnavailable"));
-          return;
-        }
-        const contents = (await navigator.clipboard.readText()).trim();
-        if (!contents) {
-          setError(t("importClipboardEmpty"));
-          return;
-        }
-        if (!looksLikeInvitePayload(contents)) {
-          setError(t("importClipboardInvalid"));
-          return;
-        }
-        importProfileFromContents(contents);
-      } catch (requestError) {
-        const message =
-          requestError instanceof Error
-            ? requestError.message
-            : t("unknownError");
-        setError(message || t("importClipboardUnavailable"));
       }
     });
   };
@@ -4091,7 +4731,69 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
 
   return (
     <>
-      <div className="mobile-shell">
+      <div className="mobile-shell halo-desktop-shell">
+        <aside className="halo-brief" data-tauri-drag-region>
+          <div className="halo-brief__brand">
+            <span className="halo-kicker">HALO · Windows</span>
+            <h2>
+              <b>Один</b> ключ.
+              <br />
+              <i>Две поверхности.</i>
+            </h2>
+            <p>
+              Desktop-оболочка использует тот же invite JSON, что и Android:
+              импорт, экспорт и runtime-профиль идут через общий контракт.
+            </p>
+          </div>
+
+          <div className="halo-brief__stats">
+            <div className="halo-stat halo-stat--lime">
+              <span>JSON</span>
+              <strong>.odinone-access</strong>
+            </div>
+            <div className="halo-stat">
+              <span>runtime</span>
+              <strong>{primaryStatusBadge}</strong>
+            </div>
+            <div className="halo-stat">
+              <span>mode</span>
+              <strong>{selectedAccessModeCard.label}</strong>
+            </div>
+          </div>
+
+          <div className="halo-brief__actions">
+            <button
+              className="primary"
+              type="button"
+              onClick={handleOpenImportProfileFile}
+              disabled={isPending}
+            >
+              {t("importProfileFile")}
+            </button>
+            <button
+              className="ghost"
+              type="button"
+              onClick={handleExportInviteFile}
+              disabled={
+                isPending ||
+                isBusy("exportInviteFile") ||
+                !exportableInviteProfile?.rawJson
+              }
+            >
+              {t("exportProfileFile")}
+            </button>
+          </div>
+
+          {inviteFileNotice ? (
+            <p className="halo-note">{inviteFileNotice}</p>
+          ) : (
+            <p className="halo-note">
+              JSON-файл можно перенести с телефона на Windows без пересборки
+              профиля.
+            </p>
+          )}
+        </aside>
+
         <div className="home-scroll">
           <section className="phone-card home-stack">
             <div className="home-stack__scroll">
@@ -4122,7 +4824,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                     vpnActionActive
                       ? isBusy("disableVpn")
                       : isPending ||
-                        !resolvedDraftHost ||
+                        (!resolvedDraftHost &&
+                          !selectedModeUsesStandalonePublicRelay) ||
                         ((selectedAccessMode === "yandex-edge" ||
                           selectedAccessMode === "yandex-edge-proxy" ||
                           selectedAccessMode === "relay-via-server" ||
@@ -4163,8 +4866,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
 
                     <div
                       className={`home-network-card__grid ${
-                        (selectedAccessMode === "yandex-edge" ||
-                          selectedAccessMode === "yandex-edge-proxy") &&
+                        (yandexTunnelRuntimeActive || relayRuntimeActive) &&
                         routeLensOriginDisplay &&
                         routeLensTunnelDisplay
                           ? ""
@@ -4187,8 +4889,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                         </div>
                       ) : null}
 
-                      {(selectedAccessMode === "yandex-edge" ||
-                        selectedAccessMode === "yandex-edge-proxy") &&
+                      {(yandexTunnelRuntimeActive || relayRuntimeActive) &&
                       routeLensTunnelDisplay ? (
                         <div className="home-network-hop">
                           <span>{t("routeLensTunnel")}</span>
@@ -4211,6 +4912,16 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                     ) : null}
                   </div>
                 ) : null}
+
+                <div className="home-hero-actions">
+                  <button
+                    className="ghost home-hero-actions__button"
+                    type="button"
+                    onClick={() => setActiveSheet("speedtest")}
+                  >
+                    {t("speedTestOpen")}
+                  </button>
+                </div>
               </div>
 
               <div className="home-divider" />
@@ -4235,14 +4946,6 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                   <button
                     className="ghost"
                     type="button"
-                    onClick={handleImportProfileFromClipboard}
-                    disabled={isPending}
-                  >
-                    {t("importProfile")}
-                  </button>
-                  <button
-                    className="ghost"
-                    type="button"
                     onClick={handleOpenImportProfileFile}
                     disabled={isPending}
                   >
@@ -4254,11 +4957,6 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                   <p className="status-banner">{t("vkCaptchaReady")}</p>
                 ) : null}
 
-                {importedProfile?.localPath ? (
-                  <p className="status-banner status-success">
-                    {t("importedProfile")}: {importedProfile.name}
-                  </p>
-                ) : null}
               </div>
             </div>
           </section>
@@ -4351,7 +5049,7 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         ref={importProfileFileInputRef}
         hidden
         type="file"
-        accept=".json,.txt,.odin,.odinone,.odinone-access.json"
+        accept=".json,.odinone-access.json"
         onChange={handleImportProfileFile}
       />
 
@@ -4392,6 +5090,90 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
               className: "mode-grid--single",
               closeOnSelect: true,
             })}
+          </div>
+        </div>
+      ) : null}
+
+      {activeSheet === "speedtest" ? (
+        <div
+          className="sheet-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("speedTestTitle")}
+        >
+          <button
+            className="sheet-overlay__backdrop"
+            onClick={() => setActiveSheet(null)}
+            aria-label={t("close")}
+          />
+          <div className="sheet-panel">
+            <div className="sheet-panel__head">
+              <div>
+                <span className="section-eyebrow">{t("speedTestTitle")}</span>
+                <h3 className="sheet-panel__title">{t("speedTestSubtitle")}</h3>
+              </div>
+              <button
+                className="ghost ghost--compact"
+                type="button"
+                onClick={() => setActiveSheet(null)}
+              >
+                {t("close")}
+              </button>
+            </div>
+
+            <p className="compact-note compact-note--panel">
+              {t("speedTestHint")}
+            </p>
+
+            <section className="sheet-card">
+              <div className="sheet-card__head">
+                <div>
+                  <span className="section-eyebrow">{t("speedTestTitle")}</span>
+                  <strong>{t("speedTestSubtitle")}</strong>
+                </div>
+                <span
+                  className={`sheet-card__badge ${
+                    speedTestResult?.ok ? "pill pill-ok" : ""
+                  }`}
+                >
+                  {isBusy("runSpeedTest")
+                    ? t("testing")
+                    : speedTestResult?.ok
+                      ? t("ready")
+                      : t("tunnelStatusIdle")}
+                </span>
+              </div>
+
+              <div className="home-speed-card__stats">
+                <div className="home-speed-card__stat">
+                  <span>{t("speedTestLatency")}</span>
+                  <strong>{speedTestLatencyLabel}</strong>
+                </div>
+                <div className="home-speed-card__stat">
+                  <span>{t("speedTestDownload")}</span>
+                  <strong>{speedTestDownloadDisplayLabel}</strong>
+                </div>
+              </div>
+
+              {speedTestResult?.error ? (
+                <p className="status-banner status-error">{speedTestResult.error}</p>
+              ) : speedTestCheckedAt ? (
+                <p className="compact-note">
+                  {t("speedTestCheckedAt")}: {speedTestCheckedAt}
+                </p>
+              ) : null}
+
+              <div className="sheet-actions">
+                <button
+                  className="primary"
+                  type="button"
+                  onClick={handleRunSpeedTest}
+                  disabled={!speedTestReady || isBusy("runSpeedTest")}
+                >
+                  {isBusy("runSpeedTest") ? t("testing") : t("speedTestRun")}
+                </button>
+              </div>
+            </section>
           </div>
         </div>
       ) : null}
@@ -5287,23 +6069,6 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                     </p>
                   )}
 
-                  {whitelistLookup.note ? (
-                    <p className="compact-note compact-note--panel">
-                      {whitelistLookup.note}
-                    </p>
-                  ) : null}
-
-                  <div className="command-card command-card--compact">
-                    <strong>{t("whitelistSource")}</strong>
-                    <textarea readOnly value={whitelistSourceSummary} />
-                    <p className="compact-note">
-                      {t("whitelistCheckedAt")}: {whitelistLookup.checkedAt}
-                    </p>
-                    <p className="compact-note">
-                      {t("whitelistFetchedAt")}:{" "}
-                      {whitelistLookup.listsFetchedAt ?? t("diagnosticsEmpty")}
-                    </p>
-                  </div>
                 </>
               ) : null}
             </div>
@@ -5404,6 +6169,49 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                     {recordNextVpnSessionLog
                       ? t("nextVpnSessionLogDisarm")
                       : t("nextVpnSessionLogArm")}
+                  </button>
+                </div>
+              </section>
+
+              <section className="sheet-card">
+                <div className="sheet-card__head">
+                  <div>
+                    <span className="section-eyebrow">{t("navLogs")}</span>
+                    <strong>{t("whitelistDebugProbeTitle")}</strong>
+                  </div>
+                  <span className="sheet-card__badge">
+                    {whitelistDebugProbeAvailable
+                      ? t("stateReady")
+                      : t("stateDisabled")}
+                  </span>
+                </div>
+                <p className="compact-note">
+                  {t("whitelistDebugProbeText")}
+                </p>
+
+                {whitelistDebugProbeNotice ? (
+                  <p className="status-banner">{whitelistDebugProbeNotice}</p>
+                ) : null}
+
+                {!whitelistDebugProbeAvailable ? (
+                  <p className="status-banner status-error">
+                    {t("whitelistDebugProbeUnavailable")}
+                  </p>
+                ) : null}
+
+                <div className="sheet-actions">
+                  <button
+                    className="ghost"
+                    type="button"
+                    onClick={handleRunWhitelistDebugProbe}
+                    disabled={
+                      isBusy("runWhitelistDebugProbe") ||
+                      !whitelistDebugProbeAvailable
+                    }
+                  >
+                    {isBusy("runWhitelistDebugProbe")
+                      ? t("whitelistDebugProbeRunning")
+                      : t("whitelistDebugProbeStart")}
                   </button>
                 </div>
               </section>
@@ -6075,18 +6883,6 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                 <button
                   className="ghost"
                   type="button"
-                  onClick={() =>
-                    handleCopy("shareCode", exportableInviteProfile?.shareCode)
-                  }
-                  disabled={isPending || !exportableInviteProfile?.shareCode}
-                >
-                  {copiedKey === "shareCode"
-                    ? t("copied")
-                    : t("copyShareCode")}
-                </button>
-                <button
-                  className="ghost"
-                  type="button"
                   onClick={handleExportInviteFile}
                   disabled={
                     isPending ||
@@ -6095,6 +6891,14 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                   }
                 >
                   {t("exportProfileFile")}
+                </button>
+                <button
+                  className="ghost"
+                  type="button"
+                  onClick={handleOpenImportProfileFile}
+                  disabled={isPending}
+                >
+                  {t("importProfileFile")}
                 </button>
               </div>
 
@@ -6109,43 +6913,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
               ) : null}
 
               <div className="command-card command-card--compact">
-                <strong>{t("manualImportTitle")}</strong>
+                <strong>{t("importProfileFile")}</strong>
                 <p className="compact-note">{t("importProfileIntro")}</p>
-                <label className="input-field input-span input-field--compact">
-                  <span>{t("manualImportTitle")}</span>
-                  <input
-                    value={importShareCode}
-                    onChange={(event) => setImportShareCode(event.target.value)}
-                    placeholder={t("importPlaceholder")}
-                  />
-                </label>
-                <div className="sheet-actions">
-                  <button
-                    className="ghost"
-                    type="button"
-                    onClick={handleImportProfile}
-                    disabled={isPending || !importShareCode.trim()}
-                  >
-                    {t("importProfile")}
-                  </button>
-                  <button
-                    className="ghost"
-                    type="button"
-                    onClick={handleOpenImportProfileFile}
-                    disabled={isPending}
-                  >
-                    {t("importProfileFile")}
-                  </button>
-                </div>
               </div>
-
-              {exportableInviteProfile?.shareCode ? (
-                <div className="command-card command-card--compact">
-                  <strong>{t("shareCode")}</strong>
-                  <p className="compact-note">{exportableInviteProfile.name}</p>
-                  <textarea readOnly value={exportableInviteProfile.shareCode} />
-                </div>
-              ) : null}
             </div>
           </div>
         </div>

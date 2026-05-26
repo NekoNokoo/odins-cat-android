@@ -78,6 +78,13 @@ pub(crate) async fn run_connectivity_test<T: Serialize>(
     run_mobile_command(app, "runConnectivityTest", payload).await
 }
 
+pub(crate) async fn run_speed_test<T: Serialize>(
+    app: &AppHandle,
+    payload: T,
+) -> Result<Value, String> {
+    run_mobile_command(app, "runSpeedTest", payload).await
+}
+
 pub(crate) async fn inspect_network_lens<T: Serialize>(
     app: &AppHandle,
     payload: T,
@@ -116,6 +123,13 @@ pub(crate) async fn share_invite_file<T: Serialize>(
     payload: T,
 ) -> Result<Value, String> {
     run_mobile_command(app, "shareInviteFile", payload).await
+}
+
+pub(crate) async fn export_debug_log<T: Serialize>(
+    app: &AppHandle,
+    payload: T,
+) -> Result<Value, String> {
+    run_mobile_command(app, "exportDebugLog", payload).await
 }
 
 pub(crate) async fn open_external_url<T: Serialize>(

@@ -17,7 +17,7 @@ fn main() {
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").ok();
     if !matches!(target_os.as_deref(), Some("android") | Some("ios")) {
-        build_mvpd().expect("failed to build bundled mvpd");
+        build_mvpd(target_os.as_deref()).expect("failed to build bundled mvpd");
     }
     if matches!(target_os.as_deref(), Some("android")) {
         build_vk_turn_proxy_android_client_bundle()
@@ -27,12 +27,17 @@ fn main() {
     tauri_build::build()
 }
 
-fn build_mvpd() -> Result<(), String> {
+fn build_mvpd(target_os: Option<&str>) -> Result<(), String> {
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").map_err(|err| err.to_string())?);
     let go_root = manifest_dir.join("../../../core/go");
     let bin_dir = manifest_dir.join("bin");
-    let output_path = bin_dir.join("mvpd");
+    let output_name = if target_os == Some("windows") {
+        "mvpd.exe"
+    } else {
+        "mvpd"
+    };
+    let output_path = bin_dir.join(output_name);
 
     fs::create_dir_all(&bin_dir).map_err(|err| err.to_string())?;
 

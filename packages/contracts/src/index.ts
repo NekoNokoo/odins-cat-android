@@ -332,6 +332,7 @@ export interface OwnerRuntimeLabRequest {
   hintCidrBucket?: string;
   hintSource?: string;
   hintTag?: string;
+  edgeServerName?: string;
   vpsServerName?: string;
   vpsPort?: number;
   vpsConnectHost?: string;

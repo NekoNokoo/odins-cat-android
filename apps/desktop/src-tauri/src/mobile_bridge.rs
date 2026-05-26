@@ -198,7 +198,14 @@ const YANDEX_EDGE_ORIGIN_PORT: u16 = 52444;
 const YANDEX_EDGE_ORIGIN_MIN_PORT: u16 = 52444;
 const YANDEX_EDGE_ORIGIN_MAX_PORT: u16 = 52544;
 const YANDEX_EDGE_SERVER_NAME: &str = "yandex.ru";
-const YANDEX_EDGE_DEST: &str = "yandex.ru:443";
+const YANDEX_EDGE_ACCEPTED_SERVER_NAMES: &[&str] = &[
+    YANDEX_EDGE_SERVER_NAME,
+    "ya.ru",
+    "max.ru",
+    "vkvideo.ru",
+    "ads.x5.ru",
+    "yandex.net",
+];
 const YANDEX_EDGE_ORIGIN_XHTTP_SERVER_NAME: &str = "www.microsoft.com";
 const YANDEX_EDGE_FLOW: &str = "xtls-rprx-vision";
 const YANDEX_EDGE_FINGERPRINT: &str = "chrome";
@@ -207,19 +214,11 @@ const YANDEX_EDGE_PUBLIC_KEY: &str = "akv5dcxO4Gt9Spl_Tx612SnWC9958B4ihXhLRcavwA
 const YANDEX_EDGE_SHORT_ID: &str = "5e26013865785390";
 const YANDEX_EDGE_SOURCE: &str = "operator-curated:yandex-edge";
 const YANDEX_EDGE_TAG: &str = "yandex-edge-62-84-123-148";
-const WHITELIST_SOURCE_REPO_URL: &str =
-    "https://github.com/hxehex/russia-mobile-internet-whitelist";
-const WHITELIST_IP_LIST_URL: &str =
-    "https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/ipwhitelist.txt";
-const WHITELIST_CIDR_LIST_URL: &str =
-    "https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main/cidrwhitelist.txt";
+const WHITELIST_SOURCE_REPO_URL: &str = "embedded-static-whitelist";
+const WHITELIST_IP_LIST_URL: &str = "embedded-static-whitelist:ipwhitelist.txt";
+const WHITELIST_CIDR_LIST_URL: &str = "embedded-static-whitelist:cidrwhitelist.txt";
 const BUNDLED_WHITELIST_IP_LIST: &str = include_str!("../resources/whitelist/ipwhitelist.txt");
 const BUNDLED_WHITELIST_CIDR_LIST: &str = include_str!("../resources/whitelist/cidrwhitelist.txt");
-const WHITELIST_CACHE_DIR_NAME: &str = "whitelist-cache";
-const WHITELIST_CACHE_IP_FILE_NAME: &str = "ipwhitelist.txt";
-const WHITELIST_CACHE_CIDR_FILE_NAME: &str = "cidrwhitelist.txt";
-const WHITELIST_CACHE_META_FILE_NAME: &str = "metadata.json";
-const WHITELIST_CACHE_MAX_AGE_SECS: u64 = 1800;
 const INVITE_EXPORT_EXTENSION: &str = ".odinone-access.json";
 const XRAY_RELEASE_URL: &str =
     "https://github.com/XTLS/Xray-core/releases/download/v25.8.3/Xray-linux-64.zip";
@@ -434,6 +433,14 @@ struct YandexEdgeRuntimeLayout {
     xray_config: String,
     service_name: String,
     service_path: String,
+    backend_service_name: String,
+    backend_service_path: String,
+}
+
+#[derive(Debug, Clone)]
+struct YandexEdgeRealityRoute {
+    server_name: String,
+    local_port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -513,6 +520,8 @@ pub(crate) struct OwnerRuntimeLabPayload {
     #[serde(default)]
     hint_tag: String,
     #[serde(default)]
+    edge_server_name: String,
+    #[serde(default)]
     vps_server_name: String,
     #[serde(default)]
     vps_port: u16,
@@ -545,6 +554,17 @@ pub(crate) struct OwnerRuntimeLabPayload {
 pub(crate) struct LocalTunnelTestPayload {
     #[serde(default)]
     url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LocalTunnelSpeedTestPayload {
+    #[serde(default)]
+    latency_url: String,
+    #[serde(default)]
+    download_url: String,
+    #[serde(default)]
+    download_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -641,12 +661,6 @@ struct RealityFallback {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct MobileDeploymentStore {
     items: Arc<Mutex<HashMap<String, DeploymentStateEntry>>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WhitelistCacheMetadata {
-    fetched_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1077,6 +1091,7 @@ pub async fn mobile_validate_provision(payload: ProvisionPayload) -> Result<Valu
             detail: format!("Connected to {address}"),
         },
     ];
+
     let result_specs = [
         ("remote-user", "Remote user", "whoami"),
         ("os-release", "Operating system", "uname -a"),
@@ -1546,6 +1561,33 @@ pub async fn mobile_run_local_tunnel_test(
 }
 
 #[tauri::command]
+pub async fn mobile_run_local_tunnel_speed_test(
+    app: AppHandle,
+    payload: LocalTunnelSpeedTestPayload,
+) -> Result<Value, String> {
+    let download_bytes = if payload.download_bytes > 0 {
+        payload.download_bytes
+    } else {
+        2_000_000
+    };
+    let latency_url = optional_string(&payload.latency_url)
+        .unwrap_or("https://www.gstatic.com/generate_204")
+        .to_string();
+    let download_url = optional_string(&payload.download_url)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("https://speed.cloudflare.com/__down?bytes={download_bytes}"));
+    android_vpn::run_speed_test(
+        &app,
+        json!({
+            "latencyUrl": latency_url,
+            "downloadUrl": download_url,
+            "downloadBytes": download_bytes
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn mobile_inspect_network_lens(
     app: AppHandle,
     payload: MobileNetworkLensPayload,
@@ -1738,6 +1780,31 @@ pub async fn mobile_share_invite_file(
 }
 
 #[tauri::command]
+pub async fn mobile_export_debug_log(
+    app: AppHandle,
+    file_name: String,
+    contents: String,
+) -> Result<Value, String> {
+    if contents.trim().is_empty() {
+        return Err("debug log contents are required".to_string());
+    }
+
+    android_vpn::export_debug_log(
+        &app,
+        json!({
+            "fileName": if file_name.trim().is_empty() {
+                "whitelist-probe.log.txt"
+            } else {
+                file_name.trim()
+            },
+            "contents": contents,
+            "mimeType": "text/plain"
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn mobile_open_external_url(app: AppHandle, url: String) -> Result<Value, String> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
@@ -1838,6 +1905,7 @@ pub fn register_mobile_commands(builder: tauri::Builder<tauri::Wry>) -> tauri::B
             mobile_stop_local_tunnel,
             mobile_get_local_tunnel_status,
             mobile_run_local_tunnel_test,
+            mobile_run_local_tunnel_speed_test,
             mobile_inspect_network_lens,
             mobile_list_installed_apps,
             mobile_get_split_tunnel_selection,
@@ -1849,6 +1917,7 @@ pub fn register_mobile_commands(builder: tauri::Builder<tauri::Wry>) -> tauri::B
             mobile_import_profile,
             mobile_export_invite_file,
             mobile_share_invite_file,
+            mobile_export_debug_log,
             mobile_open_external_url,
             mobile_generate_guest_profile
         ])
@@ -1887,72 +1956,20 @@ fn merge_json_object_deep(target: &mut Value, extra: &Value) {
 async fn load_whitelist_lookup_source(
     app: &AppHandle,
 ) -> Result<(ParsedWhitelistFiles, bool, Option<String>), String> {
-    if whitelist_cache_is_fresh(app)? {
-        if let Some(cached) = read_cached_whitelist_files(app)? {
-            return Ok((cached, true, None));
-        }
-    }
-
-    match fetch_remote_whitelist_files().await {
-        Ok((ip_text, cidr_text, fetched_at)) => {
-            write_cached_whitelist_files(app, &ip_text, &cidr_text, &fetched_at)?;
-            let parsed = parse_whitelist_files(&ip_text, &cidr_text, &fetched_at)?;
-            Ok((parsed, false, None))
-        }
-        Err(fetch_error) => {
-            if let Some(cached) = read_cached_whitelist_files(app)? {
-                return Ok((
-                    cached,
-                    true,
-                    Some(format!(
-                        "GitHub refresh failed, using the saved whitelist cache instead: {fetch_error}"
-                    )),
-                ));
-            }
-            Ok((
-                bundled_whitelist_source()?,
-                true,
-                Some(format!(
-                    "GitHub refresh failed, so the bundled whitelist snapshot is being used instead: {fetch_error}"
-                )),
-            ))
-        }
-    }
+    let _ = app;
+    Ok((
+        bundled_whitelist_source()?,
+        true,
+        Some("Using the bundled static whitelist dataset.".to_string()),
+    ))
 }
 
 fn bundled_whitelist_source() -> Result<ParsedWhitelistFiles, String> {
     parse_whitelist_files(
         BUNDLED_WHITELIST_IP_LIST,
         BUNDLED_WHITELIST_CIDR_LIST,
-        "bundled-snapshot",
+        "embedded-static-whitelist",
     )
-}
-
-async fn fetch_remote_whitelist_files() -> Result<(String, String, String), String> {
-    let client = reqwest::Client::builder()
-        .user_agent("odin-one-mobile-bridge/0.9.0")
-        .build()
-        .map_err(|err| format!("build whitelist HTTP client: {err}"))?;
-
-    let ip_text = fetch_remote_whitelist_text(&client, WHITELIST_IP_LIST_URL).await?;
-    let cidr_text = fetch_remote_whitelist_text(&client, WHITELIST_CIDR_LIST_URL).await?;
-    Ok((ip_text, cidr_text, now_rfc3339()))
-}
-
-async fn fetch_remote_whitelist_text(
-    client: &reqwest::Client,
-    url: &str,
-) -> Result<String, String> {
-    client
-        .get(url)
-        .send()
-        .await
-        .map_err(|err| format!("download {url}: {err}"))?
-        .error_for_status()
-        .map_err(|err| format!("download {url}: {err}"))?
-        .text()
-        .await
-        .map_err(|err| format!("read {url}: {err}"))
 }
 
 fn parse_whitelist_files(
@@ -1971,9 +1988,6 @@ fn parse_whitelist_files(
         .filter_map(parse_ipv4_cidr)
         .collect::<Vec<_>>();
 
-    if exact_ips.is_empty() {
-        return Err("ipwhitelist.txt did not yield any IPv4 entries".to_string());
-    }
     if cidrs.is_empty() {
         return Err("cidrwhitelist.txt did not yield any IPv4 CIDR entries".to_string());
     }
@@ -2019,82 +2033,6 @@ fn ipv4_mask(prefix: u8) -> u32 {
     } else {
         u32::MAX << (32 - u32::from(prefix))
     }
-}
-
-fn read_cached_whitelist_files(app: &AppHandle) -> Result<Option<ParsedWhitelistFiles>, String> {
-    let ip_path = whitelist_cache_ip_path(app)?;
-    let cidr_path = whitelist_cache_cidr_path(app)?;
-    let meta_path = whitelist_cache_meta_path(app)?;
-    if !ip_path.exists() || !cidr_path.exists() || !meta_path.exists() {
-        return Ok(None);
-    }
-
-    let ip_text =
-        fs::read_to_string(&ip_path).map_err(|err| format!("read cached ip whitelist: {err}"))?;
-    let cidr_text = fs::read_to_string(&cidr_path)
-        .map_err(|err| format!("read cached cidr whitelist: {err}"))?;
-    let metadata_text = fs::read_to_string(&meta_path)
-        .map_err(|err| format!("read whitelist cache metadata: {err}"))?;
-    let metadata: WhitelistCacheMetadata = serde_json::from_str(&metadata_text)
-        .map_err(|err| format!("parse whitelist cache metadata: {err}"))?;
-    parse_whitelist_files(&ip_text, &cidr_text, &metadata.fetched_at).map(Some)
-}
-
-fn write_cached_whitelist_files(
-    app: &AppHandle,
-    ip_text: &str,
-    cidr_text: &str,
-    fetched_at: &str,
-) -> Result<(), String> {
-    let cache_dir = whitelist_cache_dir(app)?;
-    let ip_path = cache_dir.join(WHITELIST_CACHE_IP_FILE_NAME);
-    let cidr_path = cache_dir.join(WHITELIST_CACHE_CIDR_FILE_NAME);
-    let meta_path = cache_dir.join(WHITELIST_CACHE_META_FILE_NAME);
-    let metadata = serde_json::to_string_pretty(&WhitelistCacheMetadata {
-        fetched_at: fetched_at.to_string(),
-    })
-    .map_err(|err| format!("serialize whitelist cache metadata: {err}"))?;
-
-    fs::write(&ip_path, ip_text).map_err(|err| format!("write cached ip whitelist: {err}"))?;
-    fs::write(&cidr_path, cidr_text)
-        .map_err(|err| format!("write cached cidr whitelist: {err}"))?;
-    fs::write(&meta_path, metadata)
-        .map_err(|err| format!("write whitelist cache metadata: {err}"))?;
-    Ok(())
-}
-
-fn whitelist_cache_is_fresh(app: &AppHandle) -> Result<bool, String> {
-    let meta_path = whitelist_cache_meta_path(app)?;
-    if !meta_path.exists() {
-        return Ok(false);
-    }
-
-    let modified_at = fs::metadata(&meta_path)
-        .map_err(|err| format!("read whitelist cache metadata info: {err}"))?
-        .modified()
-        .map_err(|err| format!("read whitelist cache modified time: {err}"))?;
-    let age = modified_at
-        .elapsed()
-        .map_err(|err| format!("measure whitelist cache age: {err}"))?;
-    Ok(age <= Duration::from_secs(WHITELIST_CACHE_MAX_AGE_SECS))
-}
-
-fn whitelist_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app_root_dir(app)?.join(WHITELIST_CACHE_DIR_NAME);
-    fs::create_dir_all(&dir).map_err(|err| format!("create whitelist cache dir: {err}"))?;
-    Ok(dir)
-}
-
-fn whitelist_cache_ip_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(whitelist_cache_dir(app)?.join(WHITELIST_CACHE_IP_FILE_NAME))
-}
-
-fn whitelist_cache_cidr_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(whitelist_cache_dir(app)?.join(WHITELIST_CACHE_CIDR_FILE_NAME))
-}
-
-fn whitelist_cache_meta_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(whitelist_cache_dir(app)?.join(WHITELIST_CACHE_META_FILE_NAME))
 }
 
 fn build_invite_response(
@@ -2990,8 +2928,32 @@ fn reality_destination() -> String {
     DEFAULT_REALITY_DEST.to_string()
 }
 
-fn yandex_edge_reality_destination() -> String {
-    YANDEX_EDGE_DEST.to_string()
+fn normalized_yandex_edge_server_name_override(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    YANDEX_EDGE_ACCEPTED_SERVER_NAMES
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == normalized)
+        .map(str::to_string)
+}
+
+fn yandex_edge_accepted_server_names(primary: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let push_unique = |names: &mut Vec<String>, value: &str| {
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized.is_empty() || names.iter().any(|existing| existing == &normalized) {
+            return;
+        }
+        names.push(normalized);
+    };
+    push_unique(&mut names, primary);
+    for candidate in YANDEX_EDGE_ACCEPTED_SERVER_NAMES {
+        push_unique(&mut names, candidate);
+    }
+    names
 }
 
 fn read_invite_reality_fallback(invite: &InviteProfileFile) -> Result<RealityFallback, String> {
@@ -3673,6 +3635,32 @@ fn render_yandex_edge_haproxy_config(
     )
 }
 
+fn render_yandex_edge_multi_sni_haproxy_config(
+    bind_host: &str,
+    public_port: u16,
+    routes: &[YandexEdgeRealityRoute],
+) -> String {
+    let mut acl_lines = String::new();
+    let mut use_backend_lines = String::new();
+    let mut backend_sections = String::new();
+    for (index, route) in routes.iter().enumerate() {
+        let acl_name = format!("sni_route_{}", index + 1);
+        let backend_name = format!("be_route_{}", index + 1);
+        acl_lines.push_str(&format!(
+            "  acl {acl_name} req.ssl_sni -i {}\n",
+            route.server_name
+        ));
+        use_backend_lines.push_str(&format!("  use_backend {backend_name} if {acl_name}\n"));
+        backend_sections.push_str(&format!(
+            "\nbackend {backend_name}\n  mode tcp\n  server route 127.0.0.1:{} check\n",
+            route.local_port
+        ));
+    }
+    format!(
+        "global\n  log /dev/log local0\n\ndefaults\n  log global\n  mode tcp\n  timeout connect 10s\n  timeout client 60s\n  timeout server 60s\n\nfrontend reality_edge_in\n  bind {bind_host}:{public_port}\n  mode tcp\n  tcp-request inspect-delay 5s\n  tcp-request content accept if {{ req.ssl_hello_type 1 }}\n{acl_lines}{use_backend_lines}  default_backend reality_drop\n{backend_sections}\nbackend reality_drop\n  mode tcp\n  server drop 127.0.0.1:9\n"
+    )
+}
+
 fn render_yandex_edge_sni_router_systemd_unit(config_path: &str) -> String {
     format!(
         "[Unit]\nDescription=Odin's Cat Yandex edge SNI router\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/usr/sbin/haproxy -W -db -f {config_path}\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=multi-user.target\n"
@@ -3680,47 +3668,58 @@ fn render_yandex_edge_sni_router_systemd_unit(config_path: &str) -> String {
 }
 
 fn render_yandex_edge_xray_proxy_config(
-    public_port: u16,
     edge_private_key: &str,
     edge_short_id: &str,
     edge_uuid: &str,
-    edge_server_name: &str,
+    edge_routes: &[YandexEdgeRealityRoute],
     origin_host: &str,
     origin_port: u16,
     origin_tls_server_name: &str,
     origin_uuid: &str,
 ) -> Result<String, String> {
+    let inbounds: Vec<Value> = edge_routes
+        .iter()
+        .enumerate()
+        .map(|(index, route)| {
+            json!({
+                "tag": format!("edge-reality-in-{}", index + 1),
+                "listen": "127.0.0.1",
+                "port": route.local_port,
+                "protocol": "vless",
+                "settings": {
+                    "clients": [{
+                        "id": edge_uuid,
+                        "flow": YANDEX_EDGE_FLOW
+                    }],
+                    "decryption": "none"
+                },
+                "sniffing": {
+                    "destOverride": ["http", "tls", "quic"],
+                    "enabled": true
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "reality",
+                    "realitySettings": {
+                        "show": false,
+                        "dest": format!("{}:443", route.server_name),
+                        "xver": 0,
+                        "serverNames": [route.server_name],
+                        "privateKey": edge_private_key,
+                        "shortIds": [edge_short_id]
+                    }
+                }
+            })
+        })
+        .collect();
+    let routing_inbounds: Vec<String> = edge_routes
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("edge-reality-in-{}", index + 1))
+        .collect();
     serde_json::to_string_pretty(&json!({
         "log": { "loglevel": "warning" },
-        "inbounds": [{
-            "tag": "edge-reality-in",
-            "listen": "0.0.0.0",
-            "port": public_port,
-            "protocol": "vless",
-            "settings": {
-                "clients": [{
-                    "id": edge_uuid,
-                    "flow": YANDEX_EDGE_FLOW
-                }],
-                "decryption": "none"
-            },
-            "sniffing": {
-                "destOverride": ["http", "tls", "quic"],
-                "enabled": true
-            },
-            "streamSettings": {
-                "network": "tcp",
-                "security": "reality",
-                "realitySettings": {
-                    "show": false,
-                    "dest": yandex_edge_reality_destination(),
-                    "xver": 0,
-                    "serverNames": [edge_server_name],
-                    "privateKey": edge_private_key,
-                    "shortIds": [edge_short_id]
-                }
-            }
-        }],
+        "inbounds": inbounds,
         "outbounds": [{
             "tag": "origin-xhttp-out",
             "protocol": "vless",
@@ -3758,7 +3757,7 @@ fn render_yandex_edge_xray_proxy_config(
         "routing": {
             "rules": [{
                 "type": "field",
-                "inboundTag": ["edge-reality-in"],
+                "inboundTag": routing_inbounds,
                 "outboundTag": "origin-xhttp-out"
             }]
         }
@@ -3820,6 +3819,12 @@ fn render_yandex_edge_xray_proxy_systemd_unit(binary_path: &str, config_path: &s
     )
 }
 
+fn render_yandex_edge_router_systemd_unit(config_path: &str) -> String {
+    format!(
+        "[Unit]\nDescription=Odin's Cat Yandex edge router\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/usr/sbin/haproxy -W -db -f {config_path}\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=multi-user.target\n"
+    )
+}
+
 fn render_yandex_origin_xhttp_systemd_unit(binary_path: &str, config_path: &str) -> String {
     format!(
         "[Unit]\nDescription=Odin's Cat Yandex origin xhttp inbound\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={binary_path} run -config {config_path}\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=multi-user.target\n"
@@ -3853,10 +3858,18 @@ fn build_yandex_edge_runtime_layout(
             service_path: format!(
                 "/etc/systemd/system/{LEGACY_WHITELIST_YANDEX_EDGE_SERVICE_NAME}"
             ),
+            backend_service_name: String::new(),
+            backend_service_path: String::new(),
         };
     }
     let root_dir = format!("/opt/whitelist-edge-{effective_mode}-{effective_port}");
     let service_name = format!("whitelist-yandex-edge-{effective_mode}-{effective_port}.service");
+    let backend_service_name =
+        if effective_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
+            format!("whitelist-yandex-edge-{effective_mode}-backend-{effective_port}.service")
+        } else {
+            String::new()
+        };
     YandexEdgeRuntimeLayout {
         config_dir: format!("{root_dir}/config"),
         manifest_path: format!("{root_dir}/config/edge-forward.json"),
@@ -3865,6 +3878,12 @@ fn build_yandex_edge_runtime_layout(
         xray_config: format!("{root_dir}/config/xray-edge-proxy.json"),
         service_path: format!("/etc/systemd/system/{service_name}"),
         service_name,
+        backend_service_path: if backend_service_name.is_empty() {
+            String::new()
+        } else {
+            format!("/etc/systemd/system/{backend_service_name}")
+        },
+        backend_service_name,
         root_dir,
     }
 }
@@ -3894,6 +3913,7 @@ fn render_yandex_edge_manifest(
     origin_host: &str,
     origin_port: u16,
     edge_reality: &RealityFallback,
+    accepted_server_names: &[String],
     origin_reality_port: u16,
     routing_mode: &str,
     layout: &YandexEdgeRuntimeLayout,
@@ -3929,12 +3949,14 @@ fn render_yandex_edge_manifest(
         "originHost": origin_host,
         "originPort": origin_port,
         "serverName": edge_reality.server_name,
+        "acceptedServerNames": accepted_server_names,
         "publicKey": edge_reality.public_key,
         "shortId": edge_reality.short_id,
         "uuid": edge_reality.uuid,
         "flow": edge_reality.flow,
         "routes": [{
             "serverName": edge_reality.server_name,
+            "acceptedServerNames": accepted_server_names,
             "originHost": origin_host,
             "originPort": origin_port,
             "routingMode": routing_mode,
@@ -4148,6 +4170,15 @@ async fn mobile_run_edge_attach(
         payload.server.yandex_edge_origin_port,
     )
     .await?;
+    let edge_accepted_server_names = yandex_edge_accepted_server_names(YANDEX_EDGE_SERVER_NAME);
+    let edge_routes: Vec<YandexEdgeRealityRoute> = edge_accepted_server_names
+        .iter()
+        .enumerate()
+        .map(|(index, server_name)| YandexEdgeRealityRoute {
+            server_name: server_name.clone(),
+            local_port: 24043 + index as u16,
+        })
+        .collect();
     let edge_reality_keys = generate_reality_key_pair()?;
     let edge_reality_uuid = generate_protocol_uuid()?;
     let edge_reality_short_id = generate_reality_short_id()?;
@@ -4223,11 +4254,10 @@ async fn mobile_run_edge_attach(
     }
     if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
         let edge_config = render_yandex_edge_xray_proxy_config(
-            public_port,
             &edge_reality_keys.private_key,
             &edge_reality_short_id,
             &edge_reality_uuid,
-            &edge_client_reality.server_name,
+            &edge_routes,
             payload.server.host.trim(),
             origin_xhttp_port,
             &origin_tls_server_name,
@@ -4240,6 +4270,15 @@ async fn mobile_run_edge_attach(
             "0644",
         )
         .await?;
+        let haproxy_config =
+            render_yandex_edge_multi_sni_haproxy_config("0.0.0.0", public_port, &edge_routes);
+        upload_with_sudo(
+            &mut edge_ssh,
+            &layout.haproxy_path,
+            haproxy_config.as_bytes(),
+            "0644",
+        )
+        .await?;
     }
     let edge_manifest = render_yandex_edge_manifest(
         edge.server.host.trim(),
@@ -4247,6 +4286,7 @@ async fn mobile_run_edge_attach(
         payload.server.host.trim(),
         origin_xhttp_port,
         &edge_client_reality,
+        &edge_accepted_server_names,
         reality.port,
         routing_mode,
         &layout,
@@ -4279,7 +4319,7 @@ async fn mobile_run_edge_attach(
     let edge_unit = if routing_mode == EDGE_ROUTING_MODE_SNI_ROUTER {
         render_yandex_edge_sni_router_systemd_unit(&layout.haproxy_path)
     } else if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
-        render_yandex_edge_xray_proxy_systemd_unit(&layout.xray_path, &layout.xray_config)
+        render_yandex_edge_router_systemd_unit(&layout.haproxy_path)
     } else {
         render_yandex_edge_tcp_forward_systemd_unit(
             payload.server.host.trim(),
@@ -4294,6 +4334,16 @@ async fn mobile_run_edge_attach(
         "0644",
     )
     .await?;
+    if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
+        upload_with_sudo(
+            &mut edge_ssh,
+            &layout.backend_service_path,
+            render_yandex_edge_xray_proxy_systemd_unit(&layout.xray_path, &layout.xray_config)
+                .as_bytes(),
+            "0644",
+        )
+        .await?;
+    }
     edge_ssh
         .run(&remote_root_shell("systemctl daemon-reload"))
         .await?;
@@ -4309,24 +4359,45 @@ async fn mobile_run_edge_attach(
     } else if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
         edge_ssh
             .run(&remote_root_shell(&format!(
-                "{} version >/dev/null",
-                quote_shell(&layout.xray_path)
+                "{} version >/dev/null && haproxy -c -f {}",
+                quote_shell(&layout.xray_path),
+                quote_shell(&layout.haproxy_path)
             )))
             .await?;
     }
-    edge_ssh
-        .run(&remote_root_shell(&format!(
-            "systemctl enable {} && systemctl restart {} && sleep 2",
-            quote_shell(&layout.service_name),
-            quote_shell(&layout.service_name),
-        )))
-        .await?;
+    if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
+        edge_ssh
+            .run(&remote_root_shell(&format!(
+                "systemctl enable {} {} && systemctl restart {} {} && sleep 2",
+                quote_shell(&layout.service_name),
+                quote_shell(&layout.backend_service_name),
+                quote_shell(&layout.backend_service_name),
+                quote_shell(&layout.service_name),
+            )))
+            .await?;
+    } else {
+        edge_ssh
+            .run(&remote_root_shell(&format!(
+                "systemctl enable {} && systemctl restart {} && sleep 2",
+                quote_shell(&layout.service_name),
+                quote_shell(&layout.service_name),
+            )))
+            .await?;
+    }
     edge_ssh
         .run(&render_edge_service_ready_command(
             &layout.service_name,
             public_port,
         ))
         .await?;
+    if routing_mode == EDGE_ROUTING_MODE_XRAY_PROXY {
+        edge_ssh
+            .run(&remote_root_shell(&format!(
+                "systemctl is-active {}",
+                quote_shell(&layout.backend_service_name)
+            )))
+            .await?;
+    }
     edge_ssh
         .run(&render_remote_tcp_probe_command(
             payload.server.host.trim(),
@@ -4529,6 +4600,17 @@ async fn run_edge_attach_health_checks(
             ),
         )),
         EDGE_ROUTING_MODE_XRAY_PROXY => {
+            if !layout.backend_service_name.is_empty() {
+                checks.push((
+                    "edge-backend-service-active",
+                    "Edge backend service active",
+                    remote_root_shell(&format!(
+                        "systemctl is-active {}",
+                        quote_shell(&layout.backend_service_name)
+                    )),
+                    format!("{} is active.", layout.backend_service_name),
+                ));
+            }
             checks.push((
                 "edge-xray-config",
                 "Edge xray config",
@@ -6156,7 +6238,9 @@ fn apply_owner_runtime_lab_overrides(
                 OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE
                     | OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
             ) {
-                yandex_edge_string_field(
+                normalized_yandex_edge_server_name_override(&owner_runtime_lab.edge_server_name)
+                    .unwrap_or_else(|| {
+                        yandex_edge_string_field(
                     if owner_runtime_lab.mode.trim()
                         == OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE_PROXY
                     {
@@ -6167,6 +6251,7 @@ fn apply_owner_runtime_lab_overrides(
                     "serverName",
                     YANDEX_EDGE_SERVER_NAME,
                 )
+                    })
             } else {
                 server_name
             };
@@ -7111,6 +7196,7 @@ mod tests {
                 hint_cidr_bucket: "cidr-max".to_string(),
                 hint_source: "operator-curated".to_string(),
                 hint_tag: "candidate-max-ru".to_string(),
+                edge_server_name: String::new(),
                 vps_server_name: String::new(),
                 vps_port: 0,
                 vps_connect_host: String::new(),
@@ -7203,6 +7289,7 @@ mod tests {
                 hint_cidr_bucket: String::new(),
                 hint_source: String::new(),
                 hint_tag: String::new(),
+                edge_server_name: String::new(),
                 vps_server_name: String::new(),
                 vps_port: 0,
                 vps_connect_host: String::new(),
@@ -7232,6 +7319,7 @@ mod tests {
                 hint_cidr_bucket: String::new(),
                 hint_source: "operator-curated".to_string(),
                 hint_tag: "candidate-02-duma-gov-ru".to_string(),
+                edge_server_name: String::new(),
                 vps_server_name: String::new(),
                 vps_port: 0,
                 vps_connect_host: String::new(),
@@ -7267,6 +7355,7 @@ mod tests {
                 hint_cidr_bucket: String::new(),
                 hint_source: String::new(),
                 hint_tag: String::new(),
+                edge_server_name: String::new(),
                 vps_server_name: "ads.x5.ru".to_string(),
                 vps_port: 20443,
                 vps_connect_host: String::new(),
@@ -7330,6 +7419,7 @@ mod tests {
                 hint_cidr_bucket: String::new(),
                 hint_source: String::new(),
                 hint_tag: String::new(),
+                edge_server_name: String::new(),
                 vps_server_name: "id.x5.ru".to_string(),
                 vps_port: 443,
                 vps_connect_host: String::new(),
@@ -7383,6 +7473,7 @@ mod tests {
                 hint_cidr_bucket: String::new(),
                 hint_source: String::new(),
                 hint_tag: String::new(),
+                edge_server_name: String::new(),
                 vps_server_name: "id.x5.ru".to_string(),
                 vps_port: 443,
                 vps_connect_host: String::new(),
@@ -7432,6 +7523,7 @@ mod tests {
                 hint_cidr_bucket: String::new(),
                 hint_source: String::new(),
                 hint_tag: String::new(),
+                edge_server_name: String::new(),
                 vps_server_name: "id.x5.ru".to_string(),
                 vps_port: 443,
                 vps_connect_host: String::new(),
@@ -7480,6 +7572,7 @@ mod tests {
                 hint_cidr_bucket: String::new(),
                 hint_source: String::new(),
                 hint_tag: String::new(),
+                edge_server_name: String::new(),
                 vps_server_name: "ads.x5.ru".to_string(),
                 vps_port: 20443,
                 vps_connect_host: String::new(),
@@ -7515,6 +7608,7 @@ mod tests {
                 hint_cidr_bucket: String::new(),
                 hint_source: String::new(),
                 hint_tag: String::new(),
+                edge_server_name: String::new(),
                 vps_server_name: "pimg.mycdn.me".to_string(),
                 vps_port: 10443,
                 vps_connect_host: String::new(),
@@ -7558,6 +7652,7 @@ mod tests {
                 hint_cidr_bucket: String::new(),
                 hint_source: String::new(),
                 hint_tag: String::new(),
+                edge_server_name: String::new(),
                 vps_server_name: String::new(),
                 vps_port: 0,
                 vps_connect_host: String::new(),
@@ -7629,6 +7724,47 @@ mod tests {
     }
 
     #[test]
+    fn owner_runtime_lab_patch_accepts_supported_yandex_edge_server_name_override() {
+        let patched = apply_owner_runtime_lab_overrides(
+            r#"{"name":"Owner","serverHost":"95.81.120.226","stagedFallbacks":{"vlessReality":{"port":52443,"uuid":"fe05feb2-c88c-46bc-b809-ba9eefc5e6ee","flow":"xtls-rprx-vision","serverName":"www.cloudflare.com","publicKey":"EwRrvp8PKSyz5Fb2tgXG-4uv1UJfQw65yRTvoH36aw4","shortId":"2d2812af9d8e4cf4"}}}"#,
+            &OwnerRuntimeLabPayload {
+                mode: OWNER_RUNTIME_LAB_MODE_REALITY_YANDEX_EDGE.to_string(),
+                hint_server_name: String::new(),
+                hint_cidr_bucket: String::new(),
+                hint_source: String::new(),
+                hint_tag: String::new(),
+                edge_server_name: "ya.ru".to_string(),
+                vps_server_name: String::new(),
+                vps_port: 0,
+                vps_connect_host: String::new(),
+                vps_connect_port: 0,
+                vps_transport: String::new(),
+                vps_flow: String::new(),
+                vps_fingerprint: String::new(),
+                vps_grpc_service_name: String::new(),
+                vps_grpc_authority: String::new(),
+                vps_source: String::new(),
+                vps_tag: String::new(),
+                vps_owner_reality_egress: false,
+                vps_relay_autoselect: None,
+            },
+        )
+        .expect("owner runtime lab patch should support overriding yandex edge server name");
+
+        let payload: Value =
+            serde_json::from_str(&patched).expect("patched profile should stay valid json");
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["serverName"].as_str(),
+            Some("ya.ru")
+        );
+        assert_eq!(
+            payload["androidRuntime"]["realityVpsLab"]["ownerRealityBootstrap"]["serverName"]
+                .as_str(),
+            Some("ya.ru")
+        );
+    }
+
+    #[test]
     fn owner_runtime_lab_patch_supports_yandex_edge_proxy_without_relay_autoselect() {
         let patched = apply_owner_runtime_lab_overrides(
             r#"{"name":"Owner","serverHost":"95.81.120.226","androidRuntime":{"realityVpsLab":{"relayAutoselect":{"enabled":true,"sourceLabel":"stale"}}},"stagedFallbacks":{"vlessReality":{"port":55555,"uuid":"fe05feb2-c88c-46bc-b809-ba9eefc5e6ee","flow":"xtls-rprx-vision","serverName":"www.cloudflare.com","publicKey":"EwRrvp8PKSyz5Fb2tgXG-4uv1UJfQw65yRTvoH36aw4","shortId":"2d2812af9d8e4cf4"},"realityYandexEdgeProxy":{"connectHost":"62.84.123.148","connectPort":10443,"originHost":"95.81.120.226","originPort":55555,"serverName":"www.cloudflare.com","publicKey":"EwRrvp8PKSyz5Fb2tgXG-4uv1UJfQw65yRTvoH36aw4","shortId":"2d2812af9d8e4cf4","uuid":"fe05feb2-c88c-46bc-b809-ba9eefc5e6ee","flow":"xtls-rprx-vision","source":"owner-attached:yandex-edge:xray-proxy:10443:proxy","tag":"yandex-edge-62-84-123-148-10443-xray-proxy-proxy","routingMode":"xray-proxy","ownerRealityEgress":false}}}"#,
@@ -7638,6 +7774,7 @@ mod tests {
                 hint_cidr_bucket: String::new(),
                 hint_source: String::new(),
                 hint_tag: String::new(),
+                edge_server_name: String::new(),
                 vps_server_name: String::new(),
                 vps_port: 0,
                 vps_connect_host: String::new(),
@@ -7750,12 +7887,19 @@ mod tests {
 
     #[test]
     fn render_yandex_edge_xray_proxy_config_avoids_inbound_sniffing() {
+        let routes = super::yandex_edge_accepted_server_names("www.cloudflare.com")
+            .into_iter()
+            .enumerate()
+            .map(|(index, server_name)| super::YandexEdgeRealityRoute {
+                server_name,
+                local_port: 24043 + index as u16,
+            })
+            .collect::<Vec<_>>();
         let raw = super::render_yandex_edge_xray_proxy_config(
-            443,
             "PRIVATE_KEY",
             "deadbeef",
             "11111111-1111-1111-1111-111111111111",
-            "www.cloudflare.com",
+            &routes,
             "2.26.62.246",
             52444,
             "2-26-62-246.sslip.io",
@@ -7766,12 +7910,19 @@ mod tests {
         let inbound = parsed["inbounds"][0]
             .as_object()
             .expect("inbound should be object");
-        assert_eq!(inbound["tag"].as_str(), Some("edge-reality-in"));
+        assert_eq!(inbound["tag"].as_str(), Some("edge-reality-in-1"));
         assert_eq!(inbound["streamSettings"]["network"].as_str(), Some("tcp"));
         assert_eq!(
             inbound["streamSettings"]["security"].as_str(),
             Some("reality")
         );
+        let server_names = inbound["streamSettings"]["realitySettings"]["serverNames"]
+            .as_array()
+            .expect("serverNames should be array");
+        assert_eq!(server_names.len(), 1);
+        assert_eq!(server_names[0].as_str(), Some("www.cloudflare.com"));
+        let inbound_count = parsed["inbounds"].as_array().map(|items| items.len()).unwrap_or(0);
+        assert!(inbound_count >= 3);
         assert_eq!(
             parsed["routing"]["rules"][0]["outboundTag"].as_str(),
             Some("origin-xhttp-out")

@@ -33,6 +33,33 @@ data class TunnelTestSnapshot(
     val checkedAt: String? = null,
 )
 
+data class TunnelSpeedTestSnapshot(
+    val ok: Boolean = false,
+    val status: String = "idle",
+    val latencyUrl: String? = null,
+    val downloadUrl: String? = null,
+    val checkedAt: String? = null,
+    val latencyMs: Int? = null,
+    val downloadMbps: Double? = null,
+    val downloadBytes: Long? = null,
+    val downloadDurationMs: Long? = null,
+    val error: String? = null,
+) {
+    fun toJsObject(): JSObject =
+        JSObject().apply {
+            put("ok", ok)
+            put("status", status)
+            put("latencyUrl", latencyUrl)
+            put("downloadUrl", downloadUrl)
+            put("checkedAt", checkedAt)
+            put("latencyMs", latencyMs)
+            put("downloadMbps", downloadMbps)
+            put("downloadBytes", downloadBytes)
+            put("downloadDurationMs", downloadDurationMs)
+            put("error", error)
+        }
+}
+
 data class TunnelSnapshot(
     val status: String = "idle",
     val socksAddress: String? = null,
@@ -243,7 +270,10 @@ data class TunnelSnapshot(
                 whitelistHintTag = obj.getString("whitelistHintTag", null),
                 startSource = obj.getString("startSource", null),
                 profileHash = obj.getString("profileHash", null),
-                excludePackages = normalizeSplitTunnelPackages(parseStringArray(obj, "excludePackages")),
+                excludePackages =
+                    com.odinone.desktop.vk.normalizeSplitTunnelPackages(
+                        parseStringArray(obj, "excludePackages"),
+                    ),
                 configMode = obj.getString("configMode", null),
                 activeFeatures = parseStringArray(obj, "activeFeatures"),
                 alwaysOnEnabled = optBooleanOrNull(obj, "alwaysOnEnabled"),
@@ -472,7 +502,7 @@ internal fun matchesVpnRuntimeServiceClassName(
     if (normalized.isBlank()) {
         return false
     }
-    return normalized == VpnRuntimeService::class.java.name
+    return normalized == com.odinone.desktop.vk.VpnRuntimeService::class.java.name
 }
 
 private fun resolvePersistedSocksAddress(
@@ -1058,8 +1088,10 @@ fun matchesTunnelRequest(
             protocol = args.getString("protocol", null),
             activationState = args.getString("activationState", null),
         ) &&
-        normalizeSplitTunnelPackages(snapshot.excludePackages) ==
-            normalizeSplitTunnelPackages(parseStringArray(args, "excludePackages")) &&
+        com.odinone.desktop.vk.normalizeSplitTunnelPackages(snapshot.excludePackages) ==
+            com.odinone.desktop.vk.normalizeSplitTunnelPackages(
+                com.odinone.desktop.vk.parseStringArray(args, "excludePackages"),
+            ) &&
         normalizeTunnelArg(snapshot.vkLink) == normalizeTunnelArg(args.getString("vkLink", null))
 
 fun classifySystemRestoreAvailability(
@@ -1183,7 +1215,10 @@ fun startSnapshotFromArgs(args: JSObject, logLine: String): TunnelSnapshot =
             whitelistHintTag = args.getString("whitelistHintTag", null),
             startSource = args.getString("startSource", null),
             profileHash = args.getString("profileHash", null),
-            excludePackages = normalizeSplitTunnelPackages(parseStringArray(args, "excludePackages")),
+            excludePackages =
+                com.odinone.desktop.vk.normalizeSplitTunnelPackages(
+                    com.odinone.desktop.vk.parseStringArray(args, "excludePackages"),
+                ),
             configMode = args.getString("configMode", null),
             sessionId = sessionMarker,
             sessionStartedAt = sessionMarker,

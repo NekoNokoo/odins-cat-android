@@ -73,6 +73,40 @@ const dictionaries = {
     nextVpnSessionLogDisarm: "Не записывать следующую VPN-сессию",
     nextVpnSessionLogArmed:
       "Следующая VPN-сессия будет записана и после отключения сохранится в Download/Odin's log.",
+    whitelistDebugProbeTitle: "Debug-перебор профилей",
+    whitelistDebugProbeText:
+      "По очереди пробует уже доступные whitelist-профили без redeploy, проверяет встроенный тест и сохраняет итоговый debug-log в Download/Odin's log.",
+    whitelistDebugProbeStart: "Запустить debug-перебор",
+    whitelistDebugProbeRunning: "Перебираем профили...",
+    whitelistDebugProbeUnavailable:
+      "Для debug-перебора нужен Android и локальный профиль с Yandex edge или VLESS Reality.",
+    whitelistDebugProbeSucceeded: "Рабочий профиль найден",
+    whitelistDebugProbeFailed:
+      "Ни один debug-профиль не прошёл встроенный тест. Сводка сохранена в Download/Odin's log.",
+    whitelistDebugProbeVariantRealityEdge: "Yandex edge: REALITY -> VM -> xHTTP",
+    whitelistDebugProbeVariantRealityEdgeText:
+      "Текущий основной whitelist-контур через Yandex VM.",
+    whitelistDebugProbeVariantProxyEdge: "Yandex edge: legacy proxy path",
+    whitelistDebugProbeVariantProxyEdgeText:
+      "Резервный двуххоповый вариант для сравнения с основным контуром.",
+    whitelistDebugProbeVariantDirectReality: "Direct VLESS Reality",
+    whitelistDebugProbeVariantDirectRealityText:
+      "Контрольный вариант без Yandex bridge, чтобы отделить сетевой баг от whitelist-блока.",
+    whitelistDebugProbeVariantMaxRu: "Reality SNI: max.ru",
+    whitelistDebugProbeVariantMaxRuText:
+      "Публичный кандидат из Happ/Reality конфигов для мобильных белых списков.",
+    whitelistDebugProbeVariantVkVideoRu: "Reality SNI: vkvideo.ru",
+    whitelistDebugProbeVariantVkVideoRuText:
+      "Кандидат из публичных разборов белых списков для российских облачных IP.",
+    whitelistDebugProbeVariantAdsX5Ru: "Reality SNI: ads.x5.ru",
+    whitelistDebugProbeVariantAdsX5RuText:
+      "Кандидат из публичных whitelist-подборок и разборов DPI/TSPU.",
+    whitelistDebugProbeVariantYaRu: "Reality SNI: ya.ru",
+    whitelistDebugProbeVariantYaRuText:
+      "Короткий яндексовый домен как более простой first-hop фасад.",
+    whitelistDebugProbeVariantYandexNet: "Reality SNI: yandex.net",
+    whitelistDebugProbeVariantYandexNetText:
+      "Внутренний домен Яндекса, который иногда рекомендуют для whitelist-сетей.",
     splitTunnelLoadingApps: "Загружаем установленные приложения...",
     splitTunnelEmpty: "На этом устройстве не найдено установленных приложений.",
     splitTunnelNoResults: "По этому запросу приложения не найдены.",
@@ -247,6 +281,16 @@ const dictionaries = {
     stopTunnel: "Остановить туннель",
     refreshStatus: "Обновить статус",
     runTest: "Запустить тест",
+    speedTestTitle: "Скорость",
+    speedTestSubtitle: "Через активный VPN",
+    speedTestOpen: "Открыть speedtest",
+    speedTestRun: "Запустить speedtest",
+    speedTestLatency: "Пинг",
+    speedTestDownload: "Загрузка",
+    speedTestHint: "Сначала поднимите туннель, затем можно измерить пинг и скорость загрузки.",
+    speedTestCheckedAt: "Проверено",
+    speedTestIdleValue: "—",
+    speedTestFailed: "Speedtest завершился ошибкой.",
     status: "Статус",
     socksProxy: "SOCKS5 прокси",
     bridgePort: "Bridge порт",
@@ -284,56 +328,50 @@ const dictionaries = {
     sharing: "Доступ",
     ownerProfile: "Ключ подключения",
     accessKeyTab: "Мой ключ",
-    accessShareTab: "Передать",
-    accessImportTab: "Импорт",
+    accessShareTab: "JSON invite",
+    accessImportTab: "JSON import",
     ownerProfileIntro:
-      "После успешного развёртывания Odin's Cat сохраняет локальный ключ подключения для владельца сервера. Этот ключ можно экспортировать и передать другому пользователю для ручного импорта.",
+      "После успешного развёртывания Odin's Cat сохраняет локальный JSON invite для владельца сервера. Его можно экспортировать файлом и передать другому пользователю для импорта.",
     refreshProfile: "Обновить профиль",
     guestAccess: "Передача доступа",
     guestAccessIntro:
-      "Здесь можно сгенерировать ключ подключения из уже сохранённого профиля владельца и передать его другому пользователю без SSH и без запуска туннеля.",
-    generateShareCode: "Сгенерировать ключ подключения",
+      "Здесь можно подготовить JSON invite из уже сохранённого профиля владельца и передать его другому пользователю без SSH и без запуска туннеля.",
+    generateShareCode: "Подготовить JSON invite",
     inviteBundleHint:
-      "Один share code передаёт все режимы, которые реально присутствуют в текущем owner profile. После edge attach перевыпустите ключ, чтобы в нём появился и Yandex edge.",
+      "Один JSON invite передаёт все режимы, которые реально присутствуют в текущем owner profile. После edge attach перевыпустите invite, чтобы в нём появился и Yandex edge.",
     guestAccessNeedsSecret:
-      "Введите owner secret, чтобы сгенерировать новый ключ подключения.",
+      "Введите owner secret, чтобы подготовить новый JSON invite.",
     guestAccessOwnerOnly:
-      "Сейчас это устройство использует импортированный invite key. Новые ключи подключения можно выпускать только с owner device.",
-    copyShareCode: "Скопировать share code",
+      "Сейчас это устройство использует импортированный invite. Новые JSON invite можно выпускать только с owner device.",
+    copyShareCode: "Скопировать JSON invite",
     copyJson: "Скопировать JSON",
     copied: "Скопировано",
-    exportProfileFile: "Экспортировать файл",
+    exportProfileFile: "Экспортировать JSON invite",
     exportProfileFileStarted: "Сохранение файла запущено",
     exportProfileFileSavedDownload: "Папка: Download/Odin's Cat",
     exportProfileFileSavedLocal: "Файл сохранён во внутреннюю папку приложения",
     exportProfileFileSharedNoLocal:
       "Файл уже подготовлен для отправки через системное меню, но локальная копия не сохранилась.",
-    shareCode: "Share code",
+    shareCode: "JSON invite",
     shareCodeText:
-      "Эту строку можно передать другому пользователю для локального импорта подключения в Odin's Cat.",
+      "Этот JSON invite можно передать другому пользователю для импорта подключения в Odin's Cat.",
     fingerprint: "Fingerprint",
     endpoint: "Endpoint",
-    importProfile: "Импортировать ключ",
-    importProfileFile: "Импортировать файлом",
-    importedProfileFile: "Импортирован файл",
-    importClipboardUnavailable:
-      "Буфер обмена недоступен. Откройте ПОДЕЛИТЬСЯ и вставьте ключ вручную.",
-    importClipboardEmpty:
-      "В буфере обмена сейчас нет ключа подключения.",
-    importClipboardInvalid:
-      "В буфере обмена не найден корректный ключ Odin's Cat.",
+    importProfile: "Импортировать invite",
+    importProfileFile: "Импортировать JSON-файл",
+    importedProfileFile: "Импортирован JSON-файл",
     vkCaptchaReady:
       "VK запросил ручную капчу. Откройте страницу подтверждения и завершите not-robot flow.",
     openVkCaptcha: "Открыть капчу VK",
     importProfileIntro:
-      "Вставьте share code или raw JSON, либо выберите файл invite-профиля, чтобы сохранить его локально как импортированное подключение.",
-    importPlaceholder: "odin1:...",
-    manualImportTitle: "Вставить вручную",
+      "Выберите JSON invite-файл Odin's Cat, чтобы сохранить его локально как импортированное подключение.",
+    importJsonOnlyError:
+      "Поддерживается только JSON invite-файл Odin's Cat.",
     importedProfile: "Импортированное подключение",
     imported: "Импортирован",
     importedAt: "Импортировано",
     noGuestProfile:
-      "Сначала загрузите локальный ключ подключения для этого хоста, затем можно будет сгенерировать share code.",
+      "Сначала загрузите локальный профиль подключения для этого хоста, затем можно будет подготовить JSON invite.",
     name: "Имя",
     saved: "Сохранено",
     transport: "Транспорт",
@@ -344,10 +382,10 @@ const dictionaries = {
       "Подключение закэшировано локально и может повторно использоваться приложением.",
     exportJson: "Экспорт JSON",
     exportJsonText:
-      "Это текущий локальный ключ подключения, сгенерированный из развёрнутого узла.",
+      "Это текущий локальный JSON invite, сгенерированный из развёрнутого узла.",
     importJson: "Импортированный JSON",
     importJsonText:
-      "Это нормализованное локальное подключение, сохранённое после импорта share code.",
+      "Это нормализованное локальное подключение, сохранённое после импорта JSON invite.",
     noOwnerProfile:
       "Для этого хоста локальный ключ подключения пока не найден. Сначала выполните развёртывание, затем обновите эту карточку.",
     authPassword: "Пароль",
@@ -440,6 +478,7 @@ const dictionaries = {
     lastRecoveryAction: "Последнее recovery-действие",
     stateEnabled: "включено",
     stateDisabled: "выключено",
+    stateReady: "готово",
     recentSession: "Recent session",
     sessionSnapshot: "Session snapshot",
     sessionSnapshotText:
@@ -598,6 +637,40 @@ const dictionaries = {
     nextVpnSessionLogDisarm: "Don't record next VPN session",
     nextVpnSessionLogArmed:
       "The next VPN session will be recorded and saved to Download/Odin's log after disconnect.",
+    whitelistDebugProbeTitle: "Debug profile probe",
+    whitelistDebugProbeText:
+      "Tries the available whitelist profiles one by one without redeploy, runs the built-in test, and saves a summary debug log to Download/Odin's log.",
+    whitelistDebugProbeStart: "Run debug probe",
+    whitelistDebugProbeRunning: "Trying profiles...",
+    whitelistDebugProbeUnavailable:
+      "The debug probe needs Android and a local profile with Yandex edge or direct VLESS Reality.",
+    whitelistDebugProbeSucceeded: "Working profile found",
+    whitelistDebugProbeFailed:
+      "None of the debug profiles passed the built-in test. A summary was saved to Download/Odin's log.",
+    whitelistDebugProbeVariantRealityEdge: "Yandex edge: REALITY -> VM -> xHTTP",
+    whitelistDebugProbeVariantRealityEdgeText:
+      "The current main whitelist path through the Yandex VM.",
+    whitelistDebugProbeVariantProxyEdge: "Yandex edge: legacy proxy path",
+    whitelistDebugProbeVariantProxyEdgeText:
+      "A reserve two-hop variant for comparing against the main path.",
+    whitelistDebugProbeVariantDirectReality: "Direct VLESS Reality",
+    whitelistDebugProbeVariantDirectRealityText:
+      "A control path without the Yandex bridge to separate a network issue from a whitelist block.",
+    whitelistDebugProbeVariantMaxRu: "Reality SNI: max.ru",
+    whitelistDebugProbeVariantMaxRuText:
+      "A public candidate seen in Happ/Reality configs for mobile whitelist networks.",
+    whitelistDebugProbeVariantVkVideoRu: "Reality SNI: vkvideo.ru",
+    whitelistDebugProbeVariantVkVideoRuText:
+      "A candidate mentioned in public write-ups about Russian cloud whitelist bypass.",
+    whitelistDebugProbeVariantAdsX5Ru: "Reality SNI: ads.x5.ru",
+    whitelistDebugProbeVariantAdsX5RuText:
+      "A candidate from public whitelist picks and DPI/TSPU discussions.",
+    whitelistDebugProbeVariantYaRu: "Reality SNI: ya.ru",
+    whitelistDebugProbeVariantYaRuText:
+      "A shorter Yandex domain as a simpler first-hop facade.",
+    whitelistDebugProbeVariantYandexNet: "Reality SNI: yandex.net",
+    whitelistDebugProbeVariantYandexNetText:
+      "An internal Yandex domain that is sometimes recommended for whitelist networks.",
     splitTunnelLoadingApps: "Loading installed apps...",
     splitTunnelEmpty: "No installed apps were found on this device.",
     splitTunnelNoResults: "No apps match this search.",
@@ -774,6 +847,16 @@ const dictionaries = {
     stopTunnel: "Stop tunnel",
     refreshStatus: "Refresh status",
     runTest: "Run test",
+    speedTestTitle: "Speed",
+    speedTestSubtitle: "Through the active VPN",
+    speedTestOpen: "Open speed test",
+    speedTestRun: "Run speed test",
+    speedTestLatency: "Ping",
+    speedTestDownload: "Download",
+    speedTestHint: "Start the tunnel first, then measure ping and download speed.",
+    speedTestCheckedAt: "Checked",
+    speedTestIdleValue: "—",
+    speedTestFailed: "The speed test failed.",
     status: "Status",
     socksProxy: "SOCKS5 proxy",
     bridgePort: "Bridge port",
@@ -811,56 +894,50 @@ const dictionaries = {
     sharing: "Sharing",
     ownerProfile: "Connection key",
     accessKeyTab: "My key",
-    accessShareTab: "Share",
-    accessImportTab: "Import",
+    accessShareTab: "JSON invite",
+    accessImportTab: "JSON import",
     ownerProfileIntro:
-      "After a successful deploy, Odin's Cat stores a local connection key for the server owner. You can export this key and pass it to another user for manual import.",
+      "After a successful deploy, Odin's Cat stores a local JSON invite for the server owner. You can export that file and pass it to another user for import.",
     refreshProfile: "Refresh profile",
     guestAccess: "Access sharing",
     guestAccessIntro:
-      "Generate a connection key from the saved owner profile and pass it to another user without SSH or starting a tunnel.",
-    generateShareCode: "Generate connection key",
+      "Prepare a JSON invite from the saved owner profile and pass it to another user without SSH or starting a tunnel.",
+    generateShareCode: "Prepare JSON invite",
     inviteBundleHint:
-      "A single share code carries every mode that is actually present in the current owner profile. After edge attach, re-issue the key so Yandex edge is included too.",
+      "A single JSON invite carries every mode that is actually present in the current owner profile. After edge attach, re-issue the invite so Yandex edge is included too.",
     guestAccessNeedsSecret:
-      "Enter the owner secret to generate a new connection key.",
+      "Enter the owner secret to prepare a new JSON invite.",
     guestAccessOwnerOnly:
-      "This device is using an imported invite key. New connection keys can only be generated on the owner device.",
-    copyShareCode: "Copy share code",
+      "This device is using an imported invite. New JSON invites can only be prepared on the owner device.",
+    copyShareCode: "Copy JSON invite",
     copyJson: "Copy JSON",
     copied: "Copied",
-    exportProfileFile: "Export file",
+    exportProfileFile: "Export JSON invite",
     exportProfileFileStarted: "File export started",
     exportProfileFileSavedDownload: "Folder: Download/Odin's Cat",
     exportProfileFileSavedLocal: "The file was saved into the app-local exports folder",
     exportProfileFileSharedNoLocal:
       "The file is already ready to send through the system share sheet, but the local saved copy was not created.",
-    shareCode: "Share code",
+    shareCode: "JSON invite",
     shareCodeText:
-      "You can pass this string to another user so Odin's Cat can import the connection locally.",
+      "You can pass this JSON invite to another user so Odin's Cat can import the connection locally.",
     fingerprint: "Fingerprint",
     endpoint: "Endpoint",
-    importProfile: "Import key",
-    importProfileFile: "Import file",
-    importedProfileFile: "Imported file",
-    importClipboardUnavailable:
-      "Clipboard access is unavailable. Open SHARE and paste the key manually.",
-    importClipboardEmpty:
-      "There is no connection key in the clipboard right now.",
-    importClipboardInvalid:
-      "The clipboard does not contain a valid Odin's Cat key.",
+    importProfile: "Import invite",
+    importProfileFile: "Import JSON file",
+    importedProfileFile: "Imported JSON file",
     vkCaptchaReady:
       "VK requested manual captcha. Open the confirmation page and finish the not-robot flow.",
     openVkCaptcha: "Open VK captcha",
     importProfileIntro:
-      "Paste a share code or raw JSON, or pick an invite-profile file, to save it locally as an imported connection.",
-    importPlaceholder: "odin1:...",
-    manualImportTitle: "Paste manually",
+      "Pick an Odin's Cat JSON invite file to save it locally as an imported connection.",
+    importJsonOnlyError:
+      "Only Odin's Cat JSON invite files are supported.",
     importedProfile: "Imported connection",
     imported: "Imported",
     importedAt: "Imported at",
     noGuestProfile:
-      "Load the local connection key for this host first, then a share code can be generated.",
+      "Load the local connection profile for this host first, then a JSON invite can be prepared.",
     name: "Name",
     saved: "Saved",
     transport: "Transport",
@@ -871,10 +948,10 @@ const dictionaries = {
       "The connection is cached locally and can be reused by the app.",
     exportJson: "Export JSON",
     exportJsonText:
-      "This is the current local connection key generated from your server deployment.",
+      "This is the current local JSON invite generated from your server deployment.",
     importJson: "Imported JSON",
     importJsonText:
-      "This is the normalized local connection saved after importing the share code.",
+      "This is the normalized local connection saved after importing the JSON invite.",
     noOwnerProfile:
       "No local connection key found yet for this host. Run deploy first, then refresh this card.",
     authPassword: "Password",
@@ -967,6 +1044,7 @@ const dictionaries = {
     lastRecoveryAction: "Last recovery action",
     stateEnabled: "enabled",
     stateDisabled: "disabled",
+    stateReady: "ready",
     recentSession: "Recent session",
     sessionSnapshot: "Session snapshot",
     sessionSnapshotText:

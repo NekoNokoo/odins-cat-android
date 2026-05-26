@@ -45,6 +45,13 @@ class ConnectivityTestArgs {
 }
 
 @InvokeArg
+class SpeedTestArgs {
+    var latencyUrl: String = "https://www.gstatic.com/generate_204"
+    var downloadUrl: String = "https://speed.cloudflare.com/__down?bytes=2000000"
+    var downloadBytes: Long = 2_000_000
+}
+
+@InvokeArg
 class NetworkLensArgs {
     var originHost: String = ""
     var tunnelHost: String? = null
@@ -66,6 +73,13 @@ class ShareInviteFileArgs {
     var fileName: String = "odin-one-access.odinone-access.json"
     var contents: String = ""
     var mimeType: String = "application/json"
+}
+
+@InvokeArg
+class ExportDebugLogArgs {
+    var fileName: String = "whitelist-probe.log.txt"
+    var contents: String = ""
+    var mimeType: String = "text/plain"
 }
 
 @InvokeArg
@@ -238,6 +252,39 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
+    fun runSpeedTest(invoke: Invoke) {
+        val args = invoke.parseArgs(SpeedTestArgs::class.java)
+        thread(name = "odin-one-speed-test", isDaemon = true) {
+            Log.i(
+                "VpnRuntimeService",
+                "VpnRuntimePlugin received runSpeedTest for ${args.downloadUrl} (${args.downloadBytes} bytes)",
+            )
+            runCatching {
+                VpnRuntimeLibbox.runSpeedTest(
+                    context = activity,
+                    latencyUrl = args.latencyUrl,
+                    downloadUrl = args.downloadUrl,
+                    requestedDownloadBytes = args.downloadBytes,
+                )
+            }.onSuccess { result ->
+                invoke.resolve(result.toJsObject())
+            }.onFailure { error ->
+                Log.e("VpnRuntimeService", "runSpeedTest crashed before producing a result", error)
+                invoke.resolve(
+                    TunnelSpeedTestSnapshot(
+                        ok = false,
+                        status = "failed",
+                        latencyUrl = args.latencyUrl,
+                        downloadUrl = args.downloadUrl,
+                        checkedAt = currentTimestamp(),
+                        error = error.message ?: "Android VPN speed test crashed.",
+                    ).toJsObject(),
+                )
+            }
+        }
+    }
+
+    @Command
     fun inspectNetworkLens(invoke: Invoke) {
         val args = invoke.parseArgs(NetworkLensArgs::class.java)
         thread(name = "odin-one-network-lens", isDaemon = true) {
@@ -273,7 +320,7 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
                 put(
                     "apps",
                     JSArray(
-                        listInstalledApps(activity).map { app -> app.toJsObject() },
+                        com.odinone.desktop.vk.listInstalledApps(activity).map { app -> app.toJsObject() },
                     ),
                 )
             },
@@ -349,6 +396,34 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve(payload)
         }.onFailure { error ->
             invoke.reject(error.message ?: "Failed to open Android share sheet.")
+        }
+    }
+
+    @Command
+    fun exportDebugLog(invoke: Invoke) {
+        val args = invoke.parseArgs(ExportDebugLogArgs::class.java)
+        if (args.contents.isBlank()) {
+            invoke.reject("Debug log contents are required.")
+            return
+        }
+
+        runCatching {
+            val saved =
+                VpnSessionLogStore.saveTextLog(
+                    context = activity,
+                    fileName = args.fileName,
+                    contents = args.contents,
+                    mimeType = args.mimeType.ifBlank { "text/plain" },
+                )
+            JSObject().apply {
+                put("ok", true)
+                put("fileName", args.fileName)
+                put("exportPath", saved.exportPath)
+            }
+        }.onSuccess { payload ->
+            invoke.resolve(payload)
+        }.onFailure { error ->
+            invoke.reject(error.message ?: "Failed to save debug log.")
         }
     }
 
@@ -528,9 +603,9 @@ class VpnRuntimePlugin(private val activity: Activity) : Plugin(activity) {
                 put("excludePackages", JSArray(normalizeSplitTunnelPackages(incoming)))
                 return@apply
             }
-            val persisted = SplitTunnelSelectionStore.read(activity).excludePackages
+            val persisted = com.odinone.desktop.vk.SplitTunnelSelectionStore.read(activity).excludePackages
             if (persisted.isNotEmpty()) {
-                put("excludePackages", JSArray(persisted))
+                put("excludePackages", JSArray(ArrayList(persisted)))
             }
         }
 

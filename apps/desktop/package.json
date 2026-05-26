@@ -13,6 +13,8 @@
     "repeat:test": "zsh ./scripts/direct-repeat-check.sh",
     "tauri:dev": "zsh ./scripts/desktop-env.sh npx tauri dev",
     "tauri:build": "zsh ./scripts/desktop-env.sh npx tauri build --bundles app && zsh ./scripts/build-dmg.sh",
+    "tauri:windows:build": "npx tauri build --bundles nsis,msi",
+    "tauri:windows:test-exe": "npx tauri build --bundles app",
     "tauri:android:dev": "zsh ./scripts/desktop-env.sh npx tauri android dev",
     "tauri:android:build": "zsh ./scripts/desktop-env.sh npx tauri android build"
   },
