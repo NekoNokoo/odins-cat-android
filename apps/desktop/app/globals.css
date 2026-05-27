@@ -2326,10 +2326,11 @@ body > main.shell > section.workspace > .mobile-shell > .home-scroll {
    These intentionally win over the legacy responsive shell paddings above so
    the bottom dock can sit at the real bottom of the window. */
 body > main.shell {
-  width: min(430px, calc(100vw - 20px));
+  width: 100%;
+  max-width: 100%;
   height: 100vh;
   max-height: 100vh;
-  padding: 8px 0 8px;
+  padding: 8px 12px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -2365,22 +2366,25 @@ body > main.shell > section.workspace > .mobile-shell > .mobile-dock {
 
 @media (max-width: 720px) {
   body > main.shell {
-    width: min(430px, calc(100vw - 20px));
-    padding: 8px 0 8px;
+    width: 100%;
+    max-width: 100%;
+    padding: 8px 12px;
   }
 }
 
 @media (max-width: 640px) {
   body > main.shell {
-    width: min(430px, calc(100vw - 20px));
-    padding: 8px 0 8px;
+    width: 100%;
+    max-width: 100%;
+    padding: 8px 10px;
   }
 }
 
 @media (max-width: 520px) {
   body > main.shell {
-    width: min(430px, calc(100vw - 16px));
-    padding: 8px 0 8px;
+    width: 100%;
+    max-width: 100%;
+    padding: 8px 8px;
   }
 }
 

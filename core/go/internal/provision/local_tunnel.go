@@ -1395,7 +1395,8 @@ func writeLocalSingBoxConfig(profile ownerProfile, socksPort, bridgePort, endpoi
       "local_address": [%q],
       "private_key": %q,
       "peer_public_key": %q,
-      "mtu": %d
+      "mtu": %d,
+      "domain_strategy": "prefer_ipv4"
     }
   ],
   "route": {
@@ -1512,6 +1513,7 @@ func writeLocalRealitySingBoxConfig(profile ownerProfile, socksPort int) (string
       "uuid": %q,
       "flow": %q,
       "network": "tcp",
+      "domain_strategy": "prefer_ipv4",
       "tls": {
         "enabled": true,
         "server_name": %q,

@@ -5,7 +5,17 @@ import { useEffect, useRef, useState } from "react";
 const introDurationMs = 2200;
 const reducedMotionDurationMs = 120;
 
+const isWindows = typeof window !== "undefined" && (
+  /Windows/i.test(window.navigator.userAgent) ||
+  /Win32/i.test(window.navigator.platform) ||
+  /Win64/i.test(window.navigator.platform)
+);
+
 export function LaunchIntro() {
+  if (isWindows) {
+    return null;
+  }
+
   const [visible, setVisible] = useState(true);
   const [animating, setAnimating] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
