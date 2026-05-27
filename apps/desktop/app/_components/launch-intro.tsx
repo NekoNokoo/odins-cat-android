@@ -12,10 +12,7 @@ const isWindows = typeof window !== "undefined" && (
 );
 
 export function LaunchIntro() {
-  if (isWindows) {
-    return null;
-  }
-
+  const [mounted, setMounted] = useState(false);
   const [visible, setVisible] = useState(true);
   const [animating, setAnimating] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
@@ -26,6 +23,10 @@ export function LaunchIntro() {
   const revealVideo = () => {
     setVideoReady((current) => current || true);
   };
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -39,6 +40,10 @@ export function LaunchIntro() {
   }, []);
 
   useEffect(() => {
+    if (!mounted || isWindows) {
+      return;
+    }
+
     const prefersReducedMotion =
       typeof window !== "undefined" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -62,7 +67,15 @@ export function LaunchIntro() {
         window.clearTimeout(revealTimerRef.current);
       }
     };
-  }, []);
+  }, [mounted]);
+
+  if (!mounted) {
+    return null;
+  }
+
+  if (isWindows) {
+    return null;
+  }
 
   if (!visible) {
     return null;
