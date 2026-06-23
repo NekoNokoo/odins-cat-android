@@ -157,11 +157,13 @@ const dictionaries = {
     runtimeModeVk: "VK RELAY",
     runtimeModeRelayOwner: "WHITE TUNEL",
     runtimeModeRelayDirect: "WHITE RELAY",
+    runtimeModeHysteria2: "HYSTERIA 2 BETA",
     modeStatusLive: "live",
     modeStatusReady: "ready",
     modeStatusOptional: "optional",
     modeStatusAttach: "attach step 2",
     modeStatusLocked: "locked",
+    modeStatusBeta: "beta",
     changeMode: "Сменить",
     sheetModePickerTitle: "Выбор режима",
     sheetModePickerText:
@@ -178,6 +180,8 @@ const dictionaries = {
       "REALITY relay с возвратом egress на ваш сервер. Экспериментальный режим для сложных сетей, когда прямой путь нестабилен.",
     runtimeModeRelayDirectHint:
       "REALITY relay без второго hop на ваш сервер. Экспериментальный режим, который иногда помогает там, где обычный вход режется.",
+    runtimeModeHysteria2Hint:
+      "Быстрый QUIC/UDP-режим для сетей с потерями и высоким пингом. Требует доступного UDP и не гарантирует прохождение белых списков.",
     portSetup: "Публичные порты",
     portSetupAuto: "Авто",
     portSetupManual: "Вручную",
@@ -722,11 +726,13 @@ const dictionaries = {
     runtimeModeVk: "VK RELAY",
     runtimeModeRelayOwner: "WHITE TUNEL",
     runtimeModeRelayDirect: "WHITE RELAY",
+    runtimeModeHysteria2: "HYSTERIA 2 BETA",
     modeStatusLive: "live",
     modeStatusReady: "ready",
     modeStatusOptional: "optional",
     modeStatusAttach: "attach step 2",
     modeStatusLocked: "locked",
+    modeStatusBeta: "beta",
     changeMode: "Change",
     sheetModePickerTitle: "Choose mode",
     sheetModePickerText:
@@ -743,6 +749,8 @@ const dictionaries = {
       "REALITY relay with egress returned to your server. Experimental mode for harder networks when the direct path is unstable.",
     runtimeModeRelayDirectHint:
       "REALITY relay without a second hop through your server. Experimental mode that sometimes helps when a standard entry is blocked.",
+    runtimeModeHysteria2Hint:
+      "Fast QUIC/UDP mode for lossy and high-latency networks. It requires working UDP and is not guaranteed to pass whitelist networks.",
     portSetup: "Public ports",
     portSetupAuto: "Auto",
     portSetupManual: "Manual",

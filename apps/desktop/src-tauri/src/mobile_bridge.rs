@@ -31,7 +31,7 @@ const REALITY_FALLBACK_MIN_PORT: u16 = 52443;
 const REALITY_FALLBACK_MAX_PORT: u16 = 52543;
 const REALITY_RELAY_DIRECT_PORT: u16 = 443;
 const NAIVE_FALLBACK_PORT: u16 = 8443;
-const HYSTERIA2_FALLBACK_PORT: u16 = 9443;
+const HYSTERIA2_FALLBACK_PORT: u16 = 8443;
 const WHITELIST_TURN_PORT_START: u16 = 56080;
 const WHITELIST_TURN_PORT_END: u16 = 56180;
 const WHITELIST_WIREGUARD_PORT_START: u16 = 51820;
@@ -53,6 +53,10 @@ const WHITELIST_SING_BOX_BINARY_PATH: &str = "/opt/whitelist/bin/sing-box";
 const WHITELIST_PROXY_BINARY_PATH: &str = "/opt/whitelist/bin/vk-turn-proxy-server";
 const WHITELIST_XRAY_SERVICE_PATH: &str = "/etc/systemd/system/whitelist-xray.service";
 const WHITELIST_PROXY_SERVICE_PATH: &str = "/etc/systemd/system/whitelist-vk-turn-proxy.service";
+const WHITELIST_HYSTERIA2_CONFIG_PATH: &str = "/opt/whitelist/config/sing-box-hysteria2.json";
+const WHITELIST_HYSTERIA2_CERT_PATH: &str = "/opt/whitelist/config/hysteria2.crt";
+const WHITELIST_HYSTERIA2_KEY_PATH: &str = "/opt/whitelist/config/hysteria2.key";
+const WHITELIST_HYSTERIA2_SERVICE_PATH: &str = "/etc/systemd/system/whitelist-hysteria2.service";
 const WHITELIST_YANDEX_ORIGIN_XHTTP_CONFIG_PATH: &str =
     "/opt/whitelist/config/xray-yandex-origin-xhttp.json";
 const WHITELIST_YANDEX_ORIGIN_XHTTP_CERT_PATH: &str =
@@ -222,7 +226,7 @@ const BUNDLED_WHITELIST_CIDR_LIST: &str = include_str!("../resources/whitelist/c
 const INVITE_EXPORT_EXTENSION: &str = ".odinone-access.json";
 const XRAY_RELEASE_URL: &str =
     "https://github.com/XTLS/Xray-core/releases/download/v25.8.3/Xray-linux-64.zip";
-const SING_BOX_LINUX_RELEASE_URL: &str = "https://github.com/SagerNet/sing-box/releases/download/v1.12.22/sing-box-1.12.22-linux-amd64.tar.gz";
+const SING_BOX_LINUX_RELEASE_URL: &str = "https://github.com/SagerNet/sing-box/releases/download/v1.13.12/sing-box-1.13.12-linux-amd64.tar.gz";
 const BUNDLED_VK_TURN_PROXY_SERVER_LINUX_AMD64: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/vk-turn-proxy-server-linux-amd64"
@@ -1850,6 +1854,7 @@ pub async fn mobile_generate_guest_profile(payload: GuestProfilePayload) -> Resu
     let guest_keys = generate_wireguard_key_pair()?;
     let guest_address = next_guest_address(&owner, &guest_profiles)?;
     let guest_uuid = generate_protocol_uuid()?;
+    let guest_hysteria_password = generate_protocol_secret(24)?;
     let requested_stream_count = requested_vk_turn_stream_count(&payload.server);
     let mut guest = InviteProfileFile {
         id: guest_id.clone(),
@@ -1874,6 +1879,7 @@ pub async fn mobile_generate_guest_profile(payload: GuestProfilePayload) -> Resu
     guest.vless_reality.uuid = guest_uuid;
     guest.vless_reality.flow = DEFAULT_REALITY_FLOW.to_string();
     enrich_invite_profile(&mut guest, &owner, &xray_state);
+    set_invite_hysteria2_password(&mut guest, &guest_hysteria_password);
 
     let raw_json = serde_json::to_string_pretty(&guest)
         .map_err(|err| format!("marshal guest profile: {err}"))?;
@@ -1886,6 +1892,7 @@ pub async fn mobile_generate_guest_profile(payload: GuestProfilePayload) -> Resu
 
     guest_profiles.push(guest.clone());
     sync_remote_xray_config(&mut ssh, &owner, &xray_state, &guest_profiles).await?;
+    sync_remote_hysteria2_config(&mut ssh, &owner, &guest_profiles).await?;
     let _ = ssh.close().await;
 
     build_invite_response(&guest, None, Some(raw_json))
@@ -2499,6 +2506,25 @@ fn invite_supports_reality_relay(invite: &InviteProfileFile) -> bool {
         })
 }
 
+fn invite_supports_hysteria2_value(staged_fallbacks: &Value) -> bool {
+    staged_fallbacks
+        .get("hysteria2")
+        .and_then(Value::as_object)
+        .is_some_and(|fallback| {
+            string_field(fallback.get("status")) == "ready"
+                && fallback
+                    .get("connectPort")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default()
+                    > 0
+                && !string_field(fallback.get("password")).is_empty()
+                && !string_field(fallback.get("serverName")).is_empty()
+                && !string_field(fallback.get("certificatePublicKeySha256")).is_empty()
+                && string_field(fallback.get("obfsType")) == "salamander"
+                && !string_field(fallback.get("obfsPassword")).is_empty()
+        })
+}
+
 fn invite_has_wireguard(invite: &InviteProfileFile) -> bool {
     !invite.wire_guard.server_public_key.trim().is_empty()
         && !invite.wire_guard.client_private_key.trim().is_empty()
@@ -2874,6 +2900,71 @@ fn generate_protocol_uuid() -> Result<String, String> {
         &hex[16..20],
         &hex[20..32]
     ))
+}
+
+fn generate_protocol_secret(byte_count: usize) -> Result<String, String> {
+    let mut raw = vec![0_u8; byte_count];
+    getrandom(&mut raw).map_err(|err| format!("generate protocol secret: {err}"))?;
+    Ok(hex_lower(&raw))
+}
+
+fn render_hysteria2_server_config(
+    users: &[(String, String)],
+    obfs_password: &str,
+) -> Result<String, String> {
+    let auth_users: Vec<Value> = users
+        .iter()
+        .map(|(name, password)| json!({"name": name, "password": password}))
+        .collect();
+    serde_json::to_string_pretty(&json!({
+        "log": {"level": "warn"},
+        "inbounds": [{
+            "type": "hysteria2",
+            "tag": "hy2-in",
+            "listen": "0.0.0.0",
+            "listen_port": HYSTERIA2_FALLBACK_PORT,
+            "obfs": {
+                "type": "salamander",
+                "password": obfs_password
+            },
+            "users": auth_users,
+            "tls": {
+                "enabled": true,
+                "certificate_path": WHITELIST_HYSTERIA2_CERT_PATH,
+                "key_path": WHITELIST_HYSTERIA2_KEY_PATH
+            }
+        }],
+        "outbounds": [{"type": "direct", "tag": "direct"}]
+    }))
+    .map_err(|err| format!("marshal Hysteria 2 server config: {err}"))
+}
+
+fn upsert_hysteria2_fallback(
+    staged: &mut Value,
+    host: &str,
+    password: &str,
+    obfs_password: &str,
+    certificate_pin: &str,
+) {
+    let Some(object) = staged.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "hysteria2".to_string(),
+        json!({
+            "status": "ready",
+            "connectHost": host.trim(),
+            "connectPort": HYSTERIA2_FALLBACK_PORT,
+            "password": password,
+            "serverName": "odin-hysteria.local",
+            "certificatePublicKeySha256": certificate_pin.trim(),
+            "obfsType": "salamander",
+            "obfsPassword": obfs_password,
+            "source": "owner-deployed:hysteria2",
+            "tag": "hysteria2-beta",
+            "description": "Experimental direct Hysteria 2 path over QUIC/UDP with certificate pinning and Salamander obfuscation."
+        }),
+    );
 }
 
 fn invite_fingerprint(host: &str, port: u16, identity: &str) -> String {
@@ -3260,6 +3351,66 @@ async fn sync_remote_xray_config(
     Ok(())
 }
 
+fn set_invite_hysteria2_password(invite: &mut InviteProfileFile, password: &str) {
+    if let Some(fallback) = invite
+        .staged_fallbacks
+        .get_mut("hysteria2")
+        .and_then(Value::as_object_mut)
+    {
+        fallback.insert("status".to_string(), json!("ready"));
+        fallback.insert("password".to_string(), json!(password));
+    }
+}
+
+fn hysteria2_fallback_credentials(invite: &InviteProfileFile) -> Option<(String, String)> {
+    let fallback = invite
+        .staged_fallbacks
+        .get("hysteria2")
+        .and_then(Value::as_object)?;
+    if string_field(fallback.get("status")) != "ready" {
+        return None;
+    }
+    let password = string_field(fallback.get("password")).to_string();
+    let obfs_password = string_field(fallback.get("obfsPassword")).to_string();
+    (!password.is_empty()).then_some((password, obfs_password))
+}
+
+async fn sync_remote_hysteria2_config(
+    ssh: &mut MobileSshSession,
+    owner: &InviteProfileFile,
+    guests: &[InviteProfileFile],
+) -> Result<(), String> {
+    let Some((owner_password, obfs_password)) = hysteria2_fallback_credentials(owner) else {
+        return Ok(());
+    };
+    if obfs_password.is_empty() {
+        return Ok(());
+    }
+    let mut users = vec![("owner".to_string(), owner_password)];
+    for guest in guests {
+        if guest.status == "revoked" || !guest.revoked_at.trim().is_empty() {
+            continue;
+        }
+        if let Some((password, _)) = hysteria2_fallback_credentials(guest) {
+            users.push((guest.id.clone(), password));
+        }
+    }
+    let config = render_hysteria2_server_config(&users, &obfs_password)?;
+    ssh.upload(
+        WHITELIST_HYSTERIA2_CONFIG_PATH,
+        config.as_bytes(),
+        "0600",
+    )
+    .await?;
+    ssh.run(&format!(
+        "{} check -c {} && systemctl restart whitelist-hysteria2.service && systemctl is-active whitelist-hysteria2.service",
+        quote_shell(WHITELIST_SING_BOX_BINARY_PATH),
+        quote_shell(WHITELIST_HYSTERIA2_CONFIG_PATH),
+    ))
+    .await?;
+    Ok(())
+}
+
 fn next_guest_address(
     owner: &InviteProfileFile,
     guests: &[InviteProfileFile],
@@ -3479,6 +3630,20 @@ async fn mobile_run_deployment(
     ensure_remote_vk_turn_proxy_binary(&mut ssh).await?;
     install_remote_xray_binary(&mut ssh).await?;
     install_remote_sing_box_binary(&mut ssh).await?;
+    let certificate_pin = ssh
+        .run(&format!(
+            "command -v openssl >/dev/null && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj '/CN=odin-hysteria.local' -keyout {} -out {} >/dev/null 2>&1 && chmod 600 {} {} && openssl x509 -in {} -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl enc -base64 -A",
+            quote_shell(WHITELIST_HYSTERIA2_KEY_PATH),
+            quote_shell(WHITELIST_HYSTERIA2_CERT_PATH),
+            quote_shell(WHITELIST_HYSTERIA2_KEY_PATH),
+            quote_shell(WHITELIST_HYSTERIA2_CERT_PATH),
+            quote_shell(WHITELIST_HYSTERIA2_CERT_PATH),
+        ))
+        .await?;
+    let certificate_pin = certificate_pin.trim().to_string();
+    if certificate_pin.is_empty() {
+        return Err("generate Hysteria 2 certificate pin: empty result".to_string());
+    }
     complete_step(&app, deployment_id, 2);
 
     let server_keys = generate_wireguard_key_pair()?;
@@ -3486,6 +3651,12 @@ async fn mobile_run_deployment(
     let reality_keys = generate_reality_key_pair()?;
     let reality_uuid = generate_protocol_uuid()?;
     let reality_short_id = generate_reality_short_id()?;
+    let hysteria_password = generate_protocol_secret(24)?;
+    let hysteria_obfs_password = generate_protocol_secret(24)?;
+    let hysteria_config = render_hysteria2_server_config(
+        &[("owner".to_string(), hysteria_password.clone())],
+        &hysteria_obfs_password,
+    )?;
 
     let xray_config = render_xray_config_with_listen(
         &server_keys.client_private_key,
@@ -3513,12 +3684,19 @@ async fn mobile_run_deployment(
         &reality_keys.private_key,
         &reality_short_id,
     )?;
-    let staged_fallbacks = build_staged_fallbacks(
+    let mut staged_fallbacks = build_staged_fallbacks(
         reality_port,
         &reality_keys.public_key,
         &reality_short_id,
         &reality_uuid,
         true,
+    );
+    upsert_hysteria2_fallback(
+        &mut staged_fallbacks,
+        &payload.server.host,
+        &hysteria_password,
+        &hysteria_obfs_password,
+        &certificate_pin,
     );
     set_deployment_protocol_pack(
         &app,
@@ -3563,6 +3741,13 @@ async fn mobile_run_deployment(
             WHITELIST_PROXY_BINARY_PATH, turn_port, wire_guard_port
         ),
     );
+    let hysteria_unit = render_systemd_unit(
+        "Odin's Cat Hysteria 2",
+        &format!(
+            "{} run -c {}",
+            WHITELIST_SING_BOX_BINARY_PATH, WHITELIST_HYSTERIA2_CONFIG_PATH
+        ),
+    );
 
     ssh.upload(WHITELIST_XRAY_CONFIG_PATH, xray_config.as_bytes(), "0644")
         .await?;
@@ -3570,6 +3755,12 @@ async fn mobile_run_deployment(
         WHITELIST_REALITY_CONFIG_PATH,
         reality_config.as_bytes(),
         "0644",
+    )
+    .await?;
+    ssh.upload(
+        WHITELIST_HYSTERIA2_CONFIG_PATH,
+        hysteria_config.as_bytes(),
+        "0600",
     )
     .await?;
     ssh.upload(
@@ -3591,13 +3782,19 @@ async fn mobile_run_deployment(
         .await?;
     ssh.upload(WHITELIST_PROXY_SERVICE_PATH, proxy_unit.as_bytes(), "0644")
         .await?;
+    ssh.upload(
+        WHITELIST_HYSTERIA2_SERVICE_PATH,
+        hysteria_unit.as_bytes(),
+        "0644",
+    )
+    .await?;
     complete_step(&app, deployment_id, 3);
 
-    ssh.run("systemctl daemon-reload && systemctl enable whitelist-xray.service whitelist-vk-turn-proxy.service && systemctl restart whitelist-xray.service whitelist-vk-turn-proxy.service && sleep 2")
+    ssh.run(&format!("{} check -c {} && systemctl daemon-reload && systemctl enable whitelist-xray.service whitelist-vk-turn-proxy.service whitelist-hysteria2.service && systemctl restart whitelist-xray.service whitelist-vk-turn-proxy.service whitelist-hysteria2.service", quote_shell(WHITELIST_SING_BOX_BINARY_PATH), quote_shell(WHITELIST_HYSTERIA2_CONFIG_PATH)))
         .await?;
     ssh.run(&format!(
-        "systemctl is-active whitelist-xray.service && systemctl is-active whitelist-vk-turn-proxy.service && ss -H -lun | grep -Fq ':{}' && ss -H -lun | grep -Fq ':{}' && ss -H -ltn | grep -Fq ':{}'",
-        wire_guard_port, turn_port, reality_port
+        "for i in $(seq 1 20); do systemctl is-active --quiet whitelist-hysteria2.service && break; state=$(systemctl is-active whitelist-hysteria2.service || true); if [ \"$state\" = failed ] || [ \"$state\" = inactive ]; then journalctl -u whitelist-hysteria2.service -n 40 --no-pager >&2; exit 1; fi; sleep 1; done; systemctl is-active --quiet whitelist-hysteria2.service || {{ journalctl -u whitelist-hysteria2.service -n 40 --no-pager >&2; exit 1; }}; systemctl is-active whitelist-xray.service && systemctl is-active whitelist-vk-turn-proxy.service && ss -H -lun | grep -Fq ':{}' && ss -H -lun | grep -Fq ':{}' && ss -H -ltn | grep -Fq ':{}' && ss -H -lun | grep -Fq ':{}'",
+        wire_guard_port, turn_port, reality_port, HYSTERIA2_FALLBACK_PORT
     ))
     .await?;
     complete_step(&app, deployment_id, 4);
@@ -5273,11 +5470,11 @@ fn render_staged_fallback_manifest(host: &str, reality_port: u16) -> Result<Stri
             },
             {
                 "id": "hysteria2",
-                "status": "staged",
+                "status": "ready",
                 "engine": "sing-box",
                 "port": HYSTERIA2_FALLBACK_PORT,
                 "network": "udp",
-                "notes": "Reserved for future UDP fallback once client and server configs are promoted from staged mode."
+                "notes": "Hysteria 2 Beta is active on UDP 8443 with certificate pinning, BBR, and Salamander obfuscation."
             }
         ]
     }))
@@ -5542,17 +5739,30 @@ fn build_protocol_pack_for_transport_with_fallbacks(
             port: NAIVE_FALLBACK_PORT,
             notes: "Planned browser-like HTTPS fallback for restrictive networks once server certificates are provisioned.".to_string(),
         },
-        ProtocolPackEntry {
+    ]);
+
+    if staged_fallback_present(staged_fallbacks, "hysteria2") {
+        let fallback = staged_fallbacks.and_then(|value| value.get("hysteria2"));
+        let status = if fallback
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str)
+            == Some("ready")
+        {
+            "active"
+        } else {
+            "staged"
+        };
+        entries.push(ProtocolPackEntry {
             id: "hysteria2".to_string(),
-            label: "Hysteria2".to_string(),
-            status: "staged".to_string(),
+            label: "Hysteria 2 Beta".to_string(),
+            status: status.to_string(),
             engine: "sing-box".to_string(),
             scheme: "hysteria2".to_string(),
             network: "udp".to_string(),
-            port: HYSTERIA2_FALLBACK_PORT,
-            notes: "Planned high-performance UDP fallback for networks where direct WireGuard is unstable.".to_string(),
-        },
-    ]);
+            port: fallback_port_from_value(fallback, "connectPort", HYSTERIA2_FALLBACK_PORT),
+            notes: "Experimental QUIC/UDP path for lossy and high-latency networks. Availability depends on UDP access.".to_string(),
+        });
+    }
 
     if transport.trim() == "vk-turn-proxy+xray" {
         entries[0].status = "staged".to_string();
@@ -5801,6 +6011,7 @@ fn requested_runtime_family(payload: &LocalTunnelStartPayload) -> Option<&str> {
     if !requested.is_empty() {
         return match requested {
             "direct-reality"
+            | "hysteria2-direct"
             | "cdn-anti-whitelist"
             | "reality-vps-lab"
             | "reality-whitelist-assisted"
@@ -6832,15 +7043,18 @@ fn requested_transport(server: &ServerDraftPayload) -> &str {
 fn requested_protocol(server: &ServerDraftPayload) -> &str {
     if requested_transport(server) == "vk-turn-proxy+xray" {
         "direct-wireguard"
-    } else if server.protocol.as_deref().unwrap_or_default().trim() == "direct-wireguard" {
-        "direct-wireguard"
+    } else if matches!(
+        server.protocol.as_deref().unwrap_or_default().trim(),
+        "direct-wireguard" | "hysteria2"
+    ) {
+        server.protocol.as_deref().unwrap_or_default().trim()
     } else {
         "vless-reality"
     }
 }
 
 fn requested_engine<'a>(transport: &'a str, protocol: &'a str) -> &'a str {
-    if transport == "xray" && protocol == "vless-reality" {
+    if transport == "xray" && matches!(protocol, "vless-reality" | "hysteria2") {
         "sing-box"
     } else {
         "xray"
@@ -6858,6 +7072,7 @@ fn owner_supports_requested_runtime(
             .get("vlessReality")
             .and_then(Value::as_object)
             .is_some(),
+        ("xray", "hysteria2") => invite_supports_hysteria2_value(&owner.staged_fallbacks),
         ("vk-turn-proxy+xray", _) => {
             owner.vk_turn_proxy_port > 0
                 && !owner.wireguard.server_public_key.trim().is_empty()
@@ -6875,6 +7090,7 @@ fn invite_supports_requested_runtime(
 ) -> bool {
     match (transport, protocol) {
         ("xray", "vless-reality") => invite_supports_reality(invite),
+        ("xray", "hysteria2") => invite_supports_hysteria2_value(&invite.staged_fallbacks),
         ("vk-turn-proxy+xray", _) => invite_supports_vk_relay(invite),
         _ => false,
     }

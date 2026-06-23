@@ -1,7 +1,7 @@
 export type AuthMethod = "password" | "private-key";
 export type TransportMode = "vk-turn-proxy+xray" | "xray";
 export type TunnelEngine = "xray" | "sing-box";
-export type TunnelProtocol = "direct-wireguard" | "vless-reality";
+export type TunnelProtocol = "direct-wireguard" | "vless-reality" | "hysteria2";
 export type StageStatus = "queued" | "current" | "done" | "failed";
 export type ProtocolPackStatus = "active" | "staged";
 export type ProvisionFlow = "origin" | "edge-attach";
@@ -72,7 +72,7 @@ export interface InviteProfile {
   id?: string;
   role: "owner" | "guest";
   name: string;
-  protocol: "wireguard" | "vless-reality";
+  protocol: "wireguard" | "vless-reality" | "hysteria2";
   transport: string;
   serverHost: string;
   vkTurnStreamCount?: number;

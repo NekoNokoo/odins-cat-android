@@ -11,6 +11,52 @@ import org.junit.Test
 
 class VpnRuntimeLibboxTest {
     @Test
+    fun hysteria2ConfigUsesUdp8443SalamanderAndCertificatePin() {
+        val args =
+            JSObject().apply {
+                put("serverHost", "203.0.113.10")
+                put("transport", "xray")
+                put("engine", "sing-box")
+                put("protocol", "hysteria2")
+                put(
+                    "profileJson",
+                    """
+                    {
+                      "serverHost": "203.0.113.10",
+                      "stagedFallbacks": {
+                        "hysteria2": {
+                          "status": "ready",
+                          "connectHost": "203.0.113.10",
+                          "connectPort": 8443,
+                          "password": "owner-secret",
+                          "serverName": "odin-hysteria.local",
+                          "certificatePublicKeySha256": "certificate-pin",
+                          "obfsType": "salamander",
+                          "obfsPassword": "obfs-secret"
+                        }
+                      }
+                    }
+                    """.trimIndent(),
+                )
+            }
+
+        val config = JSONObject(VpnRuntimeLibbox.renderHysteria2ConfigForTesting(args))
+        val outbound = config.getJSONArray("outbounds").getJSONObject(0)
+        assertEquals("hysteria2", outbound.getString("type"))
+        assertEquals(8443, outbound.getInt("server_port"))
+        assertEquals("salamander", outbound.getJSONObject("obfs").getString("type"))
+        assertEquals(
+            "certificate-pin",
+            outbound
+                .getJSONObject("tls")
+                .getJSONArray("certificate_public_key_sha256")
+                .getString(0),
+        )
+        assertFalse(outbound.has("up_mbps"))
+        assertFalse(outbound.has("down_mbps"))
+    }
+
+    @Test
     fun stableRealityDefaultsUseEncryptedDns() {
         val normalized =
             VpnRuntimeLibbox.normalizeRuntimeArgs(

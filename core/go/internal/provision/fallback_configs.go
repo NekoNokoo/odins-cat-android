@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"golang.org/x/crypto/curve25519"
@@ -20,7 +21,7 @@ const (
 	realityFallbackMinPort   = 52443
 	realityFallbackMaxPort   = 52543
 	naiveFallbackPort        = 8443
-	hysteria2FallbackPort    = 9443
+	hysteria2FallbackPort    = 8443
 	yandexEdgeDefaultPort    = 443
 
 	relayAutoselectDefaultURL         = "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Vless-Reality-White-Lists-Rus-Mobile.txt"
@@ -140,6 +141,73 @@ func generateRealityShortID() (string, error) {
 	return hex.EncodeToString(raw), nil
 }
 
+func generateProtocolSecret(byteCount int) (string, error) {
+	raw := make([]byte, byteCount)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate protocol secret: %w", err)
+	}
+	return hex.EncodeToString(raw), nil
+}
+
+func renderHysteria2ServerConfig(port int, users map[string]string, obfsPassword string) (string, error) {
+	authUsers := make([]map[string]any, 0, len(users))
+	names := make([]string, 0, len(users))
+	for name := range users {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		authUsers = append(authUsers, map[string]any{
+			"name":     name,
+			"password": users[name],
+		})
+	}
+	config := map[string]any{
+		"log": map[string]any{"level": "warn"},
+		"inbounds": []map[string]any{{
+			"type":        "hysteria2",
+			"tag":         "hy2-in",
+			"listen":      "0.0.0.0",
+			"listen_port": port,
+			"obfs": map[string]any{
+				"type":     "salamander",
+				"password": obfsPassword,
+			},
+			"users": authUsers,
+			"tls": map[string]any{
+				"enabled":          true,
+				"certificate_path": whitelistHysteria2CertPath,
+				"key_path":         whitelistHysteria2KeyPath,
+			},
+		}},
+		"outbounds": []map[string]any{{"type": "direct", "tag": "direct"}},
+	}
+	raw, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func upsertHysteria2Fallback(stagedFallbacks map[string]any, host, password, obfsPassword, certificatePin string) {
+	if stagedFallbacks == nil {
+		return
+	}
+	stagedFallbacks["hysteria2"] = map[string]any{
+		"status":                     "ready",
+		"connectHost":                strings.TrimSpace(host),
+		"connectPort":                hysteria2FallbackPort,
+		"password":                   password,
+		"serverName":                 "odin-hysteria.local",
+		"certificatePublicKeySha256": certificatePin,
+		"obfsType":                   "salamander",
+		"obfsPassword":               obfsPassword,
+		"source":                     "owner-deployed:hysteria2",
+		"tag":                        "hysteria2-beta",
+		"description":                "Experimental direct Hysteria 2 path over QUIC/UDP with certificate pinning and Salamander obfuscation.",
+	}
+}
+
 func renderRealityServerConfig(port int, uuid, privateKey, shortID string) (string, error) {
 	config := map[string]any{
 		"log": map[string]any{
@@ -217,11 +285,11 @@ func renderStagedFallbackManifest(host string, realityPort int) (string, error) 
 			},
 			{
 				"id":      "hysteria2",
-				"status":  "staged",
+				"status":  "ready",
 				"engine":  "sing-box",
 				"port":    hysteria2FallbackPort,
 				"network": "udp",
-				"notes":   "Reserved for future UDP fallback once client and server configs are promoted from staged mode.",
+				"notes":   "Hysteria 2 Beta is active on UDP 8443 with certificate pinning, BBR, and Salamander obfuscation.",
 			},
 		},
 	}

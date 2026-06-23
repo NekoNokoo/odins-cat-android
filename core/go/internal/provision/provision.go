@@ -21,6 +21,7 @@ const (
 
 	ProtocolDirectWireGuard TunnelProtocol = "direct-wireguard"
 	ProtocolVLESSReality    TunnelProtocol = "vless-reality"
+	ProtocolHysteria2       TunnelProtocol = "hysteria2"
 
 	StatusQueued StepStatus = "queued"
 
@@ -115,7 +116,7 @@ func normalizedProtocol(transport Transport, protocol TunnelProtocol) TunnelProt
 		return ProtocolDirectWireGuard
 	}
 	switch protocol {
-	case ProtocolVLESSReality:
+	case ProtocolVLESSReality, ProtocolHysteria2:
 		return protocol
 	default:
 		return ProtocolVLESSReality

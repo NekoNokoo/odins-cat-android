@@ -31,12 +31,14 @@ const inviteCdnYandexMode = "lab"
 const inviteCdnYandexBootstrap = "direct-reality"
 const inviteCdnYandexFrontSelection = "ordered"
 const inviteCdnYandexCamouflageHost = "ya.ru"
+
 var inviteCdnYandexCamouflageHostPool = []string{
 	"ya.ru",
 	"tunnel.vk-apps.com",
 	"5post-gate.x5.ru",
 	"ads.x5.ru",
 }
+
 const inviteCdnYandexXhttpMode = "packet-up"
 const inviteCdnYandexXmuxMaxConcurrency = 20
 const inviteCdnYandexXmuxHMaxRequestTimes = 900
@@ -467,6 +469,10 @@ func IssueRemoteGuestProfile(req Request, name string) (InviteProfileResponse, e
 	if err != nil {
 		return InviteProfileResponse{}, err
 	}
+	guestHysteriaPassword, err := generateProtocolSecret(24)
+	if err != nil {
+		return InviteProfileResponse{}, err
+	}
 	guestKeys, err := generateWireGuardKeyPair()
 	if err != nil {
 		return InviteProfileResponse{}, err
@@ -498,6 +504,7 @@ func IssueRemoteGuestProfile(req Request, name string) (InviteProfileResponse, e
 	guest.VLESSReality.UUID = guestUUID
 	guest.VLESSReality.Flow = "xtls-rprx-vision"
 	enrichInviteProfile(&guest, owner, xrayState)
+	setInviteHysteria2Password(&guest, guestHysteriaPassword)
 
 	rawJSON, err := json.MarshalIndent(guest, "", "  ")
 	if err != nil {
@@ -510,6 +517,9 @@ func IssueRemoteGuestProfile(req Request, name string) (InviteProfileResponse, e
 
 	guestProfiles = append(guestProfiles, guest)
 	if err := syncRemoteXrayConfig(client, owner, xrayState, guestProfiles); err != nil {
+		return InviteProfileResponse{}, err
+	}
+	if err := syncRemoteHysteria2Config(client, owner, guestProfiles); err != nil {
 		return InviteProfileResponse{}, err
 	}
 
@@ -557,6 +567,9 @@ func RevokeRemoteGuestProfile(req Request, guestID string) (InviteProfileRespons
 	}
 
 	if err := syncRemoteXrayConfig(client, owner, xrayState, guestProfiles); err != nil {
+		return InviteProfileResponse{}, err
+	}
+	if err := syncRemoteHysteria2Config(client, owner, guestProfiles); err != nil {
 		return InviteProfileResponse{}, err
 	}
 
@@ -899,6 +912,65 @@ func syncRemoteXrayConfig(client *ssh.Client, owner inviteProfile, xrayState rem
 	return nil
 }
 
+func setInviteHysteria2Password(invite *inviteProfile, password string) {
+	if invite == nil || invite.StagedFallbacks == nil {
+		return
+	}
+	raw, ok := invite.StagedFallbacks["hysteria2"]
+	if !ok {
+		return
+	}
+	fallback, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	fallback["password"] = password
+	fallback["status"] = "ready"
+}
+
+func hysteria2FallbackFields(invite inviteProfile) (password, obfsPassword string, ok bool) {
+	raw, exists := invite.StagedFallbacks["hysteria2"]
+	if !exists {
+		return "", "", false
+	}
+	fallback, ok := raw.(map[string]any)
+	if !ok || fallback["status"] != "ready" {
+		return "", "", false
+	}
+	password, _ = fallback["password"].(string)
+	obfsPassword, _ = fallback["obfsPassword"].(string)
+	return strings.TrimSpace(password), strings.TrimSpace(obfsPassword), strings.TrimSpace(password) != ""
+}
+
+func syncRemoteHysteria2Config(client *ssh.Client, owner inviteProfile, guests []inviteProfile) error {
+	ownerPassword, obfsPassword, ok := hysteria2FallbackFields(owner)
+	if !ok || obfsPassword == "" {
+		return nil
+	}
+	users := map[string]string{"owner": ownerPassword}
+	for _, guest := range guests {
+		if guest.Status == "revoked" || guest.RevokedAt != "" {
+			continue
+		}
+		if password, _, ok := hysteria2FallbackFields(guest); ok {
+			users[guest.ID] = password
+		}
+	}
+	config, err := renderHysteria2ServerConfig(hysteria2FallbackPort, users, obfsPassword)
+	if err != nil {
+		return err
+	}
+	if err := uploadFile(client, whitelistHysteria2ConfigPath, []byte(config), "0600"); err != nil {
+		return err
+	}
+	_, err = runRemote(client, fmt.Sprintf(
+		"%s check -c %s && systemctl restart whitelist-hysteria2.service && systemctl is-active whitelist-hysteria2.service",
+		quoteShell(whitelistSingBoxBinaryPath),
+		quoteShell(whitelistHysteria2ConfigPath),
+	))
+	return err
+}
+
 func nextGuestAddress(owner inviteProfile, guests []inviteProfile) (string, error) {
 	used := map[int]bool{}
 	ownerOctet, err := addressLastOctet(owner.WireGuard.Address)
@@ -1232,13 +1304,13 @@ func buildInviteCdnAntiWhitelistRuntime(invite inviteProfile) map[string]any {
 		"frontSelection":       inviteCdnYandexFrontSelection,
 		"bootstrap":            inviteCdnYandexBootstrap,
 		"routingPolicy": map[string]any{
-			"dnsQueryStrategy":      "use_ip",
-			"domainStrategy":        "ip_if_non_match",
-			"domainMatcher":         "hybrid",
-			"directDomainKeywords":  inviteCdnYandexDirectDomainKeywords,
-			"directDomains":         inviteCdnYandexDirectDomains,
-			"blockedDomainKeywords": []string{},
-			"blockedDomains":        []string{},
+			"dnsQueryStrategy":       "use_ip",
+			"domainStrategy":         "ip_if_non_match",
+			"domainMatcher":          "hybrid",
+			"directDomainKeywords":   inviteCdnYandexDirectDomainKeywords,
+			"directDomains":          inviteCdnYandexDirectDomains,
+			"blockedDomainKeywords":  []string{},
+			"blockedDomains":         []string{},
 			"blockSelectedFrontHost": true,
 		},
 		"origin": map[string]any{

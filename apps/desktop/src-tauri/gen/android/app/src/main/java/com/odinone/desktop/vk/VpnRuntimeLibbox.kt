@@ -66,6 +66,7 @@ private const val RUNTIME_FAMILY_REALITY_WHITELIST_ASSISTED = "reality-whitelist
 private const val RUNTIME_FAMILY_REALITY_VPS_LAB = "reality-vps-lab"
 private const val RUNTIME_FAMILY_CDN_ANTI_WHITELIST = "cdn-anti-whitelist"
 private const val RUNTIME_FAMILY_VK_RELAY = "vk-relay"
+private const val RUNTIME_FAMILY_HYSTERIA2 = "hysteria2-direct"
 private const val ENGINE_SING_BOX = "sing-box"
 private const val ENGINE_XRAY_NATIVE = "xray-native"
 private const val ACTIVATION_STATE_ACTIVE = "active"
@@ -194,11 +195,12 @@ private val DEFAULT_LOCAL_BYPASS_DOMAINS =
         "yandex.ru",
         "ya.ru",
     )
-private val DIRECT_REALITY_RUNTIME_ARTIFACTS = listOf("reality-whitelist-assisted-scaffold.json", "active-vless-reality-vps-lab.json", "reality-vps-lab-scaffold.json", "active-cdn-anti-whitelist.json", "cdn-anti-whitelist-scaffold.json", "active-vk-relay.json")
+private val DIRECT_REALITY_RUNTIME_ARTIFACTS = listOf("reality-whitelist-assisted-scaffold.json", "active-vless-reality-vps-lab.json", "reality-vps-lab-scaffold.json", "active-cdn-anti-whitelist.json", "cdn-anti-whitelist-scaffold.json", "active-vk-relay.json", "active-hysteria2.json")
 private val REALITY_WHITELIST_RUNTIME_ARTIFACTS = listOf("active-vless-reality.json", "active-vless-reality-vps-lab.json", "reality-vps-lab-scaffold.json", "active-cdn-anti-whitelist.json", "cdn-anti-whitelist-scaffold.json", "active-vk-relay.json")
 private val REALITY_VPS_LAB_RUNTIME_ARTIFACTS = listOf("active-vless-reality.json", "reality-whitelist-assisted-scaffold.json", "active-cdn-anti-whitelist.json", "cdn-anti-whitelist-scaffold.json", "active-vk-relay.json")
 private val CDN_RUNTIME_ARTIFACTS = listOf("active-vless-reality.json", "reality-whitelist-assisted-scaffold.json", "active-vless-reality-vps-lab.json", "reality-vps-lab-scaffold.json", "active-vk-relay.json")
 private val VK_RELAY_RUNTIME_ARTIFACTS = listOf("active-vless-reality.json", "reality-whitelist-assisted-scaffold.json", "active-vless-reality-vps-lab.json", "reality-vps-lab-scaffold.json", "active-cdn-anti-whitelist.json", "cdn-anti-whitelist-scaffold.json")
+private val HYSTERIA2_RUNTIME_ARTIFACTS = listOf("active-vless-reality.json", "reality-whitelist-assisted-scaffold.json", "active-vless-reality-vps-lab.json", "reality-vps-lab-scaffold.json", "active-cdn-anti-whitelist.json", "cdn-anti-whitelist-scaffold.json", "active-vk-relay.json")
 
 data class PreparedRuntime(
     val configContent: String,
@@ -276,6 +278,16 @@ private data class WireGuardSettings(
     val address: String,
     val mtu: Int,
     val relayPort: Int,
+)
+
+private data class Hysteria2Settings(
+    val serverHost: String,
+    val serverPort: Int,
+    val password: String,
+    val serverName: String,
+    val certificatePublicKeySha256: String,
+    val obfsType: String,
+    val obfsPassword: String,
 )
 
 private data class RealityRuntimeOptions(
@@ -644,6 +656,7 @@ object VpnRuntimeLibbox {
                 .takeUnless { it.isNullOrEmpty() }
                 ?: when (protocol) {
                     "direct-wireguard" -> RUNTIME_FAMILY_VK_RELAY
+                    "hysteria2" -> RUNTIME_FAMILY_HYSTERIA2
                     else -> RUNTIME_FAMILY_DIRECT_REALITY
                 }
         val rawProfile = normalizedArgs.getString("profileJson", "{}") ?: "{}"
@@ -773,6 +786,34 @@ object VpnRuntimeLibbox {
                 )
             }
 
+            "hysteria2" -> {
+                val hysteria2 = readHysteria2Settings(profile, serverHost)
+                val options = readRealityRuntimeOptions(normalizedArgs, profile)
+                PreparedRuntime(
+                    configContent = buildHysteria2Config(socksPort, hysteria2, options),
+                    configPath = File(runtimeDir, "active-hysteria2.json").path,
+                    socksAddress = socksAddress,
+                    runtimeFamily = RUNTIME_FAMILY_HYSTERIA2,
+                    activationState = ACTIVATION_STATE_ACTIVE,
+                    configMode = "beta",
+                    activeFeatures =
+                        options.featureLabels()
+                            .filterNot { it.startsWith("family:") || it.startsWith("flow:") || it.startsWith("utls:") }
+                            .plus(
+                                listOf(
+                                    "family:$RUNTIME_FAMILY_HYSTERIA2",
+                                    "transport:quic",
+                                    "obfs:salamander",
+                                    "congestion:bbr",
+                                    "tls:public-key-pin",
+                                ),
+                            ),
+                    profileHash = normalizedArgs.getString("profileHash", null),
+                    networkReloadOnChange = options.networkReloadOnChange,
+                    networkReloadDebounceMs = options.networkReloadDebounceMs,
+                )
+            }
+
             else -> throw IllegalArgumentException("Unsupported Android runtime protocol: $protocol")
         }
 
@@ -809,6 +850,7 @@ object VpnRuntimeLibbox {
                 RUNTIME_FAMILY_REALITY_VPS_LAB -> REALITY_VPS_LAB_RUNTIME_ARTIFACTS
                 RUNTIME_FAMILY_CDN_ANTI_WHITELIST -> CDN_RUNTIME_ARTIFACTS
                 RUNTIME_FAMILY_VK_RELAY -> VK_RELAY_RUNTIME_ARTIFACTS
+                RUNTIME_FAMILY_HYSTERIA2 -> HYSTERIA2_RUNTIME_ARTIFACTS
                 else -> DIRECT_REALITY_RUNTIME_ARTIFACTS
             }
         staleArtifacts.forEach { filename ->
@@ -2065,6 +2107,46 @@ object VpnRuntimeLibbox {
         )
     }
 
+    private fun readHysteria2Settings(
+        profile: JSObject,
+        fallbackServerHost: String,
+    ): Hysteria2Settings {
+        val fallback =
+            profile.optJSONObject("stagedFallbacks")?.optJSONObject("hysteria2")
+                ?: throw IllegalArgumentException("The access profile does not contain Hysteria 2 settings")
+        if (fallback.optString("status", "").trim() != "ready") {
+            throw IllegalArgumentException("Hysteria 2 is not ready in this access profile")
+        }
+        val serverHost =
+            fallback.optString("connectHost", "").trim().ifBlank { fallbackServerHost }
+        val serverPort = fallback.optInt("connectPort", 0)
+        val password = fallback.optString("password", "").trim()
+        val serverName = fallback.optString("serverName", "").trim()
+        val certificatePin = fallback.optString("certificatePublicKeySha256", "").trim()
+        val obfsType = fallback.optString("obfsType", "").trim()
+        val obfsPassword = fallback.optString("obfsPassword", "").trim()
+        if (
+            serverHost.isBlank() ||
+                serverPort <= 0 ||
+                password.isBlank() ||
+                serverName.isBlank() ||
+                certificatePin.isBlank() ||
+                obfsType != "salamander" ||
+                obfsPassword.isBlank()
+        ) {
+            throw IllegalArgumentException("The Hysteria 2 access profile is incomplete")
+        }
+        return Hysteria2Settings(
+            serverHost = serverHost,
+            serverPort = serverPort,
+            password = password,
+            serverName = serverName,
+            certificatePublicKeySha256 = certificatePin,
+            obfsType = obfsType,
+            obfsPassword = obfsPassword,
+        )
+    }
+
     private fun readRealityVpsLabOwnerBootstrapSettings(
         profile: JSObject,
         fallbackServerHost: String,
@@ -2611,6 +2693,12 @@ object VpnRuntimeLibbox {
             normalized.put("activationState", ACTIVATION_STATE_ACTIVE)
             return normalized
         }
+        if (protocol == "hysteria2") {
+            normalized.put("runtimeFamily", RUNTIME_FAMILY_HYSTERIA2)
+            normalized.put("activationState", ACTIVATION_STATE_ACTIVE)
+            normalized.put("configMode", "beta")
+            return normalized
+        }
         if (protocol != "vless-reality") {
             return normalized
         }
@@ -2957,6 +3045,54 @@ object VpnRuntimeLibbox {
         reality: RealitySettings,
         options: RealityRuntimeOptions,
     ): String = buildRealityConfigDocument(socksPort, reality, options, leakHardened = true)
+
+    private fun buildHysteria2Config(
+        socksPort: Int,
+        hysteria2: Hysteria2Settings,
+        options: RealityRuntimeOptions,
+    ): String {
+        val scaffold =
+            JSONObject(
+                buildRealityConfigDocument(
+                    socksPort,
+                    RealitySettings(
+                        serverHost = hysteria2.serverHost,
+                        serverPort = hysteria2.serverPort,
+                        uuid = "00000000-0000-4000-8000-000000000000",
+                        flow = "xtls-rprx-vision",
+                        serverName = hysteria2.serverName,
+                        publicKey = "unused",
+                        shortId = "0000000000000000",
+                    ),
+                    options,
+                    leakHardened = true,
+                ),
+            )
+        val outbound =
+            JSONObject()
+                .put("type", "hysteria2")
+                .put("tag", "main-out")
+                .put("server", hysteria2.serverHost)
+                .put("server_port", hysteria2.serverPort)
+                .put("password", hysteria2.password)
+                .put(
+                    "obfs",
+                    JSONObject()
+                        .put("type", hysteria2.obfsType)
+                        .put("password", hysteria2.obfsPassword),
+                ).put(
+                    "tls",
+                    JSONObject()
+                        .put("enabled", true)
+                        .put("server_name", hysteria2.serverName)
+                        .put(
+                            "certificate_public_key_sha256",
+                            JSONArray().put(hysteria2.certificatePublicKeySha256),
+                        ),
+                )
+        scaffold.getJSONArray("outbounds").put(0, outbound)
+        return scaffold.toString(2)
+    }
 
     private fun buildRealityConfigDocument(
         socksPort: Int,
@@ -3330,6 +3466,22 @@ object VpnRuntimeLibbox {
                 options = options,
             )
         return buildCdnAntiWhitelistConfig(DEFAULT_SOCKS_PORT, reality, options)
+    }
+
+    internal fun renderHysteria2ConfigForTesting(args: JSObject): String {
+        val rawProfile = args.getString("profileJson", "{}") ?: "{}"
+        val profile = JSObject(rawProfile)
+        val serverHost = args.getString("serverHost", "")?.trim().orEmpty().ifBlank {
+            profile.optString("serverHost", "").trim()
+        }
+        require(serverHost.isNotBlank()) { "serverHost is required for Hysteria 2 config rendering" }
+        val normalized = normalizeRuntimeArgs(args)
+        val options = readRealityRuntimeOptions(normalized, profile)
+        return buildHysteria2Config(
+            DEFAULT_SOCKS_PORT,
+            readHysteria2Settings(profile, serverHost),
+            options,
+        )
     }
 
     internal fun renderXrayNativeCdnAntiWhitelistConfigForTesting(args: JSObject): String {

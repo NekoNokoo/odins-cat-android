@@ -20,7 +20,7 @@ const (
 	whitelistWireGuardPortStart = 51820
 	whitelistWireGuardPortEnd   = 51920
 	xrayReleaseURL              = "https://github.com/XTLS/Xray-core/releases/download/v25.8.3/Xray-linux-64.zip"
-	singBoxLinuxReleaseURL      = "https://github.com/SagerNet/sing-box/releases/download/v1.12.22/sing-box-1.12.22-linux-amd64.tar.gz"
+	singBoxLinuxReleaseURL      = "https://github.com/SagerNet/sing-box/releases/download/v1.13.12/sing-box-1.13.12-linux-amd64.tar.gz"
 )
 
 type Deployment struct {
@@ -317,6 +317,21 @@ func executeDeployment(id string, req Request) error {
 	)); err != nil {
 		return err
 	}
+	certificatePin, err := runRemote(client, fmt.Sprintf(
+		"command -v openssl >/dev/null && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj '/CN=odin-hysteria.local' -keyout %s -out %s >/dev/null 2>&1 && chmod 600 %s %s && openssl x509 -in %s -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl enc -base64 -A",
+		quoteShell(whitelistHysteria2KeyPath),
+		quoteShell(whitelistHysteria2CertPath),
+		quoteShell(whitelistHysteria2KeyPath),
+		quoteShell(whitelistHysteria2CertPath),
+		quoteShell(whitelistHysteria2CertPath),
+	))
+	if err != nil {
+		return fmt.Errorf("generate Hysteria 2 certificate: %w", err)
+	}
+	certificatePin = strings.TrimSpace(certificatePin)
+	if certificatePin == "" {
+		return fmt.Errorf("generate Hysteria 2 certificate pin: empty result")
+	}
 	completeStep(id, 2)
 
 	serverKeys, err := generateWireGuardKeyPair()
@@ -338,6 +353,22 @@ func executeDeployment(id string, req Request) error {
 		return err
 	}
 	realityShortID, err := generateRealityShortID()
+	if err != nil {
+		return err
+	}
+	hysteriaPassword, err := generateProtocolSecret(24)
+	if err != nil {
+		return err
+	}
+	hysteriaObfsPassword, err := generateProtocolSecret(24)
+	if err != nil {
+		return err
+	}
+	hysteriaConfig, err := renderHysteria2ServerConfig(
+		hysteria2FallbackPort,
+		map[string]string{"owner": hysteriaPassword},
+		hysteriaObfsPassword,
+	)
 	if err != nil {
 		return err
 	}
@@ -370,6 +401,9 @@ func executeDeployment(id string, req Request) error {
 	if err := uploadFile(client, whitelistRealityConfigPath, []byte(realityConfig), "0644"); err != nil {
 		return err
 	}
+	if err := uploadFile(client, whitelistHysteria2ConfigPath, []byte(hysteriaConfig), "0600"); err != nil {
+		return err
+	}
 	fallbackManifest, err := renderStagedFallbackManifest(req.Server.Host, realityPort)
 	if err != nil {
 		return err
@@ -379,6 +413,7 @@ func executeDeployment(id string, req Request) error {
 	}
 
 	stagedFallbacks := buildStagedFallbacks(realityPort, realityKeys.Public, realityShortID, realityUUID, true)
+	upsertHysteria2Fallback(stagedFallbacks, req.Server.Host, hysteriaPassword, hysteriaObfsPassword, certificatePin)
 	inviteProfile, err := renderAccessProfile(
 		"owner",
 		"owner",
@@ -403,7 +438,7 @@ func executeDeployment(id string, req Request) error {
 	if err := saveLocalOwnerProfile(req.Server.Host, []byte(inviteProfile)); err != nil {
 		return err
 	}
-	protocolPackManifest, err := renderProtocolPackManifest(req.Server.Host, TransportXray, wireGuardPort, realityPort, turnPort)
+	protocolPackManifest, err := renderProtocolPackManifestWithFallbacks(req.Server.Host, TransportXray, wireGuardPort, realityPort, turnPort, stagedFallbacks)
 	if err != nil {
 		return err
 	}
@@ -426,12 +461,19 @@ func executeDeployment(id string, req Request) error {
 	if err := uploadFile(client, whitelistProxyServicePath, []byte(proxyUnit), "0644"); err != nil {
 		return err
 	}
-	completeStep(id, 3)
-
-	if _, err := runRemote(client, "systemctl daemon-reload && systemctl enable whitelist-xray.service whitelist-vk-turn-proxy.service && systemctl restart whitelist-xray.service whitelist-vk-turn-proxy.service && sleep 2"); err != nil {
+	hysteriaUnit := renderSystemdUnit(
+		"Odin One Hysteria 2",
+		fmt.Sprintf("%s run -c %s", whitelistSingBoxBinaryPath, whitelistHysteria2ConfigPath),
+	)
+	if err := uploadFile(client, whitelistHysteria2ServicePath, []byte(hysteriaUnit), "0644"); err != nil {
 		return err
 	}
-	if _, err := runRemote(client, fmt.Sprintf("systemctl is-active whitelist-xray.service && systemctl is-active whitelist-vk-turn-proxy.service && ss -H -lun | grep -Fq ':%d' && ss -H -lun | grep -Fq ':%d' && ss -H -ltn | grep -Fq ':%d'", wireGuardPort, turnPort, realityPort)); err != nil {
+	completeStep(id, 3)
+
+	if _, err := runRemote(client, fmt.Sprintf("%s check -c %s && systemctl daemon-reload && systemctl enable whitelist-xray.service whitelist-vk-turn-proxy.service whitelist-hysteria2.service && systemctl restart whitelist-xray.service whitelist-vk-turn-proxy.service whitelist-hysteria2.service", quoteShell(whitelistSingBoxBinaryPath), quoteShell(whitelistHysteria2ConfigPath))); err != nil {
+		return err
+	}
+	if _, err := runRemote(client, fmt.Sprintf("for i in $(seq 1 20); do systemctl is-active --quiet whitelist-hysteria2.service && break; state=$(systemctl is-active whitelist-hysteria2.service || true); if [ \"$state\" = failed ] || [ \"$state\" = inactive ]; then journalctl -u whitelist-hysteria2.service -n 40 --no-pager >&2; exit 1; fi; sleep 1; done; systemctl is-active --quiet whitelist-hysteria2.service || { journalctl -u whitelist-hysteria2.service -n 40 --no-pager >&2; exit 1; }; systemctl is-active whitelist-xray.service && systemctl is-active whitelist-vk-turn-proxy.service && ss -H -lun | grep -Fq ':%d' && ss -H -lun | grep -Fq ':%d' && ss -H -ltn | grep -Fq ':%d' && ss -H -lun | grep -Fq ':%d'", wireGuardPort, turnPort, realityPort, hysteria2FallbackPort)); err != nil {
 		return err
 	}
 	completeStep(id, 4)

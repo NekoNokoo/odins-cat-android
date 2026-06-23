@@ -9,21 +9,25 @@ import (
 )
 
 const (
-	whitelistRoot              = "/opt/whitelist"
-	whitelistBinDir            = whitelistRoot + "/bin"
-	whitelistConfigDir         = whitelistRoot + "/config"
-	whitelistProfilesDir       = whitelistRoot + "/profiles"
-	whitelistGuestProfilesDir  = whitelistProfilesDir + "/guests"
-	whitelistXrayConfigPath    = whitelistConfigDir + "/xray-server.json"
-	whitelistRealityConfigPath = whitelistConfigDir + "/xray-reality-server.json"
-	whitelistFallbacksPath     = whitelistConfigDir + "/fallbacks-staged.json"
-	whitelistProtocolPackPath  = whitelistConfigDir + "/protocol-pack.json"
-	whitelistInvitePath        = whitelistProfilesDir + "/owner-profile.json"
-	whitelistXrayBinaryPath    = whitelistBinDir + "/xray"
-	whitelistSingBoxBinaryPath = whitelistBinDir + "/sing-box"
-	whitelistProxyBinaryPath   = whitelistBinDir + "/vk-turn-proxy-server"
-	whitelistXrayServicePath   = "/etc/systemd/system/whitelist-xray.service"
-	whitelistProxyServicePath  = "/etc/systemd/system/whitelist-vk-turn-proxy.service"
+	whitelistRoot                 = "/opt/whitelist"
+	whitelistBinDir               = whitelistRoot + "/bin"
+	whitelistConfigDir            = whitelistRoot + "/config"
+	whitelistProfilesDir          = whitelistRoot + "/profiles"
+	whitelistGuestProfilesDir     = whitelistProfilesDir + "/guests"
+	whitelistXrayConfigPath       = whitelistConfigDir + "/xray-server.json"
+	whitelistRealityConfigPath    = whitelistConfigDir + "/xray-reality-server.json"
+	whitelistHysteria2ConfigPath  = whitelistConfigDir + "/sing-box-hysteria2.json"
+	whitelistHysteria2CertPath    = whitelistConfigDir + "/hysteria2.crt"
+	whitelistHysteria2KeyPath     = whitelistConfigDir + "/hysteria2.key"
+	whitelistFallbacksPath        = whitelistConfigDir + "/fallbacks-staged.json"
+	whitelistProtocolPackPath     = whitelistConfigDir + "/protocol-pack.json"
+	whitelistInvitePath           = whitelistProfilesDir + "/owner-profile.json"
+	whitelistXrayBinaryPath       = whitelistBinDir + "/xray"
+	whitelistSingBoxBinaryPath    = whitelistBinDir + "/sing-box"
+	whitelistProxyBinaryPath      = whitelistBinDir + "/vk-turn-proxy-server"
+	whitelistXrayServicePath      = "/etc/systemd/system/whitelist-xray.service"
+	whitelistProxyServicePath     = "/etc/systemd/system/whitelist-vk-turn-proxy.service"
+	whitelistHysteria2ServicePath = "/etc/systemd/system/whitelist-hysteria2.service"
 )
 
 type xrayWireGuardPeer struct {
@@ -162,16 +166,16 @@ func renderAccessProfile(role, id, name, host string, transport Transport, endpo
 		wireGuardPort = endpointPort
 	}
 	profile := map[string]any{
-		"id":             id,
-		"role":           role,
-		"name":           name,
-		"transport":      transport,
-		"serverHost":     host,
+		"id":                id,
+		"role":              role,
+		"name":              name,
+		"transport":         transport,
+		"serverHost":        host,
 		"vkTurnStreamCount": defaultVKTurnStreamCount,
-		"endpointPort":   endpointPort,
-		"createdAt":      nowRFC3339(),
-		"activeProtocol": activeProtocolID(transport),
-		"protocolPack":   buildProtocolPackWithFallbacks(transport, wireGuardPort, realityPortFromStagedFallbacks(stagedFallbacks), vkTurnProxyPort, stagedFallbacks),
+		"endpointPort":      endpointPort,
+		"createdAt":         nowRFC3339(),
+		"activeProtocol":    activeProtocolID(transport),
+		"protocolPack":      buildProtocolPackWithFallbacks(transport, wireGuardPort, realityPortFromStagedFallbacks(stagedFallbacks), vkTurnProxyPort, stagedFallbacks),
 		"wireguard": map[string]any{
 			"serverPublicKey":  serverPublicKey,
 			"clientPrivateKey": clientPrivateKey,
@@ -199,9 +203,9 @@ func renderAccessProfile(role, id, name, host string, transport Transport, endpo
 
 func effectiveOwnerAndroidRuntime(host string, stagedFallbacks map[string]any, existing map[string]any) map[string]any {
 	invite := inviteProfile{
-		ServerHost:        host,
-		AndroidRuntime:    cloneInviteMap(existing),
-		StagedFallbacks:   cloneInviteMap(stagedFallbacks),
+		ServerHost:      host,
+		AndroidRuntime:  cloneInviteMap(existing),
+		StagedFallbacks: cloneInviteMap(stagedFallbacks),
 	}
 	return effectiveInviteAndroidRuntime(invite)
 }

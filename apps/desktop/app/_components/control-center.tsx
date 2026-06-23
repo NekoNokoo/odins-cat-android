@@ -64,7 +64,8 @@ type AccessMode =
   | "yandex-edge-proxy"
   | "vk-relay"
   | "relay-via-server"
-  | "relay-direct";
+  | "relay-direct"
+  | "hysteria2";
 type DeployPortMode = "auto" | "manual";
 type PendingAction =
   | "enableVpn"
@@ -302,7 +303,9 @@ const normalizeEngine = (
 const normalizeProtocol = (
   protocol: string | undefined,
 ): NonNullable<ServerDraft["protocol"]> =>
-  protocol === "vless-reality" || protocol === "direct-wireguard"
+  protocol === "vless-reality" ||
+  protocol === "direct-wireguard" ||
+  protocol === "hysteria2"
     ? protocol
     : "vless-reality";
 
@@ -352,6 +355,26 @@ const importedProfileHasVKRelay = (profile: InviteProfile | null) =>
     profile?.supportsVKRelay ??
     (profile?.vkTurnProxyPort && profile?.wireGuardPort),
   );
+
+const profileHasHysteria2 = (
+  profile:
+    | Pick<InviteProfile, "stagedFallbacks">
+    | Pick<OwnerAccessProfile, "stagedFallbacks">
+    | null,
+) => {
+  const value = profile?.stagedFallbacks?.["hysteria2"];
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const fallback = value as Record<string, unknown>;
+  return (
+    fallback.status === "ready" &&
+    typeof fallback.password === "string" &&
+    fallback.password.length > 0 &&
+    typeof fallback.certificatePublicKeySha256 === "string" &&
+    fallback.certificatePublicKeySha256.length > 0
+  );
+};
 
 type CdnAntiWhitelistRuntimeSummary = {
   frontHost: string;
@@ -647,7 +670,11 @@ const resolveDraftEngine = (
 };
 
 const draftAccessMode = (serverDraft: ServerDraft): AccessMode =>
-  serverDraft.transport === "vk-turn-proxy+xray" ? "vk-relay" : "vless-reality";
+  serverDraft.transport === "vk-turn-proxy+xray"
+    ? "vk-relay"
+    : serverDraft.protocol === "hysteria2"
+      ? "hysteria2"
+      : "vless-reality";
 
 const applyAccessModeToDraft = (
   serverDraft: ServerDraft,
@@ -659,6 +686,14 @@ const applyAccessModeToDraft = (
       transport: "vk-turn-proxy+xray",
       engine: "xray",
       protocol: "direct-wireguard",
+    };
+  }
+  if (mode === "hysteria2") {
+    return {
+      ...serverDraft,
+      transport: "xray",
+      engine: "sing-box",
+      protocol: "hysteria2",
     };
   }
   return {
@@ -725,6 +760,9 @@ const ownerProfileSupportsDraft = (
   }
   const transport = normalizeTransport(serverDraft.transport);
   const protocol = normalizeProtocol(serverDraft.protocol);
+  if (transport === "xray" && protocol === "hysteria2") {
+    return profileHasHysteria2(profile);
+  }
   if (transport === "xray" && protocol === "vless-reality") {
     return ownerProfileHasRealityFallback(profile);
   }
@@ -751,6 +789,12 @@ const importedProfileSupportsDraft = (
     return false;
   }
   const transport = normalizeTransport(serverDraft.transport);
+  if (
+    transport === "xray" &&
+    normalizeProtocol(serverDraft.protocol) === "hysteria2"
+  ) {
+    return profileHasHysteria2(profile);
+  }
   if (
     transport === "xray" &&
     normalizeProtocol(serverDraft.protocol) === "vless-reality"
@@ -1547,6 +1591,17 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           localProfileOffersYandexEdge),
     },
     {
+      mode: "hysteria2" as const,
+      label: t("runtimeModeHysteria2"),
+      hint: t("runtimeModeHysteria2Hint"),
+      status: profileHasHysteria2(importedProfile) || profileHasHysteria2(ownerProfile)
+        ? t("modeStatusBeta")
+        : t("modeStatusLocked"),
+      available:
+        isAndroidClient &&
+        (profileHasHysteria2(importedProfile) || profileHasHysteria2(ownerProfile)),
+    },
+    {
       mode: "vk-relay" as const,
       label: t("runtimeModeVk"),
       hint: t("runtimeModeVkHint"),
@@ -2040,7 +2095,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
           parsed.accessMode === "yandex-edge-proxy" ||
           parsed.accessMode === "vk-relay" ||
           parsed.accessMode === "relay-via-server" ||
-          parsed.accessMode === "relay-direct"
+          parsed.accessMode === "relay-direct" ||
+          parsed.accessMode === "hysteria2"
         ) {
           setSelectedAccessMode(
             parsed.accessMode === "yandex-edge-proxy"
@@ -2736,6 +2792,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       }
       return { runtimeFamily: "direct-reality", activationState: "active" };
     }
+    if (transport === "xray" && protocol === "hysteria2") {
+      return { runtimeFamily: "hysteria2-direct", activationState: "active" };
+    }
     return { runtimeFamily: "", activationState: "" };
   };
 
@@ -3081,6 +3140,17 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         };
       }
       return buildTunnelStartRequest(baseDraft);
+    }
+    if (selectedAccessMode === "hysteria2") {
+      return {
+        ...buildTunnelStartRequest(
+          applyAccessModeToDraft(baseDraft, "hysteria2"),
+        ),
+        runtimeIdentityOverride: {
+          runtimeFamily: "hysteria2-direct",
+          activationState: "active",
+        },
+      };
     }
     if (selectedAccessMode === "yandex-edge") {
       return buildTunnelStartRequest(baseDraft, "reality-yandex-edge", {

@@ -158,17 +158,26 @@ func buildProtocolPackWithFallbacks(transport Transport, wireGuardPort, realityP
 			Port:    naiveFallbackPort,
 			Notes:   "Planned browser-like HTTPS fallback for restrictive networks once server certificates are provisioned.",
 		},
-		ProtocolPackEntry{
-			ID:      "hysteria2",
-			Label:   "Hysteria2",
-			Status:  ProtocolStatusStaged,
-			Engine:  "sing-box",
-			Scheme:  "hysteria2",
-			Network: "udp",
-			Port:    hysteria2FallbackPort,
-			Notes:   "Planned high-performance UDP fallback for networks where direct WireGuard is unstable.",
-		},
 	)
+
+	if stagedFallbacks != nil {
+		if raw, ok := stagedFallbacks["hysteria2"]; ok {
+			status := ProtocolStatusStaged
+			if entry, ok := raw.(map[string]any); ok && entry["status"] == "ready" {
+				status = ProtocolStatusActive
+			}
+			entries = append(entries, ProtocolPackEntry{
+				ID:      "hysteria2",
+				Label:   "Hysteria 2 Beta",
+				Status:  status,
+				Engine:  "sing-box",
+				Scheme:  "hysteria2",
+				Network: "udp",
+				Port:    protocolPackPortFromFallback(raw, "connectPort", hysteria2FallbackPort),
+				Notes:   "Experimental QUIC/UDP path for lossy and high-latency networks. Availability depends on UDP access.",
+			})
+		}
+	}
 
 	if transport == TransportVKTurnProxyXray {
 		entries[0].Status = ProtocolStatusStaged
