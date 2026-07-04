@@ -7,12 +7,11 @@ import { ControlCenter } from "./_components/control-center";
 
 function HeaderWhitelistCat() {
   return (
-    <span
-      className="topbar-cat"
-      aria-label="Odin's Cat"
-      title="Odin's Cat"
-    >
-      <img src="/whitelist-cat-tight.png" alt="" aria-hidden="true" />
+    <span className="topbar-brand-meta" aria-label="HALO status">
+      <span className="topbar-halo-badge">HALO</span>
+      <span className="topbar-cat" aria-label="Odin's Cat" title="Odin's Cat">
+        <img src="/whitelist-cat-tight.png" alt="" aria-hidden="true" />
+      </span>
     </span>
   );
 }
@@ -22,7 +21,7 @@ export default function Page() {
     <>
       <LaunchIntro />
       <AppShell
-        title="Odin's Cat · HALO"
+        title="Odin's Cat"
         titleAccessory={<HeaderWhitelistCat />}
         headerAction={<LanguageToggle />}
         dragRegion

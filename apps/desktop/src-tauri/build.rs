@@ -5,7 +5,7 @@ use std::{
     time::SystemTime,
 };
 
-const VK_TURN_PROXY_VERSION: &str = "v1.6.0";
+const VK_TURN_PROXY_VERSION: &str = "v1.8.3";
 
 fn main() {
     println!("cargo:rerun-if-changed=../../../core/go/cmd/mvpd");
@@ -67,7 +67,8 @@ fn build_mvpd(target_os: Option<&str>) -> Result<(), String> {
         cmd.env("GOARCH", goarch);
     }
 
-    let output = cmd.output()
+    let output = cmd
+        .output()
         .map_err(|err| format!("spawn go build: {err}"))?;
 
     if !output.status.success() {
@@ -87,8 +88,12 @@ fn build_vk_turn_proxy_server_bundle() -> Result<(), String> {
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").map_err(|err| err.to_string())?);
     let out_dir = PathBuf::from(env::var("OUT_DIR").map_err(|err| err.to_string())?);
     let output_path = out_dir.join("vk-turn-proxy-server-linux-amd64");
-    if output_path.exists() {
+    if vk_turn_proxy_server_is_current(&output_path)? {
         return Ok(());
+    }
+    if output_path.exists() {
+        fs::remove_file(&output_path)
+            .map_err(|err| format!("remove stale vk-turn-proxy server bundle: {err}"))?;
     }
     if try_reuse_prebuilt_vk_turn_proxy_server_bundle(&manifest_dir, &output_path)? {
         return Ok(());
@@ -219,15 +224,26 @@ fn ensure_executable(output_path: &Path) -> Result<(), String> {
 }
 
 fn android_vk_turn_proxy_client_is_current(output_path: &Path) -> Result<bool, String> {
+    vk_turn_proxy_binary_is_current(output_path, b"github.com/cacggghp/vk-turn-proxy/client")
+}
+
+fn vk_turn_proxy_server_is_current(output_path: &Path) -> Result<bool, String> {
+    vk_turn_proxy_binary_is_current(output_path, b"github.com/cacggghp/vk-turn-proxy/server")
+}
+
+fn vk_turn_proxy_binary_is_current(
+    output_path: &Path,
+    component_marker: &[u8],
+) -> Result<bool, String> {
     if !output_path.exists() {
         return Ok(false);
     }
-    let data = fs::read(output_path)
-        .map_err(|err| format!("read bundled vk-turn-proxy Android client: {err}"))?;
+    let data =
+        fs::read(output_path).map_err(|err| format!("read bundled vk-turn-proxy binary: {err}"))?;
     Ok([
         VK_TURN_PROXY_VERSION.as_bytes(),
         b"github.com/cacggghp/vk-turn-proxy".as_slice(),
-        b"captchaNotRobot.settings".as_slice(),
+        component_marker,
     ]
     .iter()
     .all(|needle| binary_contains(&data, needle)))
@@ -254,6 +270,12 @@ fn try_reuse_prebuilt_vk_turn_proxy_android_client_bundle(
     if let Ok(explicit_path) = env::var("ODIN_ONE_VK_TURN_PROXY_ANDROID_CLIENT_BINARY") {
         let explicit_path = PathBuf::from(explicit_path);
         if explicit_path.exists() {
+            if !android_vk_turn_proxy_client_is_current(&explicit_path)? {
+                return Err(format!(
+                    "explicit vk-turn-proxy Android client is not {VK_TURN_PROXY_VERSION}: {}",
+                    explicit_path.display()
+                ));
+            }
             fs::copy(&explicit_path, output_path)
                 .map_err(|err| format!("copy explicit vk-turn-proxy Android client: {err}"))?;
             return Ok(true);
@@ -270,6 +292,12 @@ fn try_reuse_prebuilt_vk_turn_proxy_server_bundle(
     if let Ok(explicit_path) = env::var("ODIN_ONE_VK_TURN_PROXY_SERVER_BINARY") {
         let explicit_path = PathBuf::from(explicit_path);
         if explicit_path.exists() {
+            if !vk_turn_proxy_server_is_current(&explicit_path)? {
+                return Err(format!(
+                    "explicit vk-turn-proxy server binary is not {VK_TURN_PROXY_VERSION}: {}",
+                    explicit_path.display()
+                ));
+            }
             fs::copy(&explicit_path, output_path)
                 .map_err(|err| format!("copy explicit vk-turn-proxy bundle: {err}"))?;
             return Ok(true);
@@ -279,6 +307,9 @@ fn try_reuse_prebuilt_vk_turn_proxy_server_bundle(
     let target_dir = manifest_dir.join("target");
     let mut newest: Option<(SystemTime, PathBuf)> = None;
     for candidate in collect_vk_turn_proxy_bundle_candidates(&target_dir)? {
+        if !vk_turn_proxy_server_is_current(&candidate)? {
+            continue;
+        }
         let modified = fs::metadata(&candidate)
             .and_then(|metadata| metadata.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -292,7 +323,7 @@ fn try_reuse_prebuilt_vk_turn_proxy_server_bundle(
     }
 
     if let Some((_, candidate)) = newest {
-        fs::copy(candidate, output_path)
+        fs::copy(&candidate, output_path)
             .map_err(|err| format!("copy cached vk-turn-proxy bundle: {err}"))?;
         return Ok(true);
     }

@@ -10,4 +10,6 @@ bin
 target
 tmp
 windows-build
+odin-one-windows-build
+artifacts
 apps/desktop/src-tauri/gen/schemas/windows-schema.json

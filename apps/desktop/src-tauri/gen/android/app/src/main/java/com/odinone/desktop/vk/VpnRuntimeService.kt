@@ -4,6 +4,7 @@ import android.app.Notification as AndroidNotification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -12,6 +13,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.ProxyInfo
+import android.net.TrafficStats
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
@@ -21,6 +23,7 @@ import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
+import android.service.quicksettings.TileService
 import android.util.Base64
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -48,6 +51,7 @@ import java.net.Socket
 import java.net.NetworkInterface
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.Locale
 import kotlin.concurrent.thread
 
 class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler {
@@ -67,6 +71,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
     private var vkTunnelActivationInFlight = false
     @Volatile
     private var vkStartupStartedAtMs: Long = 0L
+    private var pendingVkWarmupTimeout: Runnable? = null
 
     @Volatile
     private var shuttingDown = false
@@ -75,6 +80,12 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
     private val lifecycleLock = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var pendingNetworkReload: Runnable? = null
+    private var notificationStatsTicker: Runnable? = null
+    private var notificationLastRxBytes: Long = TrafficStats.UNSUPPORTED.toLong()
+    private var notificationLastTxBytes: Long = TrafficStats.UNSUPPORTED.toLong()
+    private var notificationLastSampleAtMs: Long = 0L
+    private var notificationSpeedLine: String? = null
+    private var notificationSessionLine: String? = null
     @Volatile
     private var networkReloadInFlight = false
     @Volatile
@@ -114,6 +125,34 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             "onStartCommand action=${action ?: "<null>"} flags=$flags startId=$startId currentStatus=${currentSnapshot.status}",
         )
         when (action) {
+            ACTION_SHOW_STATUS -> {
+                appendDiagnostic("Received ACTION_SHOW_STATUS intent.")
+                runOnMainSync {
+                    if (isActiveTunnelStatus(currentSnapshot.status)) {
+                        updateNotification(currentSnapshot)
+                    } else {
+                        showStatusNotification(currentSnapshot)
+                        stopSelf()
+                    }
+                }
+            }
+
+            ACTION_QUICK_START -> {
+                appendDiagnostic("Received ACTION_QUICK_START intent from notification.")
+                handleQuickStartFromSurface(currentSnapshot, "notification")
+            }
+
+            ACTION_TOGGLE -> {
+                appendDiagnostic("Received ACTION_TOGGLE intent from quick settings.")
+                if (isActiveTunnelStatus(currentSnapshot.status)) {
+                    thread(name = "odin-one-vpn-tile-stop", isDaemon = true) {
+                        handleStop(requestedByUser = true, reason = "ACTION_TOGGLE quick settings")
+                    }
+                } else {
+                    handleQuickStartFromSurface(currentSnapshot, "quick_settings")
+                }
+            }
+
             ACTION_START -> {
                 appendDiagnostic("Received ACTION_START intent.")
                 val rawArgs = intent.getStringExtra(EXTRA_START_ARGS)
@@ -573,6 +612,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                             ),
                         )
                     runOnMainSync { updateNotification(waiting) }
+                    scheduleVkRelayWarmupTimeout(prepared)
                     appendDiagnostic("Android VPN runtime is waiting for VK relay warmup before establishing the system VPN tunnel.")
                 } else {
                     val startupDurationMs = startPreparedRuntimeTunnel(prepared, startedAt)
@@ -633,16 +673,12 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                                     },
                             ),
                     ),
-                )
+            )
             finalizeSessionLogIfNeeded(stopped, "handleStop:$reason")
             runCatching { runOnMainSync { stopForeground(STOP_FOREGROUND_REMOVE) } }
                 .onFailure { appendDiagnostic("stopForeground failed during handleStop: ${it.message}") }
-            runCatching {
-                runOnMainSync {
-                    getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
-                }
-            }
-                .onFailure { appendDiagnostic("notification cancel failed during handleStop: ${it.message}") }
+            runCatching { runOnMainSync { showStatusNotification(stopped) } }
+                .onFailure { appendDiagnostic("status notification failed during handleStop: ${it.message}") }
             runOnMainSync { stopSelf() }
         }
     }
@@ -676,6 +712,8 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             runOnMainSync { updateNotification(next) }
             runCatching { runOnMainSync { stopForeground(STOP_FOREGROUND_REMOVE) } }
                 .onFailure { appendDiagnostic("stopForeground failed during handleFailure: ${it.message}") }
+            runCatching { runOnMainSync { showStatusNotification(next) } }
+                .onFailure { appendDiagnostic("status notification failed during handleFailure: ${it.message}") }
             runOnMainSync { stopSelf() }
         }
     }
@@ -764,6 +802,8 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             vkTunnelStartPending = false
             vkTunnelActivationInFlight = false
             vkStartupStartedAtMs = 0L
+            pendingVkWarmupTimeout?.let { mainHandler.removeCallbacks(it) }
+            pendingVkWarmupTimeout = null
             appendDiagnostic("Stopping libbox service before tearing down Android tunnel resources. origin=$origin")
             runCatching { commandServer?.closeService() }
                 .onFailure { appendDiagnostic("commandServer.closeService failed during $origin: ${it.message}") }
@@ -806,6 +846,7 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             queuedNetworkReloadTrigger = null
             lastDeliveredUnderlyingNetworkHandle = null
             lastDeliveredUnderlyingInterfaceName = null
+            stopNotificationStatsTicker()
             closeAllDefaultInterfaceMonitors()
             releaseWakeLock()
             appendDiagnostic("Runtime resources closed. origin=$origin")
@@ -857,6 +898,8 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             return
         }
         if (vkTunnelStartPending) {
+            pendingVkWarmupTimeout?.let { mainHandler.removeCallbacks(it) }
+            pendingVkWarmupTimeout = null
             pendingVkCaptchaUrl = null
             val ready =
                 captureRuntimeState { current ->
@@ -930,6 +973,8 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                 vkTunnelStartPending = false
                 vkTunnelActivationInFlight = false
                 vkStartupStartedAtMs = 0L
+                pendingVkWarmupTimeout?.let { mainHandler.removeCallbacks(it) }
+                pendingVkWarmupTimeout = null
                 runOnMainSync { updateNotification(running) }
                 appendDiagnostic("Android VPN runtime transitioned to running state after VK relay warmup.")
             } catch (error: Exception) {
@@ -950,6 +995,36 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         lastVkProcessLogLine = line
         appendLog(line)
         maybeHandleVkCaptchaPrompt(line)
+    }
+
+    private fun scheduleVkRelayWarmupTimeout(prepared: PreparedRuntime) {
+        pendingVkWarmupTimeout?.let { mainHandler.removeCallbacks(it) }
+        val startedAt = vkStartupStartedAtMs.takeIf { it > 0L } ?: SystemClock.elapsedRealtime()
+        val timeout =
+            Runnable {
+                synchronized(lifecycleLock) {
+                    if (
+                        activeRuntime !== prepared ||
+                        !vkTunnelStartPending ||
+                        vkTunnelActivationInFlight ||
+                        shuttingDown
+                    ) {
+                        return@synchronized
+                    }
+                    val waitedMs = SystemClock.elapsedRealtime() - startedAt
+                    val lastLine = lastVkProcessLogLine?.takeIf { it.isNotBlank() }
+                    handleFailure(
+                        message = "VK relay warmup timed out after ${waitedMs}ms",
+                        extraLogLine =
+                            lastLine
+                                ?.let { "Last vk-turn-proxy log: $it" }
+                                ?: "vk-turn-proxy did not report relay readiness. The VK call link may be expired, captcha may be pending, or VK relay may be blocked on this network.",
+                        stage = "waiting_for_relay",
+                    )
+                }
+            }
+        pendingVkWarmupTimeout = timeout
+        mainHandler.postDelayed(timeout, VK_RELAY_WARMUP_TIMEOUT_MS)
     }
 
     private fun handleNativeProcessLogLine(line: String) {
@@ -1524,9 +1599,13 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
             NotificationChannel(
                 NOTIFICATION_CHANNEL_ID,
                 "Odin's Cat VPN",
-                NotificationManager.IMPORTANCE_LOW,
+                NotificationManager.IMPORTANCE_DEFAULT,
             ).apply {
                 description = "Foreground status for the Odin's Cat Android VPN runtime"
+                enableLights(false)
+                enableVibration(false)
+                setSound(null, null)
+                lockscreenVisibility = AndroidNotification.VISIBILITY_PUBLIC
             },
         )
     }
@@ -1542,11 +1621,133 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+        startNotificationStatsTicker()
     }
 
     private fun updateNotification(snapshot: TunnelSnapshot) {
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(NOTIFICATION_ID, buildNotification(snapshot))
+        if (isActiveTunnelStatus(snapshot.status)) {
+            startNotificationStatsTicker()
+        }
+        requestQuickSettingsTileRefresh()
+    }
+
+    private fun showStatusNotification(snapshot: TunnelSnapshot) {
+        stopNotificationStatsTicker()
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(NOTIFICATION_ID, buildNotification(snapshot))
+        requestQuickSettingsTileRefresh()
+    }
+
+    private fun requestQuickSettingsTileRefresh() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            TileService.requestListeningState(
+                this,
+                ComponentName(this, VpnRuntimeTileService::class.java),
+            )
+        }
+    }
+
+    private fun handleQuickStartFromSurface(
+        currentSnapshot: TunnelSnapshot,
+        source: String,
+    ) {
+        val restored = VpnRuntimeRestoreStore.readAttemptedStartRequest(this)
+            ?: VpnRuntimeRestoreStore.readStartRequest(this)
+        if (restored == null) {
+            val next =
+                VpnRuntimeStore.write(
+                    this,
+                    currentSnapshot.copy(
+                        status = "stopped",
+                        error = "Нет сохранённого VPN-профиля для быстрого запуска.",
+                        logTail = trimLogTail(currentSnapshot.logTail + "$source quick start failed: no saved VPN profile."),
+                    ),
+                )
+            runOnMainSync {
+                showStatusNotification(next)
+                stopSelf()
+            }
+        } else {
+            val startingSnapshot =
+                VpnRuntimeStore.write(
+                    this,
+                    currentSnapshot.copy(
+                        status = "starting",
+                        error = null,
+                        logTail = trimLogTail(currentSnapshot.logTail + "Quick start requested from $source."),
+                    ),
+                    sync = true,
+                )
+            runOnMainSync { startForeground(startingSnapshot) }
+            restored.put("startSource", source)
+            thread(name = "odin-one-vpn-$source-start", isDaemon = true) {
+                handleStart(restored.toString())
+            }
+        }
+    }
+
+    private fun startNotificationStatsTicker() {
+        if (notificationStatsTicker != null) {
+            return
+        }
+        notificationLastRxBytes = TrafficStats.UNSUPPORTED.toLong()
+        notificationLastTxBytes = TrafficStats.UNSUPPORTED.toLong()
+        notificationLastSampleAtMs = 0L
+        val ticker =
+            object : Runnable {
+                override fun run() {
+                    val snapshot = VpnRuntimeStore.snapshot(this@VpnRuntimeService)
+                    if (!isActiveTunnelStatus(snapshot.status)) {
+                        stopNotificationStatsTicker()
+                        return
+                    }
+                    updateNotificationTrafficLines()
+                    getSystemService(NotificationManager::class.java)
+                        .notify(NOTIFICATION_ID, buildNotification(snapshot))
+                    mainHandler.postDelayed(this, NOTIFICATION_STATS_INTERVAL_MS)
+                }
+            }
+        notificationStatsTicker = ticker
+        mainHandler.post(ticker)
+    }
+
+    private fun stopNotificationStatsTicker() {
+        notificationStatsTicker?.let { mainHandler.removeCallbacks(it) }
+        notificationStatsTicker = null
+        notificationLastRxBytes = TrafficStats.UNSUPPORTED.toLong()
+        notificationLastTxBytes = TrafficStats.UNSUPPORTED.toLong()
+        notificationLastSampleAtMs = 0L
+        notificationSpeedLine = null
+        notificationSessionLine = null
+    }
+
+    private fun updateNotificationTrafficLines() {
+        val uid = applicationInfo.uid
+        val rx = TrafficStats.getUidRxBytes(uid)
+        val tx = TrafficStats.getUidTxBytes(uid)
+        if (rx == TrafficStats.UNSUPPORTED.toLong() || tx == TrafficStats.UNSUPPORTED.toLong()) {
+            notificationSpeedLine = "Скорость: ждём статистику Android"
+            notificationSessionLine = null
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        val previousRx = notificationLastRxBytes
+        val previousTx = notificationLastTxBytes
+        val previousAt = notificationLastSampleAtMs
+        notificationSessionLine = "Трафик: ↓ ${formatTrafficBytes(rx)}  ↑ ${formatTrafficBytes(tx)}"
+        if (previousRx >= 0 && previousTx >= 0 && previousAt > 0 && now > previousAt) {
+            val seconds = (now - previousAt).coerceAtLeast(1L) / 1000.0
+            val downBps = ((rx - previousRx).coerceAtLeast(0L) * 8.0) / seconds
+            val upBps = ((tx - previousTx).coerceAtLeast(0L) * 8.0) / seconds
+            notificationSpeedLine = "Скорость: ↓ ${formatBitsPerSecond(downBps)}  ↑ ${formatBitsPerSecond(upBps)}"
+        } else {
+            notificationSpeedLine = "Скорость: измеряем..."
+        }
+        notificationLastRxBytes = rx
+        notificationLastTxBytes = tx
+        notificationLastSampleAtMs = now
     }
 
     private fun buildNotification(
@@ -1573,23 +1774,130 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
                 )
             }
+        val isActive = isActiveTunnelStatus(state.status)
+        val quickActionIntent =
+            Intent(this, VpnRuntimeService::class.java).apply {
+                action = if (isActive) ACTION_STOP else ACTION_QUICK_START
+            }
+        val quickActionPendingIntent =
+            if (!isActive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                PendingIntent.getForegroundService(
+                    this,
+                    1,
+                    quickActionIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                )
+            } else {
+                PendingIntent.getService(
+                    this,
+                    1,
+                    quickActionIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                )
+            }
+        val statusLabel = notificationStatusLabel(state)
+        val routeLabel = notificationRouteLabel(state)
+        val splitLabel =
+            if (state.excludePackages.isNotEmpty()) {
+                "Приложений в обход: ${state.excludePackages.size}"
+            } else {
+                "Приложения в обход: выкл"
+            }
+        val speedLine =
+            notificationSpeedLine
+                ?: if (isActive) {
+                    "Скорость: измеряем..."
+                } else {
+                    "Скорость: пауза"
+                }
+        val sessionLine = notificationSessionLine
+        val compactText =
+            bodyOverride
+                ?: when {
+                    !state.pendingCaptchaUrl.isNullOrBlank() -> "Нужна капча. Нажми, чтобы продолжить."
+                    state.error != null -> state.error
+                    isActive -> speedLine
+                    else -> "VPN выключен. Нажми «Включить», чтобы запустить последний профиль."
+                }
+        val priority =
+            if (isActive) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT
+        val notificationTitle = titleOverride ?: "Odin's Cat · $statusLabel"
+        val expandedText =
+            listOfNotNull(
+                speedLine,
+                routeLabel?.let { "Маршрут: $it" } ?: "Маршрут: последний профиль",
+                sessionLine ?: splitLabel,
+                state.lastNetworkEvent?.takeIf { it.isNotBlank() }?.let { "Событие: $it" },
+                state.error?.takeIf { it.isNotBlank() }?.let { "Ошибка: $it" },
+            ).joinToString("\n")
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle(titleOverride ?: "Odin's Cat")
-            .setContentText(
-                bodyOverride
-                    ?: when {
-                        !state.pendingCaptchaUrl.isNullOrBlank() ->
-                            "VK captcha is waiting for confirmation. Tap to continue."
-                        else -> state.error ?: state.logTail.lastOrNull() ?: "Preparing Android VPN runtime"
-                    },
-            )
+            .setContentTitle(notificationTitle)
+            .setContentText(compactText)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setOngoing(true)
+            .setOngoing(isActive)
             .setOnlyAlertOnce(true)
+            .setPriority(priority)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .addAction(
+                0,
+                if (isActive) "Выключить VPN" else "Включить VPN",
+                quickActionPendingIntent,
+            )
             .apply {
                 pendingIntent?.let { setContentIntent(it) }
             }.build()
+    }
+
+    private fun notificationStatusLabel(state: TunnelSnapshot): String =
+        when {
+            !state.pendingCaptchaUrl.isNullOrBlank() -> "нужна капча"
+            state.status == "running" -> "VPN включён"
+            state.status == "starting" -> "подключение"
+            state.status == "failed" || !state.error.isNullOrBlank() -> "нужно внимание"
+            else -> "VPN выключен"
+        }
+
+    private fun notificationRouteLabel(state: TunnelSnapshot): String? =
+        listOfNotNull(
+            state.runtimeFamily?.takeIf { it.isNotBlank() },
+            state.protocol?.takeIf { it.isNotBlank() },
+            state.frontTag?.takeIf { it.isNotBlank() } ?: state.frontProvider?.takeIf { it.isNotBlank() },
+        )
+            .takeIf { it.isNotEmpty() }
+            ?.joinToString(" · ")
+
+    private fun formatTrafficBytes(bytes: Long): String {
+        val abs = bytes.coerceAtLeast(0L).toDouble()
+        val units = arrayOf("B", "KB", "MB", "GB", "TB")
+        var value = abs
+        var unitIndex = 0
+        while (value >= 1024.0 && unitIndex < units.lastIndex) {
+            value /= 1024.0
+            unitIndex += 1
+        }
+        return if (unitIndex == 0) {
+            "${value.toLong()} ${units[unitIndex]}"
+        } else {
+            String.format(Locale.US, "%.1f %s", value, units[unitIndex])
+        }
+    }
+
+    private fun formatBitsPerSecond(bitsPerSecond: Double): String {
+        val units = arrayOf("bps", "Kbps", "Mbps", "Gbps")
+        var value = bitsPerSecond.coerceAtLeast(0.0)
+        var unitIndex = 0
+        while (value >= 1000.0 && unitIndex < units.lastIndex) {
+            value /= 1000.0
+            unitIndex += 1
+        }
+        return if (unitIndex == 0) {
+            "${value.toLong()} ${units[unitIndex]}"
+        } else {
+            String.format(Locale.US, "%.1f %s", value, units[unitIndex])
+        }
     }
 
     private fun addAddresses(
@@ -1655,13 +1963,18 @@ class VpnRuntimeService : VpnService(), PlatformInterface, CommandServerHandler 
         private const val TAG = "VpnRuntimeService"
         private const val PUBLIC_VPN_DNS_PRIMARY = "1.1.1.1"
         private const val PUBLIC_VPN_DNS_SECONDARY = "1.0.0.1"
+        private const val VK_RELAY_WARMUP_TIMEOUT_MS = 90_000L
+        private const val NOTIFICATION_STATS_INTERVAL_MS = 2_000L
         const val ACTION_START = "com.odinone.desktop.vk.action.START_VPN_RUNTIME"
+        const val ACTION_SHOW_STATUS = "com.odinone.desktop.vk.action.SHOW_VPN_STATUS"
+        const val ACTION_QUICK_START = "com.odinone.desktop.vk.action.QUICK_START_VPN_RUNTIME"
+        const val ACTION_TOGGLE = "com.odinone.desktop.vk.action.TOGGLE_VPN_RUNTIME"
         const val ACTION_STOP = "com.odinone.desktop.vk.action.STOP_VPN_RUNTIME"
         const val EXTRA_START_ARGS = "start_args"
         const val EXTRA_START_ARGS_BASE64 = "start_args_base64"
 
         private const val NOTIFICATION_ID = 7301
-        private const val NOTIFICATION_CHANNEL_ID = "odin_one_vpn_runtime"
+        private const val NOTIFICATION_CHANNEL_ID = "odin_one_vpn_runtime_system_v1"
     }
 }
 
@@ -1671,6 +1984,9 @@ private fun shouldKeepVpnServiceSticky(
 ): Boolean =
     when (action) {
         VpnRuntimeService.ACTION_STOP -> false
+        VpnRuntimeService.ACTION_SHOW_STATUS -> isActiveTunnelStatus(snapshot.status)
+        VpnRuntimeService.ACTION_QUICK_START -> true
+        VpnRuntimeService.ACTION_TOGGLE -> true
         VpnRuntimeService.ACTION_START -> true
         null -> snapshot.resumeEligible == true
         else -> snapshot.resumeEligible == true || isActiveTunnelStatus(snapshot.status)

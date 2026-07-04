@@ -1,27 +1,27 @@
 :root {
-  --bg: #e9ece2;
-  --bg-2: #dfe4d7;
-  --paper: #f8f9f2;
-  --glass: rgba(248, 249, 242, 0.62);
-  --glass-strong: rgba(248, 249, 242, 0.84);
-  --ink: #12170f;
-  --ink-2: #2c3326;
-  --muted: #707967;
-  --line: rgba(18, 23, 15, 0.12);
-  --line-2: rgba(18, 23, 15, 0.22);
+  --bg: #dde1da;
+  --bg-2: #e5e8e1;
+  --paper: #f4f5f0;
+  --glass: rgba(255, 255, 255, 0.55);
+  --glass-strong: rgba(255, 255, 255, 0.78);
+  --ink: #161a14;
+  --ink-2: #2b2f26;
+  --muted: #5a5e54;
+  --line: rgba(22, 26, 20, 0.16);
+  --line-2: rgba(22, 26, 20, 0.24);
   --lime: #d6f23b;
-  --lime-2: #aac51c;
-  --moss: #5e7947;
-  --success: #4d8150;
-  --warning: #b9903d;
-  --danger: #ad4638;
-  --font-heading: "Helvetica Neue", Helvetica, Arial, sans-serif;
-  --font-mono: "SFMono-Regular", "JetBrains Mono", Consolas, monospace;
-  --radius-xl: 38px;
-  --radius-lg: 26px;
-  --radius-md: 18px;
-  --shadow: 0 24px 80px rgba(35, 42, 28, 0.13), 0 8px 24px rgba(35, 42, 28, 0.08);
-  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --lime-2: #9bb614;
+  --moss: #5c8240;
+  --success: #4d8a4f;
+  --warning: #a97f24;
+  --danger: #b0463a;
+  --font-heading: "Red Hat Display", "Manrope", "Aptos", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+  --radius-xl: 28px;
+  --radius-lg: 20px;
+  --radius-md: 14px;
+  --shadow: 0 1px 0 rgba(22, 26, 20, 0.04), 0 14px 34px -14px rgba(22, 26, 20, 0.18);
+  --ease: cubic-bezier(0.32, 0.72, 0.24, 1);
 }
 
 * {
@@ -187,7 +187,7 @@ select {
   border: none;
   border-radius: 999px;
   background: transparent;
-  color: var(--line);
+  color: var(--muted);
   cursor: pointer;
   font-family: var(--font-mono), monospace;
   font-size: 0.78rem;
@@ -195,7 +195,7 @@ select {
 }
 
 .lang-button.is-active {
-  background: var(--line);
+  background: var(--ink);
   color: #fff;
 }
 
@@ -243,7 +243,7 @@ select {
   border: 1px solid transparent;
   border-radius: 999px;
   background: transparent;
-  color: var(--line);
+  color: var(--muted);
   cursor: pointer;
   font-family: var(--font-mono), monospace;
   letter-spacing: 0.08em;
@@ -253,7 +253,7 @@ select {
 }
 
 .workspace-tab.is-active {
-  background: var(--line);
+  background: var(--ink);
   color: #fff;
 }
 
@@ -348,7 +348,7 @@ select {
   border: none;
   outline: none;
   background: transparent;
-  color: var(--line);
+  color: var(--ink);
   font-size: 0.95rem;
 }
 
@@ -377,13 +377,13 @@ select {
 }
 
 .primary {
-  background: var(--line);
+  background: var(--ink);
   color: #fff;
 }
 
 .ghost {
   background: transparent;
-  color: var(--line);
+  color: var(--ink);
 }
 
 .primary:hover,

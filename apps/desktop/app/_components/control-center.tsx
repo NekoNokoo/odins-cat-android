@@ -1010,6 +1010,42 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined" || typeof document === "undefined") {
+      return;
+    }
+
+    const root = document.documentElement;
+    const updateViewportInsets = () => {
+      const viewport = window.visualViewport;
+      const viewportTopInset = viewport ? Math.max(0, viewport.offsetTop) : 0;
+      const viewportBottomInset = viewport
+        ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop)
+        : 0;
+      root.style.setProperty(
+        "--app-visual-viewport-top",
+        `${Math.ceil(viewportTopInset)}px`,
+      );
+      root.style.setProperty(
+        "--app-visual-viewport-bottom",
+        `${Math.ceil(viewportBottomInset)}px`,
+      );
+    };
+
+    updateViewportInsets();
+    window.addEventListener("resize", updateViewportInsets);
+    window.visualViewport?.addEventListener("resize", updateViewportInsets);
+    window.visualViewport?.addEventListener("scroll", updateViewportInsets);
+
+    return () => {
+      window.removeEventListener("resize", updateViewportInsets);
+      window.visualViewport?.removeEventListener("resize", updateViewportInsets);
+      window.visualViewport?.removeEventListener("scroll", updateViewportInsets);
+      root.style.removeProperty("--app-visual-viewport-top");
+      root.style.removeProperty("--app-visual-viewport-bottom");
+    };
+  }, []);
+
+  useEffect(() => {
     if (!speedTestCountdownEndsAt) {
       setSpeedTestCountdownRemainingMs(0);
       return;
@@ -1272,9 +1308,17 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
   const isBusy = (action: Exclude<PendingAction, null>) =>
     pendingAction === action;
   const vpnButtonBusy = isBusy("enableVpn") || isBusy("disableVpn");
+  const pendingVkCaptchaUrl = localTunnel?.pendingCaptchaUrl?.trim() ?? "";
+  const androidVkRelayWarmupPending = Boolean(
+    isAndroidClient &&
+      localTunnel?.runtimeFamily === "vk-relay" &&
+      localTunnel?.activationState === "active" &&
+      localTunnel?.status === "starting",
+  );
   const vpnActionActive =
     runtimeTunnelActive ||
     vpnModeActive ||
+    androidVkRelayWarmupPending ||
     (isAndroidClient && androidVpnVisualOverride);
   const vpnVisualActive = vpnActionActive;
   const modeTriggerError = Boolean(error) || localTunnel?.status === "failed";
@@ -1304,13 +1348,6 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
             ? t("whitelistResultCidrOnly")
             : t("whitelistResultMissing")
       : "";
-  const pendingVkCaptchaUrl = localTunnel?.pendingCaptchaUrl?.trim() ?? "";
-  const androidVkRelayWarmupPending = Boolean(
-    isAndroidClient &&
-      localTunnel?.runtimeFamily === "vk-relay" &&
-      localTunnel?.activationState === "active" &&
-      localTunnel?.status === "starting",
-  );
   const androidTunnelOperational = Boolean(
     isAndroidClient &&
       localTunnel?.status === "running" &&
@@ -1324,6 +1361,8 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     : "";
   const vpnButtonLabel = isBusy("disableVpn")
     ? t("disablingVpn")
+    : androidVkRelayWarmupPending
+      ? t("disableVpn")
     : vpnActionActive
       ? t("disableVpn")
       : isBusy("enableVpn") && !runtimeTunnelActive
@@ -1361,7 +1400,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     ? t("ready")
     : tunnelStatusLabel || t("tunnelStatusIdle");
   const primaryStatusText = vpnVisualActive
-    ? t("vpnEnabled")
+    ? androidVkRelayWarmupPending
+      ? t("enablingVpn")
+      : t("vpnEnabled")
     : t("vpnDisabled");
   const speedTestReady =
     runtimeTunnelActive && localTunnel?.status === "running" && !!localTunnel?.socksAddress;
@@ -1390,14 +1431,15 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
       })
     : null;
   const relayOwnerConnectAnimation =
-    (selectedAccessMode === "yandex-edge" ||
+    ((selectedAccessMode === "yandex-edge" ||
       selectedAccessMode === "yandex-edge-proxy" ||
       selectedAccessMode === "relay-via-server" ||
       selectedAccessMode === "relay-direct") &&
-    !vpnVisualActive &&
-    (isBusy("enableVpn") ||
-      isBusy("startTunnel") ||
-      localTunnel?.status === "starting");
+      !vpnVisualActive &&
+      (isBusy("enableVpn") ||
+        isBusy("startTunnel") ||
+        localTunnel?.status === "starting")) ||
+    androidVkRelayWarmupPending;
   const coreRuntimeLabel =
     coreHealth?.status === "ok" ? t("runtimeHealthy") : t("runtimeUnavailable");
   const profileCacheLabel = draft.host
@@ -2274,22 +2316,47 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
     if (typeof window === "undefined" || !isAndroidClient) {
       return;
     }
-    if (
-      localTunnel?.status !== "running" &&
-      localTunnel?.status !== "starting"
-    ) {
-      return;
-    }
 
     const intervalId = window.setInterval(
       () => {
+        if (typeof document !== "undefined" && document.hidden) {
+          return;
+        }
         void pollLocalTunnel(true);
       },
-      activeSheet === "logs" ? 4000 : 1500,
+      localTunnel?.status === "running" || localTunnel?.status === "starting"
+        ? activeSheet === "logs"
+          ? 4000
+          : 1500
+        : 3000,
     );
 
     return () => window.clearInterval(intervalId);
   }, [activeSheet, isAndroidClient, localTunnel?.status]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !isAndroidClient) {
+      return;
+    }
+
+    const refreshAndroidTunnelStatus = () => {
+      if (typeof document !== "undefined" && document.hidden) {
+        return;
+      }
+      void pollLocalTunnel(true);
+    };
+
+    window.addEventListener("focus", refreshAndroidTunnelStatus);
+    document.addEventListener("visibilitychange", refreshAndroidTunnelStatus);
+
+    return () => {
+      window.removeEventListener("focus", refreshAndroidTunnelStatus);
+      document.removeEventListener(
+        "visibilitychange",
+        refreshAndroidTunnelStatus,
+      );
+    };
+  }, [isAndroidClient]);
 
   useEffect(() => {
     if (!isAndroidClient) {
@@ -3387,6 +3454,9 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
         const proxyData = proxyRes.data;
         setLocalTunnel(tunnelData);
         setSystemProxy(proxyData);
+        if (isAndroidClient) {
+          setAndroidVpnVisualOverride(tunnelData.status === "running");
+        }
         if (tunnelData.status === "starting") {
           window.setTimeout(() => {
             void run();
@@ -4907,6 +4977,12 @@ export function ControlCenter({ onNetworkLensChange }: ControlCenterProps) {
                           (!vkLink.trim() || cooldownMinutes > 0))
                   }
                 >
+                  <span className="phone-connect__power" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" focusable="false">
+                      <path d="M12 2.75v8.5" />
+                      <path d="M7.1 6.35a7.5 7.5 0 1 0 9.8 0" />
+                    </svg>
+                  </span>
                   <span className="phone-connect__label">{vpnButtonLabel}</span>
                 </button>
 

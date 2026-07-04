@@ -6755,17 +6755,22 @@ object VpnRuntimeLibbox {
                 "-yandex-link"
             } else {
                 "-vk-link"
-            }
-        return listOf(
-            "-peer",
-            "$serverHost:$relayPort",
-            linkFlag,
-            link,
-            "-n",
-            normalizeVkTurnStreamCount(streamCount).toString(),
-            "-listen",
-            "127.0.0.1:$bridgePort",
-        )
+        }
+        val args =
+            mutableListOf(
+                "-peer",
+                "$serverHost:$relayPort",
+                linkFlag,
+                link,
+                "-n",
+                normalizeVkTurnStreamCount(streamCount).toString(),
+                "-listen",
+                "127.0.0.1:$bridgePort",
+            )
+        if (linkFlag == "-vk-link") {
+            args.add("-manual-captcha")
+        }
+        return args
     }
 
     private fun readVkTurnStreamCount(

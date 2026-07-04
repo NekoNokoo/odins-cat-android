@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">Odin\'s Cat 1.0.0 beta</string>
     <string name="main_activity_title">Odin\'s Cat 1.0.0 beta</string>
+    <string name="vpn_quick_settings_tile_label">Odin\'s Cat VPN</string>
 </resources>

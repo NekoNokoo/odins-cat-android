@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
+import android.util.Log
 import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
 import java.util.Locale
@@ -149,18 +150,13 @@ fun listInstalledApps(context: Context): List<InstalledAppInfoSnapshot> {
     val packageManager = context.packageManager
     val byPackage = linkedMapOf<String, InstalledAppInfoSnapshot>()
     val selectedPackages = SplitTunnelSelectionStore.read(context).excludePackages.toSet()
-    val installedApplications =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            packageManager.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0))
-        } else {
-            @Suppress("DEPRECATION")
-            packageManager.getInstalledApplications(0)
+    fun addApplication(applicationInfo: ApplicationInfo?) {
+        if (applicationInfo == null) {
+            return
         }
-
-    installedApplications.forEach { applicationInfo ->
         val packageName = applicationInfo.packageName?.trim().orEmpty()
         if (packageName.isBlank() || packageName == context.packageName) {
-            return@forEach
+            return
         }
 
         val systemApp =
@@ -171,11 +167,11 @@ fun listInstalledApps(context: Context): List<InstalledAppInfoSnapshot> {
                 packageManager.getLeanbackLaunchIntentForPackage(packageName) != null
         val shouldExpose = !systemApp || hasLauncherEntry || selectedPackages.contains(packageName)
         if (!shouldExpose) {
-            return@forEach
+            return
         }
 
         val label =
-            applicationInfo.loadLabel(packageManager)?.toString()?.trim().takeUnless { it.isNullOrBlank() }
+            applicationInfo.loadLabel(packageManager).toString().trim().takeUnless { it.isBlank() }
                 ?: packageName
 
         byPackage.putIfAbsent(
@@ -188,11 +184,48 @@ fun listInstalledApps(context: Context): List<InstalledAppInfoSnapshot> {
         )
     }
 
-    return byPackage.values.sortedWith(
+    runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            packageManager.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            packageManager.getInstalledApplications(0)
+        }
+    }.onSuccess { installedApplications ->
+        installedApplications.forEach(::addApplication)
+    }.onFailure { error ->
+        Log.w("VpnRuntimeSplitTunnel", "getInstalledApplications failed", error)
+    }
+
+    val launcherIntent =
+        Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_LAUNCHER)
+        }
+    runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            packageManager.queryIntentActivities(
+                launcherIntent,
+                PackageManager.ResolveInfoFlags.of(0),
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            packageManager.queryIntentActivities(launcherIntent, 0)
+        }
+    }.onSuccess { launcherActivities ->
+        launcherActivities.forEach { resolveInfo ->
+            addApplication(resolveInfo.activityInfo?.applicationInfo)
+        }
+    }.onFailure { error ->
+        Log.w("VpnRuntimeSplitTunnel", "query launcher activities failed", error)
+    }
+
+    val apps = byPackage.values.sortedWith(
         compareBy<InstalledAppInfoSnapshot>(
             { it.systemApp },
             { it.appName.lowercase(Locale.ROOT) },
             { it.packageName },
         ),
     )
+    Log.i("VpnRuntimeSplitTunnel", "listInstalledApps returned ${apps.size} apps")
+    return apps
 }
